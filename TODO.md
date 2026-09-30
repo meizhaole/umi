@@ -1,0 +1,3 @@
+- [ ] 将本机训练 checkpoint 接入 Gazebo 回放启动参数
+- [ ] 接通 Gazebo 相机与 UMI 推理观测
+- [ ] 将实时 UMI 策略接入 ReBot RS 实机控制链路

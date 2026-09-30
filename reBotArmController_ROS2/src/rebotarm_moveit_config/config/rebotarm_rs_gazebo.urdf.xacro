@@ -1,0 +1,27 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="ReBot_Arm_RS">
+  <xacro:arg name="initial_positions_file" default="$(find rebotarm_moveit_config)/config/initial_positions.yaml"/>
+
+  <xacro:include filename="$(find rebotarm_bringup)/description/RS/urdf/ReBot_Arm_RS.urdf"/>
+  <xacro:include filename="$(find rebotarm_moveit_config)/config/rebotarm_rs.ros2_control.xacro"/>
+
+  <link name="gripper_tcp"/>
+  <joint name="gripper_tcp_joint" type="fixed">
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <parent link="gripper_end"/>
+    <child link="gripper_tcp"/>
+  </joint>
+
+  <xacro:rebotarm_rs_ros2_control
+    name="RebotArmGazeboSystem"
+    initial_positions_file="$(arg initial_positions_file)"
+    hardware_plugin="gz_ros2_control/GazeboSimSystem"/>
+
+  <gazebo>
+    <plugin
+      filename="libgz_ros2_control-system.so"
+      name="gz_ros2_control::GazeboSimROS2ControlPlugin">
+      <parameters>$(find rebotarm_moveit_config)/config/ros2_controllers_rs.yaml</parameters>
+    </plugin>
+  </gazebo>
+</robot>
