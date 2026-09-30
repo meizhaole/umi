@@ -247,7 +247,7 @@ class UmiSimReplayNode(Node):
         seed_state = RobotState()
         arm_points = []
         gripper_points = []
-        for action in actions:
+        for action_index, action in enumerate(actions):
             if len(action) != 7 or not all(math.isfinite(value) for value in action):
                 raise ValueError("权重输出的动作必须是有限的 7 维末端动作")
             target_pose = self._pose_from_relative_action(
@@ -255,7 +255,61 @@ class UmiSimReplayNode(Node):
                 base_rotation,
                 action,
             )
-            seed_state = self._solve_ik(target_pose, seed_state)
+            try:
+                seed_state = self._solve_ik(target_pose, seed_state)
+            except (RuntimeError, TimeoutError) as error:
+                current_position = tuple(
+                    round(float(value), 6)
+                    for value in (
+                        base_translation.x,
+                        base_translation.y,
+                        base_translation.z,
+                    )
+                )
+                current_orientation = tuple(
+                    round(float(value), 6)
+                    for value in (
+                        base_rotation.x,
+                        base_rotation.y,
+                        base_rotation.z,
+                        base_rotation.w,
+                    )
+                )
+                target_position = tuple(
+                    round(float(value), 6)
+                    for value in (
+                        target_pose.pose.position.x,
+                        target_pose.pose.position.y,
+                        target_pose.pose.position.z,
+                    )
+                )
+                target_orientation = tuple(
+                    round(float(value), 6)
+                    for value in (
+                        target_pose.pose.orientation.x,
+                        target_pose.pose.orientation.y,
+                        target_pose.pose.orientation.z,
+                        target_pose.pose.orientation.w,
+                    )
+                )
+                action_values = tuple(round(float(value), 6) for value in action)
+                seed_joints = tuple(
+                    (name, round(float(position), 6))
+                    for name, position in zip(
+                        seed_state.joint_state.name,
+                        seed_state.joint_state.position,
+                    )
+                )
+                self.get_logger().error(
+                    f"IK 失败诊断：块内动作序号={action_index + 1}，"
+                    f"相对动作={action_values}，"
+                    f"当前 TCP（base_link）位姿=position {current_position}, "
+                    f"quaternion {current_orientation}；"
+                    f"目标 TCP 位姿=position {target_position}, "
+                    f"quaternion {target_orientation}；"
+                    f"seed 关节={seed_joints}；原因={error}"
+                )
+                raise
             joint_state = seed_state.joint_state
             joint_positions = dict(zip(joint_state.name, joint_state.position))
             arm_points.append([joint_positions[name] for name in ARM_JOINTS])
