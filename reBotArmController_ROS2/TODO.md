@@ -1,2 +1,3 @@
 - [x] 添加 Gazebo 仿真一键启动脚本
 - [x] 接入 Gazebo ros2_control 与 UMI 仿真回放节点
+- [x] 桥接 Gazebo 仿真时钟，确保 TF 与 UMI 回放使用同一仿真时间

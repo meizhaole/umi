@@ -51,6 +51,13 @@ def generate_launch_description():
     moveit_params["use_sim_time"] = True
     robot_description = moveit_config.robot_description["robot_description"]
 
+    clock_bridge = Node(
+        package="ros_gz_bridge",
+        executable="parameter_bridge",
+        name="gazebo_clock_bridge",
+        output="screen",
+        arguments=["/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock"],
+    )
     robot_state_publisher = Node(
         package="robot_state_publisher",
         executable="robot_state_publisher",
@@ -153,6 +160,7 @@ def generate_launch_description():
             DeclareLaunchArgument("start_step", default_value="15"),
             DeclareLaunchArgument("max_chunks", default_value="1"),
             DeclareLaunchArgument("device", default_value="cuda"),
+            clock_bridge,
             robot_state_publisher,
             static_base_tf,
             move_group,
