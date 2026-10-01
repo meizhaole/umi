@@ -113,9 +113,18 @@ export interface IKResidual {
   total: number;
 }
 
+export type IKTerminationReason =
+  | 'converged'
+  | 'max_iterations'
+  | 'linear_solve_failed'
+  | 'joint_limits_blocked'
+  | 'no_joint_motion';
+
 export interface IKResult {
   jointValues: JointValues;
   converged: boolean;
   iterations: number;
   residual: IKResidual;
+  terminationReason: IKTerminationReason;
+  blockedJoints: string[];
 }

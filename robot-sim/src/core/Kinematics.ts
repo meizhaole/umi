@@ -2,6 +2,7 @@ import type {
   IKOptions,
   IKResidual,
   IKResult,
+  IKTerminationReason,
   JointDescription,
   JointValues,
   Pose,
@@ -147,6 +148,8 @@ export class Kinematics {
     let current = this.forward(jointValues);
     let residual = this.measureResidual(targetPose, current.linkPoses[this.description.tipLink]);
     let iterations = 0;
+    let terminationReason: IKTerminationReason = 'max_iterations';
+    const blockedJointNames = new Set<string>();
 
     while (iterations < settings.maxIterations && !this.isConverged(residual, settings)) {
       const tipPose = current.linkPoses[this.description.tipLink];
@@ -186,12 +189,16 @@ export class Kinematics {
             .map((joint) => joint.name),
         );
         if (blockedJoints.size === 0) break;
+        blockedJoints.forEach((jointName) => blockedJointNames.add(jointName));
 
         // 触限关节若被要求继续越界，就从本轮雅可比中移除并重算其他关节的步长。
         activeVariables = activeVariables.filter((joint) => !blockedJoints.has(joint.name));
       }
 
-      if (!solved || activeVariables.length === 0) break;
+      if (!solved || activeVariables.length === 0) {
+        terminationReason = solved ? 'joint_limits_blocked' : 'linear_solve_failed';
+        break;
+      }
 
       const nextValues = { ...jointValues };
       activeVariables.forEach((joint, index) => {
@@ -206,6 +213,7 @@ export class Kinematics {
           (joint) => Math.abs(nextValues[joint.name] - jointValues[joint.name]) < 1e-10,
         )
       ) {
+        terminationReason = 'no_joint_motion';
         break;
       }
 
@@ -215,11 +223,17 @@ export class Kinematics {
       iterations += 1;
     }
 
+    const converged = this.isConverged(residual, settings);
+    if (converged) terminationReason = 'converged';
+    else if (iterations >= settings.maxIterations) terminationReason = 'max_iterations';
+
     return {
       jointValues,
-      converged: this.isConverged(residual, settings),
+      converged,
       iterations,
       residual,
+      terminationReason,
+      blockedJoints: Array.from(blockedJointNames),
     };
   }
 

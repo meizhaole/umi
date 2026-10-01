@@ -1,5 +1,6 @@
 import { Kinematics } from '../core/Kinematics';
 import { RobotModel } from '../core/RobotModel';
+import type { IKOptions } from '../core/types';
 import type { IkWorkerRequest, IkWorkerResponse, InferenceError } from '../app/inferenceProtocol';
 import { composePoses, quaternionFromAxisAngle } from '../utils/math';
 
@@ -9,6 +10,14 @@ interface WorkerScope {
 }
 
 const workerScope = self as unknown as WorkerScope;
+const IK_OPTIONS: IKOptions = {
+  maxIterations: 100,
+  damping: 0.05,
+  positionTolerance: 0.005,
+  orientationTolerance: 0.01,
+  maxAngularStep: 0.15,
+  maxLinearStep: 0.01,
+};
 
 const getGripperJoints = (description: IkWorkerRequest['description']) =>
   description.joints.filter(
@@ -79,7 +88,7 @@ workerScope.onmessage = (event) => {
             : ([0, 0, 0, 1] as [number, number, number, number]),
       };
       const targetPose = composePoses(request.startPose, deltaPose);
-      const result = kinematics.solveIK(targetPose, seed, { positionTolerance: 0.005 });
+      const result = kinematics.solveIK(targetPose, seed, IK_OPTIONS);
       if (!result.converged) {
         workerScope.postMessage({
           type: 'error',
@@ -88,9 +97,23 @@ workerScope.onmessage = (event) => {
             stage: 'ik',
             message: '动作目标未能收敛到机械臂可达范围。',
             action_index: actionIndex,
+            action,
+            start_pose: request.startPose,
+            target_pose: targetPose,
+            seed_joint_values: { ...seed },
             iterations: result.iterations,
             residual: result.residual,
             joint_values: result.jointValues,
+            ik_options: {
+              max_iterations: IK_OPTIONS.maxIterations,
+              damping: IK_OPTIONS.damping,
+              position_tolerance: IK_OPTIONS.positionTolerance,
+              orientation_tolerance: IK_OPTIONS.orientationTolerance,
+              max_angular_step: IK_OPTIONS.maxAngularStep,
+              max_linear_step: IK_OPTIONS.maxLinearStep,
+            },
+            termination_reason: result.terminationReason,
+            blocked_joints: result.blockedJoints,
           },
         });
         return;
