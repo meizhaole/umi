@@ -134,6 +134,10 @@ export const useInferenceReplay = ({
     publishDebugEvent('inference:observation_sent', {
       frame_index: observation.frame_index,
       image_bytes: Math.floor((observation.camera0_rgb.length * 3) / 4),
+      image_shape: [224, 224, 3],
+      robot0_eef_pos_m: observation.robot0_eef_pos,
+      robot0_eef_rot_axis_angle_rad: observation.robot0_eef_rot_axis_angle,
+      robot0_gripper_width_m: observation.robot0_gripper_width,
     });
   };
 
@@ -178,6 +182,9 @@ export const useInferenceReplay = ({
       frame_index: chunk.frame_index,
       last_chunk: chunk.last_chunk,
       action_count: chunk.actions.length,
+      action_layout: ['dx', 'dy', 'dz', 'rx', 'ry', 'rz', 'gripper_width'],
+      action_units: ['m', 'm', 'm', 'rad', 'rad', 'rad', 'm'],
+      actions: chunk.actions,
     });
 
     const worker =
@@ -241,6 +248,7 @@ export const useInferenceReplay = ({
         episode_index: chunk.episode_index,
         frame_index: chunk.frame_index,
         action_count: response.actions.length,
+        actions: response.actions,
       });
     };
 

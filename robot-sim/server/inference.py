@@ -4,7 +4,7 @@ import logging
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 if __package__:
-    from .action_log import record_action_chunk
+    from .action_log import record_action_chunk, record_observation
     from .inference_protocol import (
         read_chunk_or_stop,
         read_observation_or_stop,
@@ -14,7 +14,7 @@ if __package__:
     )
     from .load_model import ReplayError, ReplayWorker
 else:
-    from action_log import record_action_chunk
+    from action_log import record_action_chunk, record_observation
     from inference_protocol import (
         read_chunk_or_stop,
         read_observation_or_stop,
@@ -75,6 +75,7 @@ async def inference(websocket: WebSocket) -> None:
             frame_index = observation["frame_index"]
             worker.context = {"episode_index": 0, "frame_index": frame_index}
             await worker.send_observation(observation)
+            record_observation(observation)
             chunk = await read_chunk_or_stop(websocket, worker)
             if chunk is None:
                 await websocket.send_json({"type": "complete", "state": "stopped"})

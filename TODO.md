@@ -1,6 +1,7 @@
 - [x] 在 robot-sim 中实现 RS、DM 双型号浏览器仿真首版
 - [x] 接入官方 UMI 权重与仿真腕部相机在线推理
 - [x] 在 robot-sim 前端实时显示腕部相机画面
+- [x] 记录 UMI 在线推理输入与动作结果
 - [ ] 将本机训练 checkpoint 接入 Gazebo 回放启动参数
 - [ ] 接通 Gazebo 相机与 UMI 推理观测
 - [ ] 将实时 UMI 策略接入 ReBot RS 实机控制链路
