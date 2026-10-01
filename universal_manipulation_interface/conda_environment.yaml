@@ -39,6 +39,8 @@ dependencies:
   - aiofiles=23.2
   - pip:
     - --extra-index-url https://download.pytorch.org/whl/cu128
+    - fastapi==0.115.12
+    - uvicorn[standard]==0.34.2
     - torch==2.7.1+cu128
     - torchvision==0.22.1+cu128
     # diffusers 0.18.2 依赖 cached_download，该方法在 huggingface_hub 0.26 被移除

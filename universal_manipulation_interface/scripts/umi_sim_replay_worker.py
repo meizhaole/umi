@@ -4,6 +4,7 @@ import contextlib
 import json
 import pathlib
 import sys
+import traceback
 
 import numpy as np
 import torch
@@ -33,6 +34,11 @@ def parse_args():
     parser.add_argument("--episode-index", type=int, default=-1)
     parser.add_argument("--start-step", type=int, default=15)
     parser.add_argument("--max-chunks", type=int, default=1)
+    parser.add_argument(
+        "--complete-episode",
+        action="store_true",
+        help="输出所选验证 episode 从 start-step 开始的全部动作块",
+    )
     parser.add_argument("--device", default="cuda")
     return parser.parse_args()
 
@@ -81,7 +87,7 @@ def emit_chunks(args):
             continue
         selected_positions.append((sample_position, current_frame))
         next_frame = current_frame + frame_stride
-        if len(selected_positions) >= args.max_chunks:
+        if not args.complete_episode and len(selected_positions) >= args.max_chunks:
             break
 
     if not selected_positions:
@@ -99,8 +105,9 @@ def emit_chunks(args):
             sample["obs"],
             lambda value: value.unsqueeze(0).to(device),
         )
-        with torch.no_grad():
-            prediction = policy.predict_action(obs)["action"][0].float().cpu().numpy()
+        with contextlib.redirect_stdout(sys.stderr):
+            with torch.no_grad():
+                prediction = policy.predict_action(obs)["action"][0].float().cpu().numpy()
 
         action_chunk = prediction[:action_steps]
         relative_pose = mat_to_pose(pose10d_to_mat(action_chunk[:, :9]))
@@ -128,6 +135,7 @@ def main():
         emit_chunks(args)
     except Exception as error:
         print(f"[错误] {error}", file=sys.stderr, flush=True)
+        traceback.print_exc(file=sys.stderr)
         return 1
     return 0
 
