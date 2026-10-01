@@ -23,6 +23,7 @@ import { InferencePanel } from '../ui/InferencePanel';
 import { quaternionToRotationVector } from '../utils/math';
 import type { InferenceObservation } from './inferenceProtocol';
 import type { SimCameraFrame } from '../sim/sensors/WristCameraCapture';
+import { CAMERA_IMAGE_SIZE } from '../sim/sensors/CameraSensor';
 
 interface LoadedRobot {
   description: RobotDescription;
@@ -35,6 +36,7 @@ const DEFAULT_TARGET: Pose = {
   position: [0.35, 0, 0.45],
   orientation: [0, 0, 0, 1],
 };
+const CAMERA_PREVIEW_INTERVAL_MS = 100;
 
 export const App = () => {
   const [modelId, setModelId] = useState<RobotModelId>('RS');
@@ -48,7 +50,12 @@ export const App = () => {
   const [ikResult, setIkResult] = useState<IKResult | null>(null);
   const [ikMessage, setIkMessage] = useState('');
   const [physicsReady, setPhysicsReady] = useState(false);
+  const [cameraPreviewReady, setCameraPreviewReady] = useState(false);
   const cameraFramesRef = useRef<SimCameraFrame[]>([]);
+  const cameraPreviewCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const cameraPreviewImageDataRef = useRef<ImageData | null>(null);
+  const cameraPreviewLastDrawRef = useRef(0);
+  const cameraPreviewReadyRef = useRef(false);
   const observationIndexRef = useRef(0);
 
   const currentModel = findRobotConfig(modelId);
@@ -60,6 +67,11 @@ export const App = () => {
     setJointValues({});
     setCommands({});
     setPhysicsReady(false);
+    setCameraPreviewReady(false);
+    cameraPreviewReadyRef.current = false;
+    cameraPreviewImageDataRef.current = null;
+    cameraPreviewLastDrawRef.current = 0;
+    cameraFramesRef.current = [];
 
     const loadRobot = async () => {
       try {
@@ -95,6 +107,32 @@ export const App = () => {
   const tcpPose = loadedRobot?.model.getLinkPose() ?? null;
   const handleCameraFrame = useCallback((frame: SimCameraFrame) => {
     cameraFramesRef.current = [...cameraFramesRef.current.slice(-1), frame];
+
+    const now = performance.now();
+    if (now - cameraPreviewLastDrawRef.current < CAMERA_PREVIEW_INTERVAL_MS) return;
+
+    const canvas = cameraPreviewCanvasRef.current;
+    const context = canvas?.getContext('2d');
+    if (!canvas || !context) return;
+
+    const imageData =
+      cameraPreviewImageDataRef.current ??
+      context.createImageData(CAMERA_IMAGE_SIZE, CAMERA_IMAGE_SIZE);
+    cameraPreviewImageDataRef.current = imageData;
+    for (let sourceIndex = 0, targetIndex = 0; sourceIndex < frame.rgb.length; sourceIndex += 3) {
+      imageData.data[targetIndex] = frame.rgb[sourceIndex];
+      imageData.data[targetIndex + 1] = frame.rgb[sourceIndex + 1];
+      imageData.data[targetIndex + 2] = frame.rgb[sourceIndex + 2];
+      imageData.data[targetIndex + 3] = 255;
+      targetIndex += 4;
+    }
+    context.putImageData(imageData, 0, 0);
+    cameraPreviewLastDrawRef.current = now;
+
+    if (!cameraPreviewReadyRef.current) {
+      cameraPreviewReadyRef.current = true;
+      setCameraPreviewReady(true);
+    }
   }, []);
   const getObservation = useCallback((): InferenceObservation | null => {
     const frames = cameraFramesRef.current;
@@ -359,6 +397,32 @@ export const App = () => {
 
           <div className="viewport-frame">
             <div className="viewport-background-grid" />
+            <section className="camera-preview" aria-label="腕部相机预览">
+              <div className="camera-preview-header">
+                <div>
+                  <p className="eyebrow">WRIST CAMERA</p>
+                  <h2>相机画面</h2>
+                </div>
+                <span
+                  className={
+                    cameraPreviewReady ? 'camera-preview-status ready' : 'camera-preview-status'
+                  }
+                >
+                  {cameraPreviewReady ? '实时' : '等待'}
+                </span>
+              </div>
+              <div className="camera-preview-frame">
+                <canvas
+                  ref={cameraPreviewCanvasRef}
+                  width={CAMERA_IMAGE_SIZE}
+                  height={CAMERA_IMAGE_SIZE}
+                  aria-label="机械臂腕部相机实时画面"
+                  role="img"
+                />
+                {!cameraPreviewReady ? <span>等待腕部相机图像</span> : null}
+              </div>
+              <div className="camera-preview-meta">224 × 224 RGB</div>
+            </section>
             {loadedRobot ? (
               <SceneManager
                 commands={commands}
@@ -372,7 +436,7 @@ export const App = () => {
                 playback={inference.playback}
                 onPlaybackStep={applyReplayStep}
                 onPlaybackComplete={inference.completePlayback}
-                cameraEnabled={inference.isLocked}
+                cameraEnabled={Boolean(loadedRobot)}
                 tcpPose={tcpPose ?? DEFAULT_TARGET}
                 onCameraFrame={handleCameraFrame}
               />

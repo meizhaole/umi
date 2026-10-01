@@ -3,6 +3,7 @@ import { useFrame, useThree } from '@react-three/fiber';
 import { PerspectiveCamera, SRGBColorSpace, WebGLRenderTarget } from 'three';
 import type { URDFRobot } from 'urdf-loader';
 import type { JointValues, Pose, RobotDescription } from '../../core/types';
+import { CAMERA_IMAGE_SIZE } from './CameraSensor';
 
 export interface SimCameraFrame {
   timestamp: number;
@@ -21,10 +22,10 @@ interface WristCameraCaptureProps {
   onCapture: (frame: SimCameraFrame) => void;
 }
 
-const IMAGE_SIZE = 224;
+const IMAGE_SIZE = CAMERA_IMAGE_SIZE;
 const CAPTURE_INTERVAL_MS = 50;
 const CAMERA_MOUNT_POSITION: [number, number, number] = [0, 0, 0.055];
-const CAMERA_MOUNT_ROTATION: [number, number, number] = [0, Math.PI, 0];
+const CAMERA_MOUNT_ROTATION: [number, number, number] = [0, 1.355 - Math.PI / 2, 0];
 
 const getGripperWidth = (description: RobotDescription, jointValues: JointValues) =>
   description.joints
