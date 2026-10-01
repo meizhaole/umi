@@ -8,6 +8,7 @@ import type {
   InferenceError,
   InferenceStatus,
   PlaybackChunk,
+  InferenceObservation,
 } from './inferenceProtocol';
 
 const INFERENCE_SOCKET_URL = 'ws://localhost:8000/ws/inference';
@@ -17,6 +18,7 @@ interface ReplayContext {
   description: RobotDescription | null;
   jointValues: JointValues;
   tcpPose: Pose | null;
+  getObservation: () => InferenceObservation | null;
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -47,8 +49,7 @@ const parseServerError = (value: unknown): InferenceError => {
     ...candidate,
     code: typeof candidate.code === 'string' ? candidate.code : 'SERVER_ERROR',
     stage: typeof candidate.stage === 'string' ? candidate.stage : 'server',
-    message:
-      typeof candidate.message === 'string' ? candidate.message : '后端回放服务返回错误。',
+    message: typeof candidate.message === 'string' ? candidate.message : '后端推理服务返回错误。',
   };
 };
 
@@ -56,13 +57,14 @@ export const useInferenceReplay = ({
   description,
   jointValues,
   tcpPose,
+  getObservation,
 }: ReplayContext) => {
   const [status, setStatus] = useState<InferenceStatus>('idle');
   const [progress, setProgress] = useState('');
   const [error, setError] = useState<InferenceError | null>(null);
   const [playback, setPlayback] = useState<PlaybackChunk | null>(null);
   const statusRef = useRef(status);
-  const contextRef = useRef<ReplayContext>({ description, jointValues, tcpPose });
+  const contextRef = useRef<ReplayContext>({ description, jointValues, tcpPose, getObservation });
   const socketRef = useRef<WebSocket | null>(null);
   const workerRef = useRef<Worker | null>(null);
   const workerTimeoutRef = useRef<number | null>(null);
@@ -71,7 +73,7 @@ export const useInferenceReplay = ({
   const playbackTokenRef = useRef(0);
   const mountedRef = useRef(true);
 
-  contextRef.current = { description, jointValues, tcpPose };
+  contextRef.current = { description, jointValues, tcpPose, getObservation };
 
   const updateStatus = (nextStatus: InferenceStatus) => {
     statusRef.current = nextStatus;
@@ -117,6 +119,22 @@ export const useInferenceReplay = ({
     } else {
       closeSocket(4000, 'inference failed');
     }
+  };
+
+  const sendObservation = (socket: WebSocket) => {
+    const observation = contextRef.current.getObservation();
+    if (!observation) {
+      fail(
+        { code: 'CAMERA_NOT_READY', stage: 'observation', message: '腕部相机尚未生成有效图像。' },
+        true,
+      );
+      return;
+    }
+    socket.send(JSON.stringify({ type: 'observation', ...observation }));
+    publishDebugEvent('inference:observation_sent', {
+      frame_index: observation.frame_index,
+      image_bytes: Math.floor((observation.camera0_rgb.length * 3) / 4),
+    });
   };
 
   const handleActionChunk = (chunk: ActionChunk) => {
@@ -189,9 +207,7 @@ export const useInferenceReplay = ({
       if (response.type === 'progress') {
         activeActionIndexRef.current = response.actionIndex;
         if (mountedRef.current) {
-          setProgress(
-            '正在求解 IK：' + (response.actionIndex + 1) + '/' + response.total,
-          );
+          setProgress('正在求解 IK：' + (response.actionIndex + 1) + '/' + response.total);
         }
         return;
       }
@@ -359,8 +375,14 @@ export const useInferenceReplay = ({
           (message.status === 'loading' || message.state === 'loading')
         ) {
           updateStatus('loading');
-          if (mountedRef.current) setProgress('后端正在加载官方权重与数据');
+          if (mountedRef.current) setProgress('后端正在加载官方权重');
           publishDebugEvent('inference:status', message);
+          return;
+        }
+        if (message.type === 'status' && message.state === 'ready') {
+          if (mountedRef.current) setProgress('官方权重已就绪，发送相机观测');
+          updateStatus('waiting');
+          sendObservation(socket);
           return;
         }
         if (message.type === 'action_chunk') {
@@ -385,7 +407,7 @@ export const useInferenceReplay = ({
           const wasStopped = message.state === 'stopped';
           if (mountedRef.current) {
             setPlayback(null);
-            setProgress(wasStopped ? '回放已停止' : '完整回放片段已完成');
+            setProgress(wasStopped ? '推理已停止' : '完整回放片段已完成');
           }
           if (statusRef.current !== 'error') {
             updateStatus(wasStopped ? 'stopped' : 'complete');
@@ -434,10 +456,7 @@ export const useInferenceReplay = ({
               code: 'WEBSOCKET_CLOSED',
               stage: 'connection',
               message:
-                '推理连接已关闭（' +
-                event.code +
-                '）：' +
-                (event.reason || '未收到结束事件'),
+                '推理连接已关闭（' + event.code + '）：' + (event.reason || '未收到结束事件'),
             },
             false,
           );
@@ -463,7 +482,7 @@ export const useInferenceReplay = ({
     activeActionIndexRef.current = null;
     if (mountedRef.current) {
       setPlayback(null);
-      setProgress('回放已停止');
+      setProgress('推理已停止');
     }
     updateStatus('stopped');
     publishDebugEvent('inference:stop', { reason: 'user' });
@@ -480,9 +499,10 @@ export const useInferenceReplay = ({
     activeChunkRef.current = null;
     if (mountedRef.current) {
       setPlayback(null);
-      setProgress('已确认动作块 ' + chunk.frame_index + '，等待下一块');
+      setProgress('已确认动作块 ' + chunk.frame_index + '，等待下一轮观测');
     }
     updateStatus('waiting');
+    sendObservation(socket);
     publishDebugEvent('inference:ack', {
       episode_index: chunk.episode_index,
       frame_index: chunk.frame_index,

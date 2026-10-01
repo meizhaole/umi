@@ -17,7 +17,7 @@ const STATUS_LABELS: Record<InferenceStatus, string> = {
   computing: '求解 IK',
   playing: '动作播放中',
   waiting: '等待下一动作',
-  complete: '回放完成',
+  complete: '推理完成',
   stopped: '已停止',
   error: '发生错误',
 };
@@ -35,12 +35,12 @@ export const InferencePanel = ({
     <div className="panel-heading">
       <div>
         <p className="eyebrow">OFFICIAL UMI CHECKPOINT</p>
-        <h2>策略回放</h2>
+        <h2>相机在线推理</h2>
       </div>
       <span className={'inference-status ' + status}>{STATUS_LABELS[status]}</span>
     </div>
     <p className="inference-progress" aria-live="polite">
-      {progress || '使用官方权重逐块订阅动作并驱动当前机械臂'}
+      {progress || '腕部虚拟相机输入 224×224 RGB 图像，官方权重逐块预测动作'}
     </p>
     <div className="inference-actions">
       <button
@@ -49,14 +49,9 @@ export const InferencePanel = ({
         onClick={onStart}
         type="button"
       >
-        开始回放
+        开始推理
       </button>
-      <button
-        className="secondary-button"
-        disabled={!isLocked}
-        onClick={onStop}
-        type="button"
-      >
+      <button className="secondary-button" disabled={!isLocked} onClick={onStop} type="button">
         停止
       </button>
     </div>

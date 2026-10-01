@@ -1,6 +1,6 @@
 # UMI 推理 WebSocket
 
-robot-sim 通过 FastAPI 订阅现有 UMI 回放 worker。推理使用官方权重 `universal_manipulation_interface/data/pretrained/cup_wild_vit_l_1img.ckpt` 和本地数据集 `universal_manipulation_interface/data/cup_in_the_wild.zarr.zip`。动作来自验证集回放，不读取浏览器实时相机帧。
+robot-sim 通过 FastAPI WebSocket 将仿真腕部相机图像与机械臂状态送给 UMI 推理 worker。推理使用官方权重 `universal_manipulation_interface/data/pretrained/cup_wild_vit_l_1img.ckpt`，不读取离线数据集。
 
 ## 启动
 
@@ -28,19 +28,25 @@ cd /home/pan/桌面/umi/robot-sim
 pnpm dev
 ```
 
-页面中点击“开始回放”后，前端连接 `ws://localhost:8000/ws/inference`。服务端一次只接受一个活跃订阅。回放从 worker 默认验证 episode 和起始帧开始，发送该 episode 的全部动作块。
+前端启动后选择 RS 或 DM 型号，运行仿真并点击“开始推理”。服务连接 `ws://localhost:8000/ws/inference`，加载官方权重后，每轮采集末端腕部相机图像与最近两帧末端状态，服务端根据当前观测预测一块动作。动作块播放完并 ACK 后才发送下一轮观测。服务端一次只接受一个活跃订阅。
 
 推理生成的每个动作块会追加记录到 `robot-sim/server/logs/inference-actions.jsonl`。日志按 JSONL 保存 UTC 时间、episode/frame、末块标记和动作数组；达到 10 MiB 后轮转，最多保留 5 个备份。
 
 ## 消息协议
 
-连接后服务端先发送加载状态：
+虚拟相机安装在 URDF 的末端 link，输出 224×224 RGB 图像；视场角为 60°，相机外参为仿真近似值。连接后服务端先发送加载状态：
 
 ```json
 {"type":"status","state":"loading"}
 ```
 
-模型载入后逐块发送动作。每个动作是 `[dx, dy, dz, rx, ry, rz, grip_width]`，位置和夹爪宽度单位为米，旋转是弧度轴角；块内动作都相对于块开始时的 TCP 位姿。
+模型载入后发送 `{"type":"status","state":"ready"}` 并等待观测。前端观测消息示例：
+
+```json
+{"type":"observation","frame_index":0,"camera0_rgb":"<base64 RGB>","robot0_eef_pos":[[0,0,0],[0,0,0]],"robot0_eef_rot_axis_angle":[[0,0,0],[0,0,0]],"robot0_gripper_width":[[0],[0]]}
+```
+
+服务收到观测后逐块发送动作。每个动作是 `[dx, dy, dz, rx, ry, rz, grip_width]`，位置和夹爪宽度单位为米，旋转是弧度轴角；块内动作都相对于块开始时的 TCP 位姿。
 
 ```json
 {
@@ -60,6 +66,6 @@ pnpm dev
 {"type":"ack","frame_index":15}
 ```
 
-服务端收到确认后继续读取 worker。前端也可以发送 `{"type":"stop"}` 停止回放。最后一块确认后服务端发送 `complete` 并关闭连接。
+服务端收到确认后等待下一帧观测。前端也可以发送 `{"type":"stop"}` 停止推理。前端发送 `stop` 后服务端发送 `complete` 并关闭连接。
 
 失败时服务端发送 `error`，包括 `code`、`stage`、`message`，以及适用时的 `episode_index`、`frame_index`、`action_index`、`iterations` 和位置、姿态残差。ACK 等待上限为 2 秒，超时后服务端先发送错误，再关闭连接并清理 worker。

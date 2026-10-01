@@ -1,4 +1,4 @@
-# 管理官方 UMI 权重回放 worker 的启动、通信与清理
+# 管理官方 UMI 权重 worker 的启动、通信与清理
 import asyncio
 import json
 import logging
@@ -16,7 +16,6 @@ ROOT_DIR = pathlib.Path(__file__).resolve().parents[2]
 UMI_DIR = ROOT_DIR / "universal_manipulation_interface"
 WORKER_SCRIPT = UMI_DIR / "scripts" / "umi_sim_replay_worker.py"
 CHECKPOINT_PATH = UMI_DIR / "data" / "pretrained" / "cup_wild_vit_l_1img.ckpt"
-DATASET_PATH = UMI_DIR / "data" / "cup_in_the_wild.zarr.zip"
 MAX_WORKER_LINE_BYTES = 1024 * 1024
 STDERR_LINE_COUNT = 80
 STDERR_DETAILS_MAX_CHARS = 6000
@@ -89,13 +88,10 @@ class ReplayWorker:
             str(WORKER_SCRIPT),
             "--checkpoint",
             str(CHECKPOINT_PATH),
-            "--dataset",
-            str(DATASET_PATH),
-            "--complete-episode",
         ]
 
     async def start(self):
-        for path in (WORKER_SCRIPT, CHECKPOINT_PATH, DATASET_PATH):
+        for path in (WORKER_SCRIPT, CHECKPOINT_PATH):
             if not path.is_file():
                 raise ReplayError(
                     "input_missing",
@@ -239,29 +235,60 @@ class ReplayWorker:
 
         return chunk
 
-    async def send_continue(self):
+
+    async def read_ready(self):
         try:
-            self.process.stdin.write(b"continue\n")
+            line = await asyncio.wait_for(
+                self.process.stdout.readline(),
+                timeout=180.0,
+            )
+        except asyncio.TimeoutError as error:
+            raise ReplayError(
+                "model_load_timeout",
+                "load_model",
+                "官方 UMI 权重加载超过 180 秒",
+                details=self.stderr_details,
+            ) from error
+        if not line:
+            return_code = await self.process.wait()
+            await self._join_stderr()
+            raise ReplayError(
+                "model_load_failed",
+                "load_model",
+                f"UMI worker 未就绪，退出码为 {return_code}",
+                details=self.stderr_details,
+            )
+        try:
+            message = json.loads(line)
+        except json.JSONDecodeError as error:
+            raise ReplayError(
+                "invalid_worker_output",
+                "load_model",
+                "worker 就绪消息不是有效 JSON",
+                details=str(error),
+            ) from error
+        if not isinstance(message, dict) or message.get("type") != "ready":
+            raise ReplayError(
+                "model_load_failed",
+                "load_model",
+                "worker 没有发送模型就绪消息",
+                details=str(message),
+            )
+
+    async def send_observation(self, observation):
+        try:
+            self.process.stdin.write(
+                json.dumps(observation, separators=(",", ":")).encode("utf-8") + b"\n"
+            )
             await self.process.stdin.drain()
         except (BrokenPipeError, ConnectionResetError) as error:
             raise ReplayError(
                 "worker_stdin_failed",
-                "continue_replay",
-                "无法通知 worker 继续输出下一个动作块",
+                "predict_action",
+                "无法将仿真观测发送给 UMI worker",
                 details=str(error),
                 context=self.context,
             ) from error
-
-    async def wait_for_success(self):
-        return_code = await self.wait_for_process_exit()
-        if return_code != 0:
-            raise ReplayError(
-                "worker_failed",
-                "complete_replay",
-                f"UMI worker 异常退出，退出码为 {return_code}",
-                details=self.stderr_details,
-                context=self.context,
-            )
 
     async def wait_for_process_exit(self):
         return_code = await self.process.wait()

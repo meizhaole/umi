@@ -1,4 +1,4 @@
-# 组装 UMI 回放订阅流程和 WebSocket 路由
+# 组装 UMI 在线推理 WebSocket 路由
 import logging
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -7,6 +7,7 @@ if __package__:
     from .action_log import record_action_chunk
     from .inference_protocol import (
         read_chunk_or_stop,
+        read_observation_or_stop,
         send_error,
         serialize_action_chunk,
         wait_for_ack,
@@ -16,6 +17,7 @@ else:
     from action_log import record_action_chunk
     from inference_protocol import (
         read_chunk_or_stop,
+        read_observation_or_stop,
         send_error,
         serialize_action_chunk,
         wait_for_ack,
@@ -61,12 +63,22 @@ async def inference(websocket: WebSocket) -> None:
     try:
         await websocket.send_json({"type": "status", "state": "loading"})
         await worker.start()
-        chunk = await read_chunk_or_stop(websocket, worker)
-        if chunk is None:
-            await websocket.send_json({"type": "complete", "state": "stopped"})
-            return
+        await worker.read_ready()
+        await websocket.send_json({"type": "status", "state": "ready"})
 
         while True:
+            observation = await read_observation_or_stop(websocket)
+            if observation is None:
+                await websocket.send_json({"type": "complete", "state": "stopped"})
+                return
+
+            frame_index = observation["frame_index"]
+            worker.context = {"episode_index": 0, "frame_index": frame_index}
+            await worker.send_observation(observation)
+            chunk = await read_chunk_or_stop(websocket, worker)
+            if chunk is None:
+                await websocket.send_json({"type": "complete", "state": "stopped"})
+                return
             serialized = serialize_action_chunk(chunk)
             record_action_chunk(chunk)
             await websocket.send_text(serialized)
@@ -76,35 +88,16 @@ async def inference(websocket: WebSocket) -> None:
                     {
                         "type": "complete",
                         "state": "stopped",
-                        "episode_index": chunk["episode_index"],
-                        "frame_index": chunk["frame_index"],
+                        "frame_index": frame_index,
                     }
                 )
-                return
-
-            if chunk["last_chunk"]:
-                await worker.wait_for_success()
-                await websocket.send_json(
-                    {
-                        "type": "complete",
-                        "state": "completed",
-                        "episode_index": chunk["episode_index"],
-                        "frame_index": chunk["frame_index"],
-                    }
-                )
-                return
-
-            await worker.send_continue()
-            chunk = await read_chunk_or_stop(websocket, worker)
-            if chunk is None:
-                await websocket.send_json({"type": "complete", "state": "stopped"})
                 return
 
     except WebSocketDisconnect:
         LOGGER.info("推理订阅客户端断开")
     except ReplayError as error:
         LOGGER.error(
-            "推理回放失败 code=%s stage=%s details=%s",
+            "在线推理失败 code=%s stage=%s details=%s",
             error.code,
             error.stage,
             error.details or "",

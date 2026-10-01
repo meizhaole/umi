@@ -3,6 +3,8 @@ import type { URDFRobot } from 'urdf-loader';
 import URDFLoader from 'urdf-loader';
 import type { JointValues } from '../core/types';
 import { SIMULATION_CONFIG } from '../app/config';
+import type { RobotDescription, Pose } from '../core/types';
+import { WristCameraCapture, type SimCameraFrame } from '../sim/sensors/WristCameraCapture';
 
 interface URDFViewerProps {
   modelId: string;
@@ -10,6 +12,10 @@ interface URDFViewerProps {
   jointValues: JointValues;
   onError: (message: string) => void;
   onLoaded: () => void;
+  description: RobotDescription;
+  cameraEnabled: boolean;
+  tcpPose: Pose;
+  onCameraFrame: (frame: SimCameraFrame) => void;
 }
 
 export const URDFViewer = ({
@@ -18,6 +24,10 @@ export const URDFViewer = ({
   jointValues,
   onError,
   onLoaded,
+  description,
+  cameraEnabled,
+  tcpPose,
+  onCameraFrame,
 }: URDFViewerProps) => {
   const [robot, setRobot] = useState<URDFRobot | null>(null);
 
@@ -53,5 +63,17 @@ export const URDFViewer = ({
     robot.setJointValues(jointValues);
   }, [jointValues, robot]);
 
-  return robot ? <primitive object={robot} /> : null;
+  return robot ? (
+    <>
+      <primitive object={robot} />
+      <WristCameraCapture
+        description={description}
+        enabled={cameraEnabled}
+        jointValues={jointValues}
+        onCapture={onCameraFrame}
+        eefPose={tcpPose}
+        robot={robot}
+      />
+    </>
+  ) : null;
 };

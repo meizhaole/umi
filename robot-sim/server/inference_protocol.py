@@ -1,4 +1,4 @@
-# 处理 UMI 回放 WebSocket 的消息协议
+# 处理 UMI 在线推理 WebSocket 的消息协议
 import asyncio
 import json
 
@@ -210,3 +210,34 @@ async def read_chunk_or_stop(websocket: WebSocket, worker):
     receive_task.cancel()
     await asyncio.gather(receive_task, return_exceptions=True)
     return chunk_task.result()
+
+
+async def read_observation_or_stop(websocket: WebSocket):
+    raw_message = await websocket.receive_text()
+    try:
+        message = json.loads(raw_message)
+    except json.JSONDecodeError as error:
+        raise ReplayError(
+            "invalid_message",
+            "read_observation",
+            "客户端观测不是有效 JSON",
+            details=str(error),
+        ) from error
+    if not isinstance(message, dict):
+        raise ReplayError("invalid_message", "read_observation", "客户端消息必须是 JSON 对象")
+    if message.get("type") == "stop":
+        return None
+    if message.get("type") != "observation":
+        raise ReplayError("invalid_message", "read_observation", "客户端消息 type 必须是 observation 或 stop")
+    frame_index = message.get("frame_index")
+    if isinstance(frame_index, bool) or not isinstance(frame_index, int) or frame_index < 0:
+        raise ReplayError("invalid_observation", "read_observation", "frame_index 必须是非负整数")
+    size = len(raw_message.encode("utf-8"))
+    if size > MAX_WEBSOCKET_MESSAGE_BYTES:
+        raise ReplayError(
+            "message_too_large",
+            "read_observation",
+            f"仿真观测为 {size} 字节，超过 1 MiB 限制",
+            context={"frame_index": frame_index},
+        )
+    return message

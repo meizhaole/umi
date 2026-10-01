@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { JointController } from '../core/JointController';
 import { Kinematics } from '../core/Kinematics';
 import { RobotModel } from '../core/RobotModel';
@@ -20,6 +20,9 @@ import { JointPanel } from '../ui/JointPanel';
 import { StatusBar } from '../ui/StatusBar';
 import { TaskPanel } from '../ui/TaskPanel';
 import { InferencePanel } from '../ui/InferencePanel';
+import { quaternionToRotationVector } from '../utils/math';
+import type { InferenceObservation } from './inferenceProtocol';
+import type { SimCameraFrame } from '../sim/sensors/WristCameraCapture';
 
 interface LoadedRobot {
   description: RobotDescription;
@@ -45,6 +48,8 @@ export const App = () => {
   const [ikResult, setIkResult] = useState<IKResult | null>(null);
   const [ikMessage, setIkMessage] = useState('');
   const [physicsReady, setPhysicsReady] = useState(false);
+  const cameraFramesRef = useRef<SimCameraFrame[]>([]);
+  const observationIndexRef = useRef(0);
 
   const currentModel = findRobotConfig(modelId);
 
@@ -88,10 +93,33 @@ export const App = () => {
   }, [currentModel.file, modelId]);
 
   const tcpPose = loadedRobot?.model.getLinkPose() ?? null;
+  const handleCameraFrame = useCallback((frame: SimCameraFrame) => {
+    cameraFramesRef.current = [...cameraFramesRef.current.slice(-1), frame];
+  }, []);
+  const getObservation = useCallback((): InferenceObservation | null => {
+    const frames = cameraFramesRef.current;
+    const latest = frames[frames.length - 1];
+    if (!latest || frames.length === 0) return null;
+    const history = frames.length > 1 ? frames.slice(-2) : [latest, latest];
+    let binary = '';
+    for (let offset = 0; offset < latest.rgb.length; offset += 0x8000) {
+      binary += String.fromCharCode(...latest.rgb.subarray(offset, offset + 0x8000));
+    }
+    return {
+      frame_index: observationIndexRef.current++,
+      camera0_rgb: btoa(binary),
+      robot0_eef_pos: history.map((frame) => [...frame.eefPose.position]),
+      robot0_eef_rot_axis_angle: history.map((frame) =>
+        quaternionToRotationVector(frame.eefPose.orientation),
+      ),
+      robot0_gripper_width: history.map((frame) => [frame.gripperWidth]),
+    };
+  }, []);
   const inference = useInferenceReplay({
     description: loadedRobot?.description ?? null,
     jointValues,
     tcpPose,
+    getObservation,
   });
 
   const setControlMode = (nextMode: ControlMode) => {
@@ -344,6 +372,9 @@ export const App = () => {
                 playback={inference.playback}
                 onPlaybackStep={applyReplayStep}
                 onPlaybackComplete={inference.completePlayback}
+                cameraEnabled={inference.isLocked}
+                tcpPose={tcpPose ?? DEFAULT_TARGET}
+                onCameraFrame={handleCameraFrame}
               />
             ) : (
               <div className="loading-state">

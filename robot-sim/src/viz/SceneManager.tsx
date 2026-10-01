@@ -8,6 +8,8 @@ import type { ControlMode, JointCommand, JointValues, RobotDescription } from '.
 import { PhysicsWorld } from '../sim/PhysicsWorld';
 import { RobotBody } from '../sim/RobotBody';
 import { URDFViewer } from './URDFViewer';
+import type { SimCameraFrame } from '../sim/sensors/WristCameraCapture';
+import type { Pose } from '../core/types';
 
 interface SceneManagerProps {
   modelId: RobotModelId;
@@ -21,6 +23,9 @@ interface SceneManagerProps {
   onPhysicsReady: (ready: boolean) => void;
   onPlaybackStep: (values: JointValues) => void;
   onPlaybackComplete: (token: number) => void;
+  cameraEnabled: boolean;
+  tcpPose: Pose;
+  onCameraFrame: (frame: SimCameraFrame) => void;
 }
 
 const PLAYBACK_STEP_SECONDS = 0.05;
@@ -86,6 +91,9 @@ export const SceneManager = ({
   onPhysicsReady,
   onPlaybackStep,
   onPlaybackComplete,
+  cameraEnabled,
+  tcpPose,
+  onCameraFrame,
 }: SceneManagerProps) => {
   const model = findRobotConfig(modelId);
   const handleViewerError = useCallback((message: string) => {
@@ -106,11 +114,7 @@ export const SceneManager = ({
       <pointLight color="#5ce1c5" intensity={8} position={[1.5, 0.2, -2]} />
       <gridHelper args={[3.5, 35, '#315056', '#1d2c35']} position={[0, -0.012, 0]} />
       <axesHelper args={[0.3]} />
-      <ActionPlayback
-        onComplete={onPlaybackComplete}
-        onStep={onPlaybackStep}
-        playback={playback}
-      />
+      <ActionPlayback onComplete={onPlaybackComplete} onStep={onPlaybackStep} playback={playback} />
       <Physics
         colliders={false}
         gravity={SIMULATION_CONFIG.gravity}
@@ -133,6 +137,10 @@ export const SceneManager = ({
           modelId={modelId}
           onError={handleViewerError}
           onLoaded={handleViewerLoaded}
+          description={description}
+          cameraEnabled={cameraEnabled}
+          tcpPose={tcpPose}
+          onCameraFrame={onCameraFrame}
           urdfFile={model.file}
         />
       </Suspense>

@@ -56,3 +56,11 @@ export type InferenceStatus =
   | 'complete'
   | 'stopped'
   | 'error';
+
+export interface InferenceObservation {
+  frame_index: number;
+  camera0_rgb: string;
+  robot0_eef_pos: number[][];
+  robot0_eef_rot_axis_angle: number[][];
+  robot0_gripper_width: number[][];
+}
