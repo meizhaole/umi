@@ -30,7 +30,7 @@ pnpm dev
 
 前端启动后选择 RS 或 DM 型号，运行仿真并点击“推理一步”。服务连接 `ws://localhost:8000/ws/inference`，加载官方权重后，每次点击采集腕部相机图像与最近两帧末端状态，服务端预测动作序列并只执行第一步。动作完成并 ACK 后等待再次点击，再采集观测推理下一步。服务端一次只接受一个活跃订阅。
 
-推理生成的每个动作块会追加记录到 `robot-sim/server/logs/inference-actions.jsonl`。日志按 JSONL 保存 UTC 时间、episode/frame、末块标记和动作数组；达到 10 MiB 后轮转，最多保留 5 个备份。
+IK 求得的每个动作目标会记录到 `robot-sim/server/logs/inference-actions.csv`。第一列是连续步号，后续列是各旋转关节角（rad）；最多保留最近 30 条数据。IK 未收敛时会记录最后一次关节角估计。
 
 ## 消息协议
 
@@ -63,8 +63,10 @@ pnpm dev
 前端在 Web Worker 中计算整块 IK，本地 watchdog 为 1 秒；超时会终止 Worker 并发送 `stop`。动作块完整播放后前端确认，`frame_index` 必须与当前块匹配：
 
 ```json
-{"type":"ack","frame_index":15}
+{"type":"ack","frame_index":15,"joint_angles":[{"joint1":0.1,"joint2":-0.2}]}
 ```
+
+`joint_angles` 是可选字段，每个对象对应动作块内的一步；服务端只记录旋转关节，其余字段不写入角度 CSV。`stop` 消息也可以携带相同字段。
 
 服务端收到确认后等待下一帧观测。前端也可以发送 `{"type":"stop"}` 停止推理。前端发送 `stop` 后服务端发送 `complete` 并关闭连接。
 

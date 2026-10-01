@@ -30,6 +30,7 @@ export interface InferenceError {
   action_index?: number;
   iterations?: number;
   residual?: unknown;
+  joint_values?: JointValues;
   [key: string]: unknown;
 }
 

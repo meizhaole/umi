@@ -1,6 +1,7 @@
 # 处理 UMI 在线推理 WebSocket 的消息协议
 import asyncio
 import json
+import math
 
 from fastapi import WebSocket, WebSocketDisconnect
 
@@ -12,6 +13,36 @@ else:
 
 ACK_TIMEOUT_SECONDS = 2.0
 MAX_WEBSOCKET_MESSAGE_BYTES = 1024 * 1024
+
+
+def _read_joint_angles(message: dict, context: dict) -> list[dict[str, float]]:
+    joint_angles = message.get("joint_angles", [])
+    if not isinstance(joint_angles, list):
+        raise ReplayError(
+            "invalid_joint_angles",
+            "wait_for_ack",
+            "joint_angles 必须是关节角对象数组",
+            context=context,
+        )
+
+    for action_index, angles in enumerate(joint_angles):
+        if not isinstance(angles, dict) or not angles or any(
+            not isinstance(name, str)
+            or not name
+            or name == "step"
+            or isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            for name, value in angles.items()
+        ):
+            raise ReplayError(
+                "invalid_joint_angles",
+                "wait_for_ack",
+                "每步关节角必须包含有限数值",
+                context={**context, "action_index": action_index},
+            )
+
+    return joint_angles
 
 
 async def send_error(websocket: WebSocket, error: ReplayError) -> None:
@@ -63,7 +94,11 @@ def serialize_action_chunk(chunk: dict) -> str:
     return serialized
 
 
-async def wait_for_ack(websocket: WebSocket, worker, chunk: dict) -> bool:
+async def wait_for_ack(
+    websocket: WebSocket,
+    worker,
+    chunk: dict,
+) -> tuple[bool, list[dict[str, float]]]:
     frame_index = chunk["frame_index"]
     context = {
         "episode_index": chunk["episode_index"],
@@ -133,7 +168,7 @@ async def wait_for_ack(websocket: WebSocket, worker, chunk: dict) -> bool:
         )
 
     if message.get("type") == "stop":
-        return False
+        return False, _read_joint_angles(message, context)
 
     if message.get("type") != "ack":
         raise ReplayError(
@@ -157,7 +192,7 @@ async def wait_for_ack(websocket: WebSocket, worker, chunk: dict) -> bool:
             context=context,
         )
 
-    return True
+    return True, _read_joint_angles(message, context)
 
 
 async def read_chunk_or_stop(websocket: WebSocket, worker):

@@ -24,6 +24,13 @@ interface ReplayContext {
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null;
 
+const selectJointAngles = (description: RobotDescription, jointValues: JointValues): JointValues =>
+  Object.fromEntries(
+    description.joints
+      .filter((joint) => joint.type === 'revolute' || joint.type === 'continuous')
+      .map((joint) => [joint.name, jointValues[joint.name]]),
+  );
+
 const isActionChunk = (value: unknown): value is ActionChunk => {
   if (!isRecord(value) || value.type !== 'action_chunk') return false;
   if (
@@ -70,6 +77,7 @@ export const useInferenceReplay = ({
   const workerTimeoutRef = useRef<number | null>(null);
   const activeChunkRef = useRef<ActionChunk | null>(null);
   const activeActionIndexRef = useRef<number | null>(null);
+  const activeJointAnglesRef = useRef<JointValues[]>([]);
   const playbackTokenRef = useRef(0);
   const mountedRef = useRef(true);
 
@@ -97,16 +105,25 @@ export const useInferenceReplay = ({
     if (socket && socket.readyState < WebSocket.CLOSING) socket.close(code, reason);
   };
 
-  const sendStop = () => {
+  const sendStop = (jointAngles: JointValues[] = []) => {
     const socket = socketRef.current;
     if (socket?.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify({ type: 'stop' }));
+      socket.send(JSON.stringify({ type: 'stop', joint_angles: jointAngles }));
     }
   };
 
   const fail = (nextError: InferenceError, notifyServer: boolean) => {
+    const jointValues = isRecord(nextError.joint_values)
+      ? [
+          selectJointAngles(
+            contextRef.current.description as RobotDescription,
+            nextError.joint_values as JointValues,
+          ),
+        ]
+      : activeJointAnglesRef.current;
     clearWorker();
     activeChunkRef.current = null;
+    activeJointAnglesRef.current = [];
     if (mountedRef.current) {
       setPlayback(null);
       setError(nextError);
@@ -115,7 +132,7 @@ export const useInferenceReplay = ({
     updateStatus('error');
     publishDebugEvent('inference:error', nextError);
     if (notifyServer) {
-      sendStop();
+      sendStop(jointValues);
     } else {
       closeSocket(4000, 'inference failed');
     }
@@ -174,6 +191,7 @@ export const useInferenceReplay = ({
 
     activeChunkRef.current = chunk;
     activeActionIndexRef.current = null;
+    activeJointAnglesRef.current = [];
     if (mountedRef.current) {
       setError(null);
       setProgress('正在启动 IK Worker');
@@ -233,6 +251,9 @@ export const useInferenceReplay = ({
       }
 
       clearWorker(false);
+      activeJointAnglesRef.current = response.actions.map((action) =>
+        selectJointAngles(context.description as RobotDescription, action.jointValues),
+      );
       const nextPlayback: PlaybackChunk = {
         token: playbackTokenRef.current + 1,
         episodeIndex: chunk.episode_index,
@@ -325,6 +346,7 @@ export const useInferenceReplay = ({
       setPlayback(null);
     }
     activeChunkRef.current = null;
+    activeJointAnglesRef.current = [];
     updateStatus('connecting');
     publishDebugEvent('inference:connect', { url: INFERENCE_SOCKET_URL });
 
@@ -508,7 +530,8 @@ export const useInferenceReplay = ({
 
   const stop = () => {
     if (statusRef.current === 'idle' || statusRef.current === 'complete') return;
-    sendStop();
+    sendStop(activeJointAnglesRef.current);
+    activeJointAnglesRef.current = [];
     clearWorker();
     activeChunkRef.current = null;
     activeActionIndexRef.current = null;
@@ -527,7 +550,14 @@ export const useInferenceReplay = ({
     if (!chunk || token !== playbackTokenRef.current || socket?.readyState !== WebSocket.OPEN) {
       return;
     }
-    socket.send(JSON.stringify({ type: 'ack', frame_index: chunk.frame_index }));
+    socket.send(
+      JSON.stringify({
+        type: 'ack',
+        frame_index: chunk.frame_index,
+        joint_angles: activeJointAnglesRef.current,
+      }),
+    );
+    activeJointAnglesRef.current = [];
     activeChunkRef.current = null;
     if (mountedRef.current) {
       setPlayback(null);

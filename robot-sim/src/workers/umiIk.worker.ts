@@ -90,6 +90,7 @@ workerScope.onmessage = (event) => {
             action_index: actionIndex,
             iterations: result.iterations,
             residual: result.residual,
+            joint_values: result.jointValues,
           },
         });
         return;

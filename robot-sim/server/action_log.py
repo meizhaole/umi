@@ -1,93 +1,48 @@
-# 将推理观测与动作块写入可轮转的 JSONL 日志
-import base64
-import binascii
-import json
-import logging
-from datetime import datetime, timezone
-from logging.handlers import RotatingFileHandler
+# 将推理得到的关节角写入最近 30 步 CSV 日志
+import csv
 from pathlib import Path
 
 
 LOG_DIR = Path(__file__).resolve().parent / "logs"
-LOG_PATH = LOG_DIR / "inference-actions.jsonl"
-MAX_LOG_BYTES = 10 * 1024 * 1024
-BACKUP_COUNT = 5
-LOGGER_NAME = "umi_replay_actions"
-CAMERA_SHAPE = [224, 224, 3]
+LOG_PATH = LOG_DIR / "inference-actions.csv"
+MAX_LOG_ROWS = 30
+STEP_COLUMN = "step"
 
 
-def _get_logger() -> logging.Logger:
-    logger = logging.getLogger(LOGGER_NAME)
-    if logger.handlers:
-        return logger
+def record_joint_angles(joint_angle_rows: list[dict[str, float]]) -> None:
+    if not joint_angle_rows:
+        return
 
     LOG_DIR.mkdir(parents=True, exist_ok=True)
-    handler = RotatingFileHandler(
-        LOG_PATH,
-        maxBytes=MAX_LOG_BYTES,
-        backupCount=BACKUP_COUNT,
-        encoding="utf-8",
-    )
-    handler.setFormatter(logging.Formatter("%(message)s"))
-    logger.addHandler(handler)
-    logger.setLevel(logging.INFO)
-    logger.propagate = False
-    return logger
+    joint_names = []
+    rows = []
+    next_step = 1
 
+    if LOG_PATH.exists():
+        with LOG_PATH.open("r", newline="", encoding="utf-8") as log_file:
+            reader = csv.DictReader(log_file)
+            joint_names = [name for name in reader.fieldnames or [] if name != STEP_COLUMN]
+            rows = list(reader)
+        if rows:
+            next_step = int(rows[-1][STEP_COLUMN]) + 1
 
-def _write_record(record: dict) -> None:
-    _get_logger().info(
-        json.dumps(
-            record,
-            ensure_ascii=False,
-            allow_nan=False,
-            separators=(",", ":"),
-        )
-    )
+    for joint_angles in joint_angle_rows:
+        for joint_name in joint_angles:
+            if joint_name not in joint_names:
+                joint_names.append(joint_name)
 
+    fieldnames = [STEP_COLUMN, *joint_names]
+    rows = [
+        {name: row.get(name, "") for name in fieldnames}
+        for row in rows
+    ]
+    for joint_angles in joint_angle_rows:
+        row = {name: joint_angles.get(name, "") for name in joint_names}
+        row[STEP_COLUMN] = next_step
+        rows.append(row)
+        next_step += 1
 
-def record_observation(observation: dict) -> None:
-    encoded_image = observation.get("camera0_rgb")
-    decoded_image_bytes = None
-    encoded_image_chars = None
-    if isinstance(encoded_image, str):
-        encoded_image_chars = len(encoded_image)
-        try:
-            decoded_image_bytes = len(base64.b64decode(encoded_image, validate=True))
-        except (binascii.Error, ValueError):
-            pass
-
-    record = {
-        "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
-        "event": "inference_observation",
-        "frame_index": observation.get("frame_index"),
-        "inputs": {
-            "camera0_rgb": {
-                "encoding": "base64",
-                "pixel_format": "RGB uint8",
-                "expected_shape": CAMERA_SHAPE,
-                "encoded_char_count": encoded_image_chars,
-                "decoded_byte_count": decoded_image_bytes,
-            },
-            "robot0_eef_pos_m": observation.get("robot0_eef_pos"),
-            "robot0_eef_rot_axis_angle_rad": observation.get(
-                "robot0_eef_rot_axis_angle"
-            ),
-            "robot0_gripper_width_m": observation.get("robot0_gripper_width"),
-        },
-    }
-    _write_record(record)
-
-
-def record_action_chunk(chunk: dict) -> None:
-    record = {
-        "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
-        "event": "inference_action_chunk",
-        "episode_index": chunk["episode_index"],
-        "frame_index": chunk["frame_index"],
-        "last_chunk": chunk["last_chunk"],
-        "action_units": ["m", "m", "m", "rad", "rad", "rad", "m"],
-        "action_layout": ["dx", "dy", "dz", "rx", "ry", "rz", "gripper_width"],
-        "actions": chunk["actions"],
-    }
-    _write_record(record)
+    with LOG_PATH.open("w", newline="", encoding="utf-8") as log_file:
+        writer = csv.DictWriter(log_file, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows[-MAX_LOG_ROWS:])

@@ -4,7 +4,7 @@ import logging
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 if __package__:
-    from .action_log import record_action_chunk, record_observation
+    from .action_log import record_joint_angles
     from .inference_protocol import (
         read_chunk_or_stop,
         read_observation_or_stop,
@@ -14,7 +14,7 @@ if __package__:
     )
     from .load_model import ReplayError, ReplayWorker
 else:
-    from action_log import record_action_chunk, record_observation
+    from action_log import record_joint_angles
     from inference_protocol import (
         read_chunk_or_stop,
         read_observation_or_stop,
@@ -82,7 +82,6 @@ async def inference(websocket: WebSocket) -> None:
             # 将当前帧写入错误上下文，便于定位模型推理阶段的问题。
             worker.context = {"episode_index": 0, "frame_index": frame_index}
             await worker.send_observation(observation)
-            record_observation(observation)
 
             # 读取模型生成的动作块；停止消息也会终止当前订阅。
             chunk = await read_chunk_or_stop(websocket, worker)
@@ -90,11 +89,11 @@ async def inference(websocket: WebSocket) -> None:
                 await websocket.send_json({"type": "complete", "state": "stopped"})
                 return
 
-            # 记录并发送动作块，随后等待前端回放完成的确认再处理下一帧。
+            # 发送动作块，随后等待前端回放完成的确认和关节角记录。
             serialized = serialize_action_chunk(chunk)
-            record_action_chunk(chunk)
             await websocket.send_text(serialized)
-            acknowledged = await wait_for_ack(websocket, worker, chunk)
+            acknowledged, joint_angles = await wait_for_ack(websocket, worker, chunk)
+            record_joint_angles(joint_angles)
             if not acknowledged:
                 await websocket.send_json(
                     {
