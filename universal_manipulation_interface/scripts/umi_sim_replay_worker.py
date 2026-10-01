@@ -95,8 +95,8 @@ def emit_actions(args):
                 with torch.inference_mode():
                     prediction = policy.predict_action(obs)["action"][0].float().cpu().numpy()
 
-            action_steps = int(cfg.n_action_steps)
-            prediction = prediction[:action_steps]
+            # 单步回放只执行策略预测序列中的第一个目标
+            prediction = prediction[:1]
             relative_pose = mat_to_pose(pose10d_to_mat(prediction[:, :9]))
             robot_actions = np.concatenate([relative_pose, prediction[:, 9:10]], axis=-1)
             output = {

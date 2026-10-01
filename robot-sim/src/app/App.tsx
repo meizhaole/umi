@@ -299,13 +299,16 @@ export const App = () => {
           </section>
 
           <InferencePanel
-            canStart={Boolean(loadedRobot && physicsReady && !loadError)}
+            canStep={
+              Boolean(loadedRobot && physicsReady && !loadError) &&
+              (!inference.isLocked || inference.status === 'waiting')
+            }
             error={inference.error}
             isLocked={inference.isLocked}
-            onStart={() => {
-              if (mode !== 'position') setControlMode('position');
+            onStep={() => {
+              if (mode !== 'position' && !inference.isLocked) setControlMode('position');
               setIsRunning(true);
-              inference.start();
+              inference.step();
             }}
             onStop={inference.stop}
             progress={inference.progress}

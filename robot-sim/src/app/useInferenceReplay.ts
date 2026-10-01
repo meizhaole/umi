@@ -131,6 +131,8 @@ export const useInferenceReplay = ({
       return;
     }
     socket.send(JSON.stringify({ type: 'observation', ...observation }));
+    if (mountedRef.current) setProgress('观测已发送，正在推理下一步动作');
+    updateStatus('inferring');
     publishDebugEvent('inference:observation_sent', {
       frame_index: observation.frame_index,
       image_bytes: Math.floor((observation.camera0_rgb.length * 3) / 4),
@@ -297,6 +299,7 @@ export const useInferenceReplay = ({
     if (
       statusRef.current === 'connecting' ||
       statusRef.current === 'loading' ||
+      statusRef.current === 'inferring' ||
       statusRef.current === 'computing' ||
       statusRef.current === 'playing' ||
       statusRef.current === 'waiting'
@@ -388,8 +391,7 @@ export const useInferenceReplay = ({
           return;
         }
         if (message.type === 'status' && message.state === 'ready') {
-          if (mountedRef.current) setProgress('官方权重已就绪，发送相机观测');
-          updateStatus('waiting');
+          if (mountedRef.current) setProgress('官方权重已就绪，开始单步推理');
           sendObservation(socket);
           return;
         }
@@ -455,6 +457,7 @@ export const useInferenceReplay = ({
         if (
           statusRef.current === 'connecting' ||
           statusRef.current === 'loading' ||
+          statusRef.current === 'inferring' ||
           statusRef.current === 'computing' ||
           statusRef.current === 'playing' ||
           statusRef.current === 'waiting'
@@ -482,6 +485,27 @@ export const useInferenceReplay = ({
     }
   };
 
+  const step = () => {
+    if (statusRef.current !== 'waiting') {
+      start();
+      return;
+    }
+
+    const socket = socketRef.current;
+    if (socket?.readyState !== WebSocket.OPEN) {
+      fail(
+        {
+          code: 'WEBSOCKET_NOT_OPEN',
+          stage: 'connection',
+          message: '推理连接未就绪，无法发送下一步观测。',
+        },
+        false,
+      );
+      return;
+    }
+    sendObservation(socket);
+  };
+
   const stop = () => {
     if (statusRef.current === 'idle' || statusRef.current === 'complete') return;
     sendStop();
@@ -507,10 +531,9 @@ export const useInferenceReplay = ({
     activeChunkRef.current = null;
     if (mountedRef.current) {
       setPlayback(null);
-      setProgress('已确认动作块 ' + chunk.frame_index + '，等待下一轮观测');
+      setProgress('单步动作已执行，点击“推理一步”继续');
     }
     updateStatus('waiting');
-    sendObservation(socket);
     publishDebugEvent('inference:ack', {
       episode_index: chunk.episode_index,
       frame_index: chunk.frame_index,
@@ -541,9 +564,10 @@ export const useInferenceReplay = ({
   const isLocked =
     status === 'connecting' ||
     status === 'loading' ||
+    status === 'inferring' ||
     status === 'computing' ||
     status === 'playing' ||
     status === 'waiting';
 
-  return { status, progress, error, playback, isLocked, start, stop, completePlayback };
+  return { status, progress, error, playback, isLocked, step, stop, completePlayback };
 };

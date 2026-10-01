@@ -28,7 +28,7 @@ cd /home/pan/桌面/umi/robot-sim
 pnpm dev
 ```
 
-前端启动后选择 RS 或 DM 型号，运行仿真并点击“开始推理”。服务连接 `ws://localhost:8000/ws/inference`，加载官方权重后，每轮采集末端腕部相机图像与最近两帧末端状态，服务端根据当前观测预测一块动作。动作块播放完并 ACK 后才发送下一轮观测。服务端一次只接受一个活跃订阅。
+前端启动后选择 RS 或 DM 型号，运行仿真并点击“推理一步”。服务连接 `ws://localhost:8000/ws/inference`，加载官方权重后，每次点击采集腕部相机图像与最近两帧末端状态，服务端预测动作序列并只执行第一步。动作完成并 ACK 后等待再次点击，再采集观测推理下一步。服务端一次只接受一个活跃订阅。
 
 推理生成的每个动作块会追加记录到 `robot-sim/server/logs/inference-actions.jsonl`。日志按 JSONL 保存 UTC 时间、episode/frame、末块标记和动作数组；达到 10 MiB 后轮转，最多保留 5 个备份。
 

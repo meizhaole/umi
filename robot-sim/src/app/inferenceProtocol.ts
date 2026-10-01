@@ -50,6 +50,7 @@ export type InferenceStatus =
   | 'idle'
   | 'connecting'
   | 'loading'
+  | 'inferring'
   | 'computing'
   | 'playing'
   | 'waiting'

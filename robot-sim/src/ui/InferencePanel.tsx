@@ -5,8 +5,8 @@ interface InferencePanelProps {
   progress: string;
   error: InferenceError | null;
   isLocked: boolean;
-  canStart: boolean;
-  onStart: () => void;
+  canStep: boolean;
+  onStep: () => void;
   onStop: () => void;
 }
 
@@ -14,9 +14,10 @@ const STATUS_LABELS: Record<InferenceStatus, string> = {
   idle: '未连接',
   connecting: '正在连接',
   loading: '加载权重',
+  inferring: '模型推理中',
   computing: '求解 IK',
   playing: '动作播放中',
-  waiting: '等待下一动作',
+  waiting: '等待点击下一步',
   complete: '推理完成',
   stopped: '已停止',
   error: '发生错误',
@@ -27,8 +28,8 @@ export const InferencePanel = ({
   progress,
   error,
   isLocked,
-  canStart,
-  onStart,
+  canStep,
+  onStep,
   onStop,
 }: InferencePanelProps) => (
   <section className="panel inference-panel">
@@ -40,16 +41,11 @@ export const InferencePanel = ({
       <span className={'inference-status ' + status}>{STATUS_LABELS[status]}</span>
     </div>
     <p className="inference-progress" aria-live="polite">
-      {progress || '腕部虚拟相机输入 224×224 RGB 图像，官方权重逐块预测动作'}
+      {progress || '每次点击执行一个模型动作，完成后再次点击继续'}
     </p>
     <div className="inference-actions">
-      <button
-        className="primary-button"
-        disabled={!canStart || isLocked}
-        onClick={onStart}
-        type="button"
-      >
-        开始推理
+      <button className="primary-button" disabled={!canStep} onClick={onStep} type="button">
+        推理一步
       </button>
       <button className="secondary-button" disabled={!isLocked} onClick={onStop} type="button">
         停止
