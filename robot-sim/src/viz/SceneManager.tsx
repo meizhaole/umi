@@ -3,6 +3,7 @@ import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { Physics } from '@react-three/rapier';
 import { SIMULATION_CONFIG, findRobotConfig, type RobotModelId } from '../app/config';
+import type { PlaybackChunk } from '../app/inferenceProtocol';
 import type { ControlMode, JointCommand, JointValues, RobotDescription } from '../core/types';
 import { PhysicsWorld } from '../sim/PhysicsWorld';
 import { RobotBody } from '../sim/RobotBody';
@@ -15,9 +16,48 @@ interface SceneManagerProps {
   commands: Record<string, JointCommand>;
   mode: ControlMode;
   isRunning: boolean;
+  playback: PlaybackChunk | null;
   onJointState: (values: JointValues) => void;
   onPhysicsReady: (ready: boolean) => void;
+  onPlaybackStep: (values: JointValues) => void;
+  onPlaybackComplete: (token: number) => void;
 }
+
+const PLAYBACK_STEP_SECONDS = 0.05;
+
+interface ActionPlaybackProps {
+  playback: PlaybackChunk | null;
+  onStep: (values: JointValues) => void;
+  onComplete: (token: number) => void;
+}
+
+const ActionPlayback = ({ playback, onStep, onComplete }: ActionPlaybackProps) => {
+  const accumulator = useMemo(() => ({ seconds: 0, index: 0, token: 0 }), []);
+
+  useFrame((_, delta) => {
+    if (!playback) return;
+    if (accumulator.token !== playback.token) {
+      accumulator.seconds = 0;
+      accumulator.index = 0;
+      accumulator.token = playback.token;
+    }
+
+    accumulator.seconds += Math.max(0, delta);
+    while (accumulator.seconds >= PLAYBACK_STEP_SECONDS) {
+      const action = playback.actions[accumulator.index];
+      if (!action) break;
+      accumulator.seconds -= PLAYBACK_STEP_SECONDS;
+      onStep(action.jointValues);
+      accumulator.index += 1;
+    }
+
+    if (accumulator.index === playback.actions.length) {
+      accumulator.seconds = 0;
+      onComplete(playback.token);
+    }
+  });
+  return null;
+};
 
 const CameraControls = () => {
   const { camera, gl } = useThree();
@@ -41,8 +81,11 @@ export const SceneManager = ({
   commands,
   mode,
   isRunning,
+  playback,
   onJointState,
   onPhysicsReady,
+  onPlaybackStep,
+  onPlaybackComplete,
 }: SceneManagerProps) => {
   const model = findRobotConfig(modelId);
   const handleViewerError = useCallback((message: string) => {
@@ -63,6 +106,11 @@ export const SceneManager = ({
       <pointLight color="#5ce1c5" intensity={8} position={[1.5, 0.2, -2]} />
       <gridHelper args={[3.5, 35, '#315056', '#1d2c35']} position={[0, -0.012, 0]} />
       <axesHelper args={[0.3]} />
+      <ActionPlayback
+        onComplete={onPlaybackComplete}
+        onStep={onPlaybackStep}
+        playback={playback}
+      />
       <Physics
         colliders={false}
         gravity={SIMULATION_CONFIG.gravity}

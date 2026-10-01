@@ -895,3 +895,86 @@ button {
     gap: 5px;
   }
 }
+
+
+.inference-panel {
+  padding: 13px 15px;
+}
+
+.inference-panel .panel-heading {
+  justify-content: space-between;
+}
+
+.inference-status {
+  padding: 5px 7px;
+  border: 1px solid #344351;
+  border-radius: 5px;
+  color: #a8b6c2;
+  font: 8px var(--font-mono);
+  white-space: nowrap;
+}
+
+.inference-status.connecting,
+.inference-status.loading,
+.inference-status.computing,
+.inference-status.playing,
+.inference-status.waiting {
+  border-color: #315c57;
+  color: var(--mint);
+}
+
+.inference-status.complete {
+  border-color: #315c57;
+  color: #82dfc8;
+}
+
+.inference-status.error {
+  border-color: rgba(252, 142, 149, 0.4);
+  color: var(--rose);
+}
+
+.inference-progress {
+  margin: 11px 0 0;
+  color: #91a2b0;
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+.inference-actions {
+  display: flex;
+  gap: 7px;
+  margin-top: 10px;
+}
+
+.inference-actions .primary-button {
+  flex: 1;
+}
+
+.inference-panel button:disabled,
+.model-tab:disabled,
+.mode-tab:disabled,
+.joint-range:disabled,
+.pose-inputs input:disabled,
+.icon-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.inference-error {
+  margin-top: 11px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(252, 142, 149, 0.2);
+  color: #f0a2a8;
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+.inference-error pre {
+  max-height: 170px;
+  overflow: auto;
+  margin: 7px 0 0;
+  color: #c69298;
+  font: 8px/1.5 var(--font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

@@ -12,12 +12,14 @@ import type {
 } from '../core/types';
 import { parseUrdf } from '../utils/urdfParser';
 import { publishDebugEvent } from './debugBus';
+import { useInferenceReplay } from './useInferenceReplay';
 import { findRobotConfig, ROBOT_MODELS, SIMULATION_CONFIG, type RobotModelId } from './config';
 import { DebugOverlay } from '../viz/DebugOverlay';
 import { SceneManager } from '../viz/SceneManager';
 import { JointPanel } from '../ui/JointPanel';
 import { StatusBar } from '../ui/StatusBar';
 import { TaskPanel } from '../ui/TaskPanel';
+import { InferencePanel } from '../ui/InferencePanel';
 
 interface LoadedRobot {
   description: RobotDescription;
@@ -86,8 +88,14 @@ export const App = () => {
   }, [currentModel.file, modelId]);
 
   const tcpPose = loadedRobot?.model.getLinkPose() ?? null;
+  const inference = useInferenceReplay({
+    description: loadedRobot?.description ?? null,
+    jointValues,
+    tcpPose,
+  });
 
   const setControlMode = (nextMode: ControlMode) => {
+    if (inference.isLocked) return;
     setMode(nextMode);
     loadedRobot?.controller.setMode(nextMode);
     setCommands(loadedRobot?.controller.getCommands() ?? {});
@@ -95,7 +103,7 @@ export const App = () => {
   };
 
   const commandJoint = (jointName: string, value: number) => {
-    if (!loadedRobot) return;
+    if (!loadedRobot || inference.isLocked) return;
     try {
       const command = loadedRobot.controller.setCommand(jointName, value);
       setCommands(loadedRobot.controller.getCommands());
@@ -119,7 +127,7 @@ export const App = () => {
   };
 
   const solveIk = () => {
-    if (!loadedRobot) return;
+    if (!loadedRobot || inference.isLocked) return;
     const result = loadedRobot.kinematics.solveIK(targetPose, jointValues);
     setIkResult(result);
     setIkMessage(
@@ -138,6 +146,18 @@ export const App = () => {
       });
       setCommands(loadedRobot.controller.getCommands());
     }
+  };
+
+  const applyReplayStep = (values: JointValues) => {
+    if (!loadedRobot) return;
+    loadedRobot.model.setJointValues(values);
+    const nextValues = loadedRobot.model.getJointValues();
+    loadedRobot.model.getControllableJoints().forEach((joint) => {
+      loadedRobot.controller.setCommand(joint.name, nextValues[joint.name]);
+    });
+    setJointValues(nextValues);
+    setCommands(loadedRobot.controller.getCommands());
+    publishDebugEvent('inference:action_applied', { joints: nextValues });
   };
 
   const setTargetCoordinate = (field: 'position' | 'orientation', index: number, value: number) => {
@@ -177,6 +197,7 @@ export const App = () => {
             <button
               className={model.id === modelId ? 'model-tab active' : 'model-tab'}
               key={model.id}
+              disabled={inference.isLocked}
               onClick={() => setModelId(model.id)}
               type="button"
             >
@@ -211,6 +232,20 @@ export const App = () => {
             </div>
           </section>
 
+          <InferencePanel
+            canStart={Boolean(loadedRobot && physicsReady && !loadError)}
+            error={inference.error}
+            isLocked={inference.isLocked}
+            onStart={() => {
+              if (mode !== 'position') setControlMode('position');
+              setIsRunning(true);
+              inference.start();
+            }}
+            onStop={inference.stop}
+            progress={inference.progress}
+            status={inference.status}
+          />
+
           {loadError ? (
             <section className="panel error-panel">
               <p className="panel-label">模型加载失败</p>
@@ -232,9 +267,11 @@ export const App = () => {
             mode={mode}
             onCommand={commandJoint}
             onModeChange={setControlMode}
+            disabled={inference.isLocked}
           />
 
           <TaskPanel
+            disabled={inference.isLocked}
             ikMessage={ikMessage}
             ikResult={ikResult}
             onSolveIk={solveIk}
@@ -263,6 +300,7 @@ export const App = () => {
               <button
                 className="icon-button"
                 title={isRunning ? '暂停仿真' : '运行仿真'}
+                disabled={inference.isLocked}
                 onClick={() => setIsRunning(!isRunning)}
                 type="button"
               >
@@ -270,6 +308,7 @@ export const App = () => {
               </button>
               <button
                 className="icon-button"
+                disabled={inference.isLocked}
                 title="重置关节"
                 onClick={() => {
                   if (!loadedRobot) return;
@@ -302,6 +341,9 @@ export const App = () => {
                 modelId={modelId}
                 onJointState={updatePhysicsState}
                 onPhysicsReady={setPhysicsReady}
+                playback={inference.playback}
+                onPlaybackStep={applyReplayStep}
+                onPlaybackComplete={inference.completePlayback}
               />
             ) : (
               <div className="loading-state">

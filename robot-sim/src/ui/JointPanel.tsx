@@ -8,6 +8,7 @@ interface JointPanelProps {
   mode: ControlMode;
   onCommand: (jointName: string, value: number) => void;
   onModeChange: (mode: ControlMode) => void;
+  disabled: boolean;
 }
 
 const MODES: Array<{ id: ControlMode; label: string }> = [
@@ -53,6 +54,7 @@ export const JointPanel = ({
   mode,
   onCommand,
   onModeChange,
+  disabled,
 }: JointPanelProps) => (
   <section className="panel joint-panel">
     <div className="panel-heading">
@@ -68,6 +70,7 @@ export const JointPanel = ({
           aria-selected={item.id === mode}
           className={item.id === mode ? 'mode-tab active' : 'mode-tab'}
           key={item.id}
+          disabled={disabled}
           onClick={() => onModeChange(item.id)}
           role="tab"
           type="button"
@@ -108,6 +111,7 @@ export const JointPanel = ({
               <input
                 aria-label={`${joint.name} ${mode}`}
                 className="joint-range"
+                disabled={disabled}
                 max={range[1]}
                 min={range[0]}
                 onChange={onChange}

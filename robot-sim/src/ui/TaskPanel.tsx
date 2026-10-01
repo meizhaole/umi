@@ -7,6 +7,7 @@ interface TaskPanelProps {
   onTargetChange: (field: 'position' | 'orientation', index: number, value: number) => void;
   onUseCurrentPose: () => void;
   onSolveIk: () => void;
+  disabled: boolean;
 }
 
 const poseFields = [
@@ -21,6 +22,7 @@ export const TaskPanel = ({
   onTargetChange,
   onUseCurrentPose,
   onSolveIk,
+  disabled,
 }: TaskPanelProps) => (
   <section className="panel ik-panel">
     <div className="panel-heading">
@@ -39,6 +41,7 @@ export const TaskPanel = ({
               <label key={label}>
                 <span>{label}</span>
                 <input
+                  disabled={disabled}
                   aria-label={`${key} ${label}`}
                   onChange={(event) => onTargetChange(key, index, Number(event.target.value))}
                   step={key === 'position' ? 0.01 : 0.05}
@@ -53,10 +56,20 @@ export const TaskPanel = ({
       ))}
     </div>
     <div className="ik-actions">
-      <button className="secondary-button" onClick={onUseCurrentPose} type="button">
+      <button
+        className="secondary-button"
+        disabled={disabled}
+        onClick={onUseCurrentPose}
+        type="button"
+      >
         取当前 TCP
       </button>
-      <button className="primary-button" onClick={onSolveIk} type="button">
+      <button
+        className="primary-button"
+        disabled={disabled}
+        onClick={onSolveIk}
+        type="button"
+      >
         求解位姿 <span>↗</span>
       </button>
     </div>
