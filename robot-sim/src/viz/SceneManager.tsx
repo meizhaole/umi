@@ -6,6 +6,7 @@ import { SIMULATION_CONFIG, findRobotConfig, type RobotModelId } from '../app/co
 import type { PlaybackChunk } from '../app/inferenceProtocol';
 import type { ControlMode, JointCommand, JointValues, RobotDescription } from '../core/types';
 import { PhysicsWorld } from '../sim/PhysicsWorld';
+import { OfficialCupArrangementScene } from '../sim/tasks/CupArrangementScene';
 import { RobotBody } from '../sim/RobotBody';
 import { URDFViewer } from './URDFViewer';
 import type { SimCameraFrame } from '../sim/sensors/WristCameraCapture';
@@ -151,6 +152,7 @@ export const SceneManager = ({
         timeStep={SIMULATION_CONFIG.fixedTimeStep}
       >
         <PhysicsWorld />
+        <OfficialCupArrangementScene />
         <RobotBody
           commands={commands}
           description={description}
