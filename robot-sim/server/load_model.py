@@ -253,8 +253,7 @@ class ReplayWorker:
             ) from error
 
     async def wait_for_success(self):
-        return_code = await self.process.wait()
-        await self._join_stderr()
+        return_code = await self.wait_for_process_exit()
         if return_code != 0:
             raise ReplayError(
                 "worker_failed",
@@ -263,6 +262,11 @@ class ReplayWorker:
                 details=self.stderr_details,
                 context=self.context,
             )
+
+    async def wait_for_process_exit(self):
+        return_code = await self.process.wait()
+        await self._join_stderr()
+        return return_code
 
     async def _join_stderr(self):
         if self.stderr_task is not None:

@@ -36,11 +36,10 @@ async def _wait_for_ack(websocket, worker, chunk):
         "frame_index": frame_index,
     }
     receive_task = asyncio.create_task(websocket.receive_text())
-    process = worker.process
     exit_task = None
 
-    if not chunk["last_chunk"] and process is not None:
-        exit_task = asyncio.create_task(process.wait())
+    if not chunk["last_chunk"]:
+        exit_task = asyncio.create_task(worker.wait_for_process_exit())
 
     wait_tasks = [receive_task]
     if exit_task is not None:
@@ -66,11 +65,11 @@ async def _wait_for_ack(websocket, worker, chunk):
     if exit_task is not None and exit_task in done:
         receive_task.cancel()
         await asyncio.gather(receive_task, return_exceptions=True)
-        await worker._join_stderr()
+        return_code = exit_task.result()
         raise ReplayError(
             "worker_exited",
             "wait_for_ack",
-            f"UMI worker 在收到动作块 ACK 前退出，退出码为 {process.returncode}",
+            f"UMI worker 在收到动作块 ACK 前退出，退出码为 {return_code}",
             details=worker.stderr_details,
             context=context,
         )
