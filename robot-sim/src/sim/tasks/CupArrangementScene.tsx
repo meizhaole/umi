@@ -39,12 +39,14 @@ const Saucer = () => (
   </RigidBody>
 );
 
+export type CupBodyRef = { current: RapierRigidBody | null };
+
 interface EspressoCupProps {
+  bodyRef: CupBodyRef;
   onDragStateChange: (dragging: boolean) => void;
 }
 
-const EspressoCup = ({ onDragStateChange }: EspressoCupProps) => {
-  const bodyRef = useRef<RapierRigidBody>(null);
+const EspressoCup = ({ bodyRef, onDragStateChange }: EspressoCupProps) => {
   const dragOffset = useRef(new Vector2());
   const dragPoint = useRef(new Vector3());
   const isDragging = useRef(false);
@@ -62,23 +64,26 @@ const EspressoCup = ({ onDragStateChange }: EspressoCupProps) => {
       isDragging.current = true;
       onDragStateChange(true);
     },
-    [onDragStateChange],
+    [bodyRef, onDragStateChange],
   );
 
-  const handlePointerMove = useCallback((event: ThreeEvent<PointerEvent>) => {
-    const body = bodyRef.current;
-    if (!isDragging.current || !body || !event.ray.intersectPlane(DRAG_PLANE, dragPoint.current))
-      return;
+  const handlePointerMove = useCallback(
+    (event: ThreeEvent<PointerEvent>) => {
+      const body = bodyRef.current;
+      if (!isDragging.current || !body || !event.ray.intersectPlane(DRAG_PLANE, dragPoint.current))
+        return;
 
-    body.setTranslation(
-      {
-        x: dragPoint.current.x + dragOffset.current.x,
-        y: CUP_POSITION[1],
-        z: dragPoint.current.z + dragOffset.current.y,
-      },
-      true,
-    );
-  }, []);
+      body.setTranslation(
+        {
+          x: dragPoint.current.x + dragOffset.current.x,
+          y: CUP_POSITION[1],
+          z: dragPoint.current.z + dragOffset.current.y,
+        },
+        true,
+      );
+    },
+    [bodyRef],
+  );
 
   const handlePointerUp = useCallback(
     (event: ThreeEvent<PointerEvent>) => {
@@ -145,14 +150,16 @@ const EspressoCup = ({ onDragStateChange }: EspressoCupProps) => {
 };
 
 interface OfficialCupArrangementSceneProps {
+  bodyRef: CupBodyRef;
   onDragStateChange: (dragging: boolean) => void;
 }
 
 export const OfficialCupArrangementScene = ({
+  bodyRef,
   onDragStateChange,
 }: OfficialCupArrangementSceneProps) => (
   <>
     <Saucer />
-    <EspressoCup onDragStateChange={onDragStateChange} />
+    <EspressoCup bodyRef={bodyRef} onDragStateChange={onDragStateChange} />
   </>
 );

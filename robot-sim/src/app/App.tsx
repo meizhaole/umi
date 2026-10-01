@@ -437,6 +437,7 @@ export const App = () => {
                 onJointState={updatePhysicsState}
                 onPhysicsReady={setPhysicsReady}
                 playback={inference.playback}
+                inferenceActive={inference.isLocked}
                 onPlaybackStep={applyReplayStep}
                 onPlaybackComplete={inference.completePlayback}
                 cameraEnabled={Boolean(loadedRobot)}

@@ -1,12 +1,14 @@
 import { Suspense, useCallback, useEffect, useMemo, useRef } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
+import type { RapierRigidBody } from '@react-three/rapier';
+import { Vector3 } from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { Physics } from '@react-three/rapier';
 import { SIMULATION_CONFIG, findRobotConfig, type RobotModelId } from '../app/config';
 import type { PlaybackChunk } from '../app/inferenceProtocol';
 import type { ControlMode, JointCommand, JointValues, RobotDescription } from '../core/types';
 import { PhysicsWorld } from '../sim/PhysicsWorld';
-import { OfficialCupArrangementScene } from '../sim/tasks/CupArrangementScene';
+import { OfficialCupArrangementScene, type CupBodyRef } from '../sim/tasks/CupArrangementScene';
 import { RobotBody } from '../sim/RobotBody';
 import { URDFViewer } from './URDFViewer';
 import type { SimCameraFrame } from '../sim/sensors/WristCameraCapture';
@@ -20,6 +22,7 @@ interface SceneManagerProps {
   mode: ControlMode;
   isRunning: boolean;
   playback: PlaybackChunk | null;
+  inferenceActive: boolean;
   onJointState: (values: JointValues) => void;
   onPhysicsReady: (ready: boolean) => void;
   onPlaybackStep: (values: JointValues, isFinal: boolean) => void;
@@ -90,12 +93,16 @@ const ActionPlayback = ({ playback, jointValues, onStep, onComplete }: ActionPla
 };
 
 interface CameraControlsProps {
+  cupBodyRef: CupBodyRef;
+  inferenceActive: boolean;
   onControlsChange: (controls: OrbitControls | null) => void;
 }
 
-const CameraControls = ({ onControlsChange }: CameraControlsProps) => {
+const CameraControls = ({ cupBodyRef, inferenceActive, onControlsChange }: CameraControlsProps) => {
   const { camera, gl } = useThree();
   const controls = useMemo(() => new OrbitControls(camera, gl.domElement), [camera, gl]);
+  const desiredTarget = useMemo(() => new Vector3(), []);
+  const panDelta = useMemo(() => new Vector3(), []);
 
   useEffect(() => {
     controls.enableDamping = true;
@@ -108,7 +115,18 @@ const CameraControls = ({ onControlsChange }: CameraControlsProps) => {
       controls.dispose();
     };
   }, [controls, onControlsChange]);
-  useFrame(() => controls.update());
+  useFrame((_, delta) => {
+    const cupPosition = cupBodyRef.current?.translation();
+    if (inferenceActive && cupPosition) {
+      desiredTarget.set(cupPosition.x, cupPosition.y + 0.039, cupPosition.z);
+    } else {
+      desiredTarget.set(0, 0.2, 0);
+    }
+    panDelta.subVectors(desiredTarget, controls.target).multiplyScalar(1 - Math.exp(-6 * delta));
+    camera.position.add(panDelta);
+    controls.target.add(panDelta);
+    controls.update();
+  });
   return null;
 };
 
@@ -120,6 +138,7 @@ export const SceneManager = ({
   mode,
   isRunning,
   playback,
+  inferenceActive,
   onJointState,
   onPhysicsReady,
   onPlaybackStep,
@@ -130,6 +149,7 @@ export const SceneManager = ({
 }: SceneManagerProps) => {
   const model = findRobotConfig(modelId);
   const controlsRef = useRef<OrbitControls | null>(null);
+  const cupBodyRef = useRef<RapierRigidBody | null>(null);
   const handleControlsChange = useCallback((controls: OrbitControls | null) => {
     controlsRef.current = controls;
   }, []);
@@ -167,7 +187,10 @@ export const SceneManager = ({
         timeStep={SIMULATION_CONFIG.fixedTimeStep}
       >
         <PhysicsWorld />
-        <OfficialCupArrangementScene onDragStateChange={handleCupDragStateChange} />
+        <OfficialCupArrangementScene
+          bodyRef={cupBodyRef}
+          onDragStateChange={handleCupDragStateChange}
+        />
         <RobotBody
           commands={commands}
           description={description}
@@ -185,12 +208,18 @@ export const SceneManager = ({
           onLoaded={handleViewerLoaded}
           description={description}
           cameraEnabled={cameraEnabled}
+          cupBodyRef={cupBodyRef}
+          inferenceActive={inferenceActive}
           tcpPose={tcpPose}
           onCameraFrame={onCameraFrame}
           urdfFile={model.file}
         />
       </Suspense>
-      <CameraControls onControlsChange={handleControlsChange} />
+      <CameraControls
+        cupBodyRef={cupBodyRef}
+        inferenceActive={inferenceActive}
+        onControlsChange={handleControlsChange}
+      />
     </Canvas>
   );
 };

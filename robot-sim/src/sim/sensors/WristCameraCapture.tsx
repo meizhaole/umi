@@ -2,8 +2,10 @@ import { useEffect, useMemo } from 'react';
 import { useFrame, useThree } from '@react-three/fiber';
 import { PerspectiveCamera, SRGBColorSpace, WebGLRenderTarget } from 'three';
 import type { URDFRobot } from 'urdf-loader';
+import { Vector3 } from 'three';
 import type { JointValues, Pose, RobotDescription } from '../../core/types';
 import { CAMERA_IMAGE_SIZE } from './CameraSensor';
+import type { CupBodyRef } from '../tasks/CupArrangementScene';
 
 export interface SimCameraFrame {
   timestamp: number;
@@ -19,6 +21,8 @@ interface WristCameraCaptureProps {
   eefPose: Pose;
   jointValues: JointValues;
   enabled: boolean;
+  inferenceActive: boolean;
+  cupBodyRef: CupBodyRef;
   onCapture: (frame: SimCameraFrame) => void;
 }
 
@@ -49,6 +53,8 @@ export const WristCameraCapture = ({
   eefPose,
   jointValues,
   enabled,
+  inferenceActive,
+  cupBodyRef,
   onCapture,
 }: WristCameraCaptureProps) => {
   const { gl, scene } = useThree();
@@ -63,6 +69,7 @@ export const WristCameraCapture = ({
   target.texture.colorSpace = SRGBColorSpace;
   const pixels = useMemo(() => new Uint8Array(IMAGE_SIZE * IMAGE_SIZE * 4), []);
   const rgb = useMemo(() => new Uint8Array(IMAGE_SIZE * IMAGE_SIZE * 3), []);
+  const cupTarget = useMemo(() => new Vector3(), []);
   const cadence = useMemo(() => ({ lastCapture: 0 }), []);
 
   useEffect(() => {
@@ -82,6 +89,15 @@ export const WristCameraCapture = ({
     }
     cadence.lastCapture = clock.elapsedTime * 1000;
     scene.updateMatrixWorld(true);
+    const cupPosition = cupBodyRef.current?.translation();
+    if (inferenceActive && cupPosition) {
+      cupTarget.set(cupPosition.x, cupPosition.y + 0.039, cupPosition.z);
+      camera.lookAt(cupTarget);
+      camera.updateMatrixWorld(true);
+    } else {
+      camera.rotation.set(...CAMERA_MOUNT_ROTATION);
+      camera.updateMatrixWorld(true);
+    }
     const previousTarget = gl.getRenderTarget();
     const previousXr = gl.xr.enabled;
     gl.xr.enabled = false;
