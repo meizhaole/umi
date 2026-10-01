@@ -15,8 +15,9 @@ sys.path.insert(0, str(ROOT_DIR))
 sys.path.insert(0, str(ROOT_DIR / "scripts"))
 
 from diffusion_policy.common.pytorch_util import dict_apply
+from diffusion_policy.common.pose_repr_util import convert_pose_mat_rep
 from eval_offline_policy import load_policy
-from umi.common.pose_util import mat_to_pose, pose10d_to_mat
+from umi.common.pose_util import mat_to_pose, pose10d_to_mat, pose_to_mat
 from umi.real_world.real_inference_util import get_real_umi_obs_dict
 
 
@@ -46,6 +47,7 @@ def emit_actions(args):
         policy.eval().to(device)
     shape_meta = cfg.task.shape_meta
     obs_pose_repr = cfg.task.pose_repr.obs_pose_repr
+    action_pose_repr = cfg.task.pose_repr.action_pose_repr
     episode_start_pose = None
     print(json.dumps({"type": "ready"}), flush=True)
 
@@ -95,15 +97,66 @@ def emit_actions(args):
                 with torch.inference_mode():
                     prediction = policy.predict_action(obs)["action"][0].float().cpu().numpy()
 
-            # 单步回放只执行策略预测序列中的第一个目标
-            prediction = prediction[:1]
-            relative_pose = mat_to_pose(pose10d_to_mat(prediction[:, :9]))
-            robot_actions = np.concatenate([relative_pose, prediction[:, 9:10]], axis=-1)
+            # 将完整预测序列还原到世界坐标，统计每个目标偏移和整段路径长度。
+            current_pose = pose_to_mat(
+                np.concatenate([
+                    env_obs["robot0_eef_pos"][-1],
+                    env_obs["robot0_eef_rot_axis_angle"][-1],
+                ])
+            )
+            predicted_poses = pose10d_to_mat(prediction[:, :9])
+            target_poses = convert_pose_mat_rep(
+                predicted_poses,
+                base_pose_mat=current_pose,
+                pose_rep=action_pose_repr,
+                backward=True
+            )
+            current_position = current_pose[:3, 3]
+            target_positions = target_poses[:, :3, 3]
+            target_displacement_mm = np.linalg.norm(
+                target_positions - current_position,
+                axis=1
+            ) * 1000
+            path_points = np.concatenate([
+                current_position[None, :],
+                target_positions,
+            ])
+            cumulative_path_mm = np.cumsum(
+                np.linalg.norm(np.diff(path_points, axis=0), axis=1) * 1000
+            )
+            target_crossings = np.flatnonzero(target_displacement_mm > 3.0)
+            path_crossings = np.flatnonzero(cumulative_path_mm > 3.0)
+            trajectory_summary = {
+                "threshold_mm": 3.0,
+                "target_displacement_mm": target_displacement_mm.tolist(),
+                "cumulative_path_mm": cumulative_path_mm.tolist(),
+                "max_target_displacement_mm": float(target_displacement_mm.max()),
+                "total_path_length_mm": float(cumulative_path_mm[-1]),
+                "target_exceeds_3mm": bool(target_crossings.size),
+                "path_exceeds_3mm": bool(path_crossings.size),
+                "first_target_over_3mm_point": (
+                    int(target_crossings[0] + 1) if target_crossings.size else None
+                ),
+                "first_path_over_3mm_point": (
+                    int(path_crossings[0] + 1) if path_crossings.size else None
+                ),
+            }
+
+            # 保持单步回放行为不变，只将完整预测序列作为诊断信息传给服务端。
+            first_prediction = prediction[:1]
+            relative_pose = mat_to_pose(pose10d_to_mat(first_prediction[:, :9]))
+            robot_actions = np.concatenate(
+                [relative_pose, first_prediction[:, 9:10]],
+                axis=-1
+            )
             output = {
                 "episode_index": 0,
                 "frame_index": frame_index,
                 "last_chunk": False,
                 "actions": robot_actions.tolist(),
+                "action_pose_repr": action_pose_repr,
+                "prediction": prediction.tolist(),
+                "trajectory_summary": trajectory_summary,
             }
             sys.stdout.write(json.dumps(output, separators=(",", ":")) + "\n")
             sys.stdout.flush()

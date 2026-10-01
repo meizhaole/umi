@@ -5,6 +5,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 if __package__:
     from .action_log import record_joint_angles
+    from .prediction_log import record_prediction
     from .inference_protocol import (
         read_chunk_or_stop,
         read_observation_or_stop,
@@ -15,6 +16,7 @@ if __package__:
     from .load_model import ReplayError, ReplayWorker
 else:
     from action_log import record_joint_angles
+    from prediction_log import record_prediction
     from inference_protocol import (
         read_chunk_or_stop,
         read_observation_or_stop,
@@ -88,6 +90,20 @@ async def inference(websocket: WebSocket) -> None:
             if chunk is None:
                 await websocket.send_json({"type": "complete", "state": "stopped"})
                 return
+
+            # 保存完整预测序列，并输出三毫米阈值的轨迹统计。
+            record_prediction(chunk)
+            trajectory_summary = chunk["trajectory_summary"]
+            LOGGER.info(
+                "UMI 预测轨迹 frame_index=%s 点数=%s 最大目标偏移=%.3f mm "
+                "累计路径=%.3f mm 目标偏移超过3mm=%s 累计路径超过3mm=%s",
+                chunk["frame_index"],
+                len(chunk["prediction"]),
+                trajectory_summary["max_target_displacement_mm"],
+                trajectory_summary["total_path_length_mm"],
+                trajectory_summary["target_exceeds_3mm"],
+                trajectory_summary["path_exceeds_3mm"]
+            )
 
             # 发送动作块，随后等待前端回放完成的确认和关节角记录。
             serialized = serialize_action_chunk(chunk)
