@@ -15,10 +15,11 @@ conda env update -n umi -f universal_manipulation_interface/conda_environment.ya
 
 ```bash
 cd /home/pan/桌面/umi/robot-sim/server
-conda run -n umi python -m uvicorn main:app \
-  --host 127.0.0.1 --port 8000 \
-  --ws websockets --ws-max-size 1048576
+conda activate umi
+python main.py
 ```
+
+`main.py` 会组装 FastAPI WebSocket 服务并启动 Uvicorn；推理 worker 由 `load_model.py` 管理。
 
 另开终端启动前端：
 
