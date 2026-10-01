@@ -224,7 +224,7 @@ const createJoint = (
   const frame2 = childBodyRotation.clone().invert().multiply(worldJointRotation);
 
   if (joint.type === 'fixed') {
-    world.createImpulseJoint(
+    const handle = world.createImpulseJoint(
       rapier.JointData.fixed(
         vectorObject(parentAnchor),
         rotationObject(frame1),
@@ -235,6 +235,7 @@ const createJoint = (
       childBody,
       true,
     );
+    handle.setContactsEnabled(false);
     return null;
   }
 
@@ -257,6 +258,7 @@ const createJoint = (
           vectorObject(axisLocal),
         );
   const handle = world.createImpulseJoint(data, parentBody, childBody, true) as JointMotor;
+  handle.setContactsEnabled(false);
   if (joint.limit?.lower !== undefined && joint.limit.upper !== undefined) {
     handle.setLimits?.(joint.limit.lower, joint.limit.upper);
   }
