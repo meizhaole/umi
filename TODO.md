@@ -12,6 +12,7 @@
 - [x] 在 robot-sim 前端实时显示腕部相机画面
 - [x] 记录 UMI 在线推理输入与动作结果
 - [x] 支持前端按钮逐步推理与单动作回放
+- [x] 为 UMI 在线推理 WebSocket 路由补充注释
 - [ ] 将本机训练 checkpoint 接入 Gazebo 回放启动参数
 - [ ] 接通 Gazebo 相机与 UMI 推理观测
 - [ ] 将实时 UMI 策略接入 ReBot RS 实机控制链路
