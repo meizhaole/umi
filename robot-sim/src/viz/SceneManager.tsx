@@ -1,4 +1,4 @@
-import { Suspense, useCallback, useEffect, useMemo } from 'react';
+import { Suspense, useCallback, useEffect, useMemo, useRef } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { Physics } from '@react-three/rapier';
@@ -89,7 +89,11 @@ const ActionPlayback = ({ playback, jointValues, onStep, onComplete }: ActionPla
   return null;
 };
 
-const CameraControls = () => {
+interface CameraControlsProps {
+  onControlsChange: (controls: OrbitControls | null) => void;
+}
+
+const CameraControls = ({ onControlsChange }: CameraControlsProps) => {
   const { camera, gl } = useThree();
   const controls = useMemo(() => new OrbitControls(camera, gl.domElement), [camera, gl]);
 
@@ -98,8 +102,12 @@ const CameraControls = () => {
     controls.minDistance = 0.7;
     controls.maxDistance = 5.5;
     controls.target.set(0, 0.2, 0);
-    return () => controls.dispose();
-  }, [controls]);
+    onControlsChange(controls);
+    return () => {
+      onControlsChange(null);
+      controls.dispose();
+    };
+  }, [controls, onControlsChange]);
   useFrame(() => controls.update());
   return null;
 };
@@ -121,6 +129,13 @@ export const SceneManager = ({
   onCameraFrame,
 }: SceneManagerProps) => {
   const model = findRobotConfig(modelId);
+  const controlsRef = useRef<OrbitControls | null>(null);
+  const handleControlsChange = useCallback((controls: OrbitControls | null) => {
+    controlsRef.current = controls;
+  }, []);
+  const handleCupDragStateChange = useCallback((dragging: boolean) => {
+    if (controlsRef.current) controlsRef.current.enabled = !dragging;
+  }, []);
   const handleViewerError = useCallback((message: string) => {
     console.error(message);
   }, []);
@@ -152,7 +167,7 @@ export const SceneManager = ({
         timeStep={SIMULATION_CONFIG.fixedTimeStep}
       >
         <PhysicsWorld />
-        <OfficialCupArrangementScene />
+        <OfficialCupArrangementScene onDragStateChange={handleCupDragStateChange} />
         <RobotBody
           commands={commands}
           description={description}
@@ -175,7 +190,7 @@ export const SceneManager = ({
           urdfFile={model.file}
         />
       </Suspense>
-      <CameraControls />
+      <CameraControls onControlsChange={handleControlsChange} />
     </Canvas>
   );
 };
