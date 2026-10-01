@@ -369,6 +369,8 @@ export const RobotBody = ({
   const latestCommands = useRef(commands);
   const latestMode = useRef(mode);
   const latestStateCallback = useRef(onJointState);
+  const heldGripperPositions = useRef(new Map<string, number>());
+  const heldPositionMode = useRef(mode);
   const lastStatePublish = useRef(0);
 
   latestValues.current = jointValues;
@@ -381,6 +383,8 @@ export const RobotBody = ({
     const createdBodies: RapierBody[] = [];
     const bodyFrames = new Map<string, BodyFrame>();
     const createdJoints: SimulatedJoint[] = [];
+    heldGripperPositions.current.clear();
+    heldPositionMode.current = latestMode.current;
     let colliderCount = 0;
     const kinematics = new Kinematics(description);
     const currentPoses = kinematics.forwardKinematicsAll(latestValues.current);
@@ -551,12 +555,29 @@ export const RobotBody = ({
     const values = latestValues.current;
     const activeMode = latestMode.current;
     const activeCommands = latestCommands.current;
+    if (activeMode !== heldPositionMode.current) {
+      heldGripperPositions.current.clear();
+      heldPositionMode.current = activeMode;
+    }
 
     joints.current.forEach((entry) => {
       const { description: joint, child, parent } = entry;
       if (child.isKinematic()) return;
 
-      applyJointCommand(joint, activeMode, activeCommands[joint.name], values[joint.name] ?? 0, {
+      let currentPosition = values[joint.name] ?? 0;
+      const isGripperJoint = /gripper|finger/iu.test(joint.name + ' ' + joint.child);
+      if (
+        activeMode === 'position' &&
+        isGripperJoint &&
+        activeCommands[joint.name]?.mode !== 'position'
+      ) {
+        const heldPosition = heldGripperPositions.current.get(joint.name);
+        if (heldPosition === undefined)
+          heldGripperPositions.current.set(joint.name, currentPosition);
+        currentPosition = heldGripperPositions.current.get(joint.name) ?? currentPosition;
+      }
+
+      applyJointCommand(joint, activeMode, activeCommands[joint.name], currentPosition, {
         position: (target) =>
           entry.joint.configureMotorPosition?.(
             target,
