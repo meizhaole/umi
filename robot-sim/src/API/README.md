@@ -30,6 +30,8 @@ pnpm dev
 
 页面中点击“开始回放”后，前端连接 `ws://localhost:8000/ws/inference`。服务端一次只接受一个活跃订阅。回放从 worker 默认验证 episode 和起始帧开始，发送该 episode 的全部动作块。
 
+推理生成的每个动作块会追加记录到 `robot-sim/server/logs/inference-actions.jsonl`。日志按 JSONL 保存 UTC 时间、episode/frame、末块标记和动作数组；达到 10 MiB 后轮转，最多保留 5 个备份。
+
 ## 消息协议
 
 连接后服务端先发送加载状态：

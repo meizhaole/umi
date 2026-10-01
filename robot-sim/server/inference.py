@@ -4,6 +4,7 @@ import logging
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 if __package__:
+    from .action_log import record_action_chunk
     from .inference_protocol import (
         read_chunk_or_stop,
         send_error,
@@ -12,6 +13,7 @@ if __package__:
     )
     from .load_model import ReplayError, ReplayWorker
 else:
+    from action_log import record_action_chunk
     from inference_protocol import (
         read_chunk_or_stop,
         send_error,
@@ -66,6 +68,7 @@ async def inference(websocket: WebSocket) -> None:
 
         while True:
             serialized = serialize_action_chunk(chunk)
+            record_action_chunk(chunk)
             await websocket.send_text(serialized)
             acknowledged = await wait_for_ack(websocket, worker, chunk)
             if not acknowledged:
