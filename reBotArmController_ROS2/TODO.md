@@ -1,3 +1,7 @@
 - [x] 添加 Gazebo 仿真一键启动脚本
 - [x] 接入 Gazebo ros2_control 与 UMI 仿真回放节点
+- [x] 修复 Gazebo 启动脚本加载 ROS 环境时的未定义变量错误
+- [x] 启动 Gazebo 后自动解除暂停，确保 ros2_control 控制器可激活
+- [x] 添加 Gazebo 杯子场景 world 文件并接入一键启动
 - [x] 桥接 Gazebo 仿真时钟，确保 TF 与 UMI 回放使用同一仿真时间
+- [x] 验证腕部相机图像能看到水杯

@@ -6,6 +6,7 @@ WORKSPACE_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 UMI_WORKSPACE="$(cd -- "${WORKSPACE_ROOT}/../universal_manipulation_interface" && pwd)"
 ROS_SETUP="/opt/ros/jazzy/setup.bash"
 INSTALL_SETUP="${WORKSPACE_ROOT}/install/setup.bash"
+WORLD_FILE="${WORKSPACE_ROOT}/src/rebotarm_bringup/worlds/rebotarm_cup.sdf"
 GAZEBO_LAUNCH_PID=""
 
 if [[ -t 1 ]]; then
@@ -34,7 +35,10 @@ fail() {
 }
 
 world_is_ready() {
-  gz service -l 2>/dev/null | grep -Fxq '/world/empty/create'
+  local services
+  services="$(gz service -l 2>/dev/null)" || return 1
+  grep -Fxq '/world/empty/create' <<< "${services}" &&
+    grep -Fxq '/world/empty/control' <<< "${services}"
 }
 
 robot_is_spawned() {
@@ -61,9 +65,12 @@ trap 'exit 143' TERM
 [[ -r "${ROS_SETUP}" ]] || fail "找不到 ROS 2 Jazzy 环境：${ROS_SETUP}"
 [[ -r "${INSTALL_SETUP}" ]] || fail "找不到工作区 install/setup.bash，请先构建 ROS 包。"
 [[ -f "${UMI_WORKSPACE}/scripts/umi_sim_replay_worker.py" ]] || fail "找不到 UMI 仿真推理脚本：${UMI_WORKSPACE}"
+[[ -r "${WORLD_FILE}" ]] || fail "找不到 Gazebo 场景文件：${WORLD_FILE}"
 
+set +u
 source "${ROS_SETUP}"
 source "${INSTALL_SETUP}"
+set -u
 command -v gz >/dev/null 2>&1 || fail "找不到 Gazebo 命令 gz。"
 ros2 pkg prefix ros_gz_sim >/dev/null 2>&1 || fail "找不到 ros_gz_sim，请安装 ROS 2 Jazzy 的 ros_gz_sim。"
 ros2 pkg prefix gz_ros2_control >/dev/null 2>&1 || fail "缺少 Gazebo 控制插件，请先运行：sudo apt install ros-jazzy-gz-ros2-control"
@@ -73,8 +80,8 @@ export GZ_SIM_RESOURCE_PATH="${WORKSPACE_ROOT}/src${GZ_SIM_RESOURCE_PATH:+:${GZ_
 
 if ! world_is_ready; then
   command -v setsid >/dev/null 2>&1 || fail "找不到 setsid 命令。"
-  info "正在启动 Gazebo 空世界。"
-  setsid ros2 launch ros_gz_sim gz_sim.launch.py &
+  info "正在启动 ReBot RS 水杯场景。"
+  setsid ros2 launch ros_gz_sim gz_sim.launch.py "gz_args:=-r ${WORLD_FILE}" &
   GAZEBO_LAUNCH_PID=$!
 
   world_ready=false
@@ -90,11 +97,22 @@ if ! world_is_ready; then
   done
   [[ "${world_ready}" == true ]] || fail "等待 Gazebo 的 empty 世界超时。"
 else
-  warn "检测到正在运行的 empty 世界，将复用当前 Gazebo。"
+  if ! gz model --list 2>/dev/null | grep -Eq '^[[:space:]]*-[[:space:]]water_cup$'; then
+    fail "当前 Gazebo 是旧空世界。请关闭旧 Gazebo 窗口后重新运行本脚本，加载水杯场景。"
+  fi
+  warn "检测到已载入水杯场景的 empty 世界，将复用当前 Gazebo。"
 fi
 
 if robot_is_spawned; then
   fail "当前世界已有旧版 rebot_arm。请关闭旧 Gazebo，再运行本脚本以加载 ros2_control 插件。"
+fi
+
+if ! gz service -s /world/empty/control \
+  --reqtype gz.msgs.WorldControl \
+  --reptype gz.msgs.Boolean \
+  --timeout 3000 \
+  --req 'pause: false' >/dev/null; then
+  fail "无法启动 Gazebo 仿真步进，请检查 empty 世界服务。"
 fi
 
 info "启动 ReBot RS 控制器、MoveIt 逆解和官方权重回放。"

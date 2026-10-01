@@ -50,6 +50,9 @@ def generate_launch_description():
     moveit_params = moveit_parameters(moveit_config)
     moveit_params["use_sim_time"] = True
     robot_description = moveit_config.robot_description["robot_description"]
+    camera_bridge_config = (
+        Path(__file__).parent.parent / "config" / "wrist_camera_bridge.yaml"
+    )
 
     clock_bridge = Node(
         package="ros_gz_bridge",
@@ -57,6 +60,17 @@ def generate_launch_description():
         name="gazebo_clock_bridge",
         output="screen",
         arguments=["/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock"],
+    )
+    camera_bridge = Node(
+        package="ros_gz_bridge",
+        executable="parameter_bridge",
+        name="wrist_camera_bridge",
+        output="screen",
+        arguments=[
+            "--ros-args",
+            "-p",
+            f"config_file:={camera_bridge_config}",
+        ],
     )
     robot_state_publisher = Node(
         package="robot_state_publisher",
@@ -161,6 +175,7 @@ def generate_launch_description():
             DeclareLaunchArgument("max_chunks", default_value="1"),
             DeclareLaunchArgument("device", default_value="cuda"),
             clock_bridge,
+            camera_bridge,
             robot_state_publisher,
             static_base_tf,
             move_group,
