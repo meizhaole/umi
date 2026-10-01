@@ -1,0 +1,336 @@
+import { useEffect, useState } from 'react';
+import { JointController } from '../core/JointController';
+import { Kinematics } from '../core/Kinematics';
+import { RobotModel } from '../core/RobotModel';
+import type {
+  ControlMode,
+  IKResult,
+  JointCommand,
+  JointValues,
+  Pose,
+  RobotDescription,
+} from '../core/types';
+import { parseUrdf } from '../utils/urdfParser';
+import { publishDebugEvent } from './debugBus';
+import { findRobotConfig, ROBOT_MODELS, SIMULATION_CONFIG, type RobotModelId } from './config';
+import { DebugOverlay } from '../viz/DebugOverlay';
+import { SceneManager } from '../viz/SceneManager';
+import { JointPanel } from '../ui/JointPanel';
+import { StatusBar } from '../ui/StatusBar';
+import { TaskPanel } from '../ui/TaskPanel';
+
+interface LoadedRobot {
+  description: RobotDescription;
+  controller: JointController;
+  kinematics: Kinematics;
+  model: RobotModel;
+}
+
+const DEFAULT_TARGET: Pose = {
+  position: [0.35, 0, 0.45],
+  orientation: [0, 0, 0, 1],
+};
+
+export const App = () => {
+  const [modelId, setModelId] = useState<RobotModelId>('RS');
+  const [loadedRobot, setLoadedRobot] = useState<LoadedRobot | null>(null);
+  const [loadError, setLoadError] = useState('');
+  const [jointValues, setJointValues] = useState<JointValues>({});
+  const [mode, setMode] = useState<ControlMode>('position');
+  const [commands, setCommands] = useState<Record<string, JointCommand>>({});
+  const [isRunning, setIsRunning] = useState(true);
+  const [targetPose, setTargetPose] = useState<Pose>(DEFAULT_TARGET);
+  const [ikResult, setIkResult] = useState<IKResult | null>(null);
+  const [ikMessage, setIkMessage] = useState('');
+  const [physicsReady, setPhysicsReady] = useState(false);
+
+  const currentModel = findRobotConfig(modelId);
+
+  useEffect(() => {
+    let active = true;
+    setLoadedRobot(null);
+    setLoadError('');
+    setJointValues({});
+    setCommands({});
+    setPhysicsReady(false);
+
+    const loadRobot = async () => {
+      try {
+        const url = `${SIMULATION_CONFIG.robotAssetRoot}/${modelId}/urdf/${currentModel.file}`;
+        const response = await fetch(url);
+        if (!response.ok) throw new Error(`URDF 加载失败：HTTP ${response.status}`);
+        const description = parseUrdf(await response.text());
+        const model = new RobotModel(description);
+        if (!active) return;
+
+        setLoadedRobot({
+          description,
+          controller: new JointController(model),
+          kinematics: new Kinematics(description),
+          model,
+        });
+        setJointValues(model.getJointValues());
+        publishDebugEvent('robot:loaded', { model: modelId, name: description.name });
+      } catch (error) {
+        if (!active) return;
+        const message = error instanceof Error ? error.message : String(error);
+        setLoadError(message);
+        publishDebugEvent('robot:error', { model: modelId, message });
+      }
+    };
+
+    void loadRobot();
+    return () => {
+      active = false;
+    };
+  }, [currentModel.file, modelId]);
+
+  const tcpPose = loadedRobot?.model.getLinkPose() ?? null;
+
+  const setControlMode = (nextMode: ControlMode) => {
+    setMode(nextMode);
+    loadedRobot?.controller.setMode(nextMode);
+    setCommands(loadedRobot?.controller.getCommands() ?? {});
+    publishDebugEvent('control:mode', { mode: nextMode });
+  };
+
+  const commandJoint = (jointName: string, value: number) => {
+    if (!loadedRobot) return;
+    try {
+      const command = loadedRobot.controller.setCommand(jointName, value);
+      setCommands(loadedRobot.controller.getCommands());
+      if (command.mode === 'position') {
+        loadedRobot.model.setJointValue(jointName, command.value);
+        const nextValues = loadedRobot.model.getJointValues();
+        setJointValues(nextValues);
+        publishDebugEvent('joint:command', { joint: jointName, ...command });
+      } else {
+        publishDebugEvent('joint:command', { joint: jointName, ...command });
+      }
+    } catch (error) {
+      setIkMessage(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const updatePhysicsState = (values: JointValues) => {
+    if (!loadedRobot) return;
+    loadedRobot.model.setJointValues(values);
+    setJointValues(loadedRobot.model.getJointValues());
+  };
+
+  const solveIk = () => {
+    if (!loadedRobot) return;
+    const result = loadedRobot.kinematics.solveIK(targetPose, jointValues);
+    setIkResult(result);
+    setIkMessage(
+      result.converged
+        ? `收敛于 ${result.iterations} 次迭代`
+        : `未收敛，位置残差 ${result.residual.position.toFixed(4)} m`,
+    );
+    publishDebugEvent('ik:result', result);
+    if (result.converged) {
+      setControlMode('position');
+      loadedRobot.model.setJointValues(result.jointValues);
+      const nextValues = loadedRobot.model.getJointValues();
+      setJointValues(nextValues);
+      loadedRobot.model.getControllableJoints().forEach((joint) => {
+        loadedRobot.controller.setCommand(joint.name, nextValues[joint.name]);
+      });
+      setCommands(loadedRobot.controller.getCommands());
+    }
+  };
+
+  const setTargetCoordinate = (field: 'position' | 'orientation', index: number, value: number) => {
+    setTargetPose((current) => {
+      const next = [...current[field]] as number[];
+      next[index] = value;
+      return { ...current, [field]: next } as Pose;
+    });
+  };
+
+  return (
+    <main className="app-shell">
+      <header className="topbar">
+        <div className="brand-lockup">
+          <div className="brand-mark">
+            <span />
+            <span />
+            <span />
+          </div>
+          <div>
+            <p className="eyebrow">REBOT ARM LAB</p>
+            <h1>
+              Robot Sim <span>Studio</span>
+            </h1>
+          </div>
+        </div>
+        <div className="topbar-center">
+          <span className="status-dot" />
+          <span>本地仿真环境</span>
+          <span className="topbar-divider" />
+          <span className="muted">
+            固定步长 {Math.round(SIMULATION_CONFIG.fixedTimeStep * 1000)} ms
+          </span>
+        </div>
+        <div className="model-switch" aria-label="机械臂型号">
+          {ROBOT_MODELS.map((model) => (
+            <button
+              className={model.id === modelId ? 'model-tab active' : 'model-tab'}
+              key={model.id}
+              onClick={() => setModelId(model.id)}
+              type="button"
+            >
+              {model.id}
+            </button>
+          ))}
+        </div>
+      </header>
+
+      <div className="workspace">
+        <aside className="control-column">
+          <section className="panel robot-summary">
+            <div className="summary-heading">
+              <div>
+                <p className="eyebrow">ACTIVE ROBOT</p>
+                <h2>{currentModel.label}</h2>
+              </div>
+              <span className="model-badge">{modelId}</span>
+            </div>
+            <div className="summary-meta">
+              <span>
+                <i className="mini-square" />6 DOF
+              </span>
+              <span>
+                <i className="mini-square cyan" />
+                URDF
+              </span>
+              <span>
+                <i className="mini-square violet" />
+                Rapier
+              </span>
+            </div>
+          </section>
+
+          {loadError ? (
+            <section className="panel error-panel">
+              <p className="panel-label">模型加载失败</p>
+              <p>{loadError}</p>
+              <button
+                className="secondary-button"
+                onClick={() => setModelId(modelId)}
+                type="button"
+              >
+                重试
+              </button>
+            </section>
+          ) : null}
+
+          <JointPanel
+            commands={commands}
+            joints={loadedRobot?.model.getControllableJoints() ?? []}
+            jointValues={jointValues}
+            mode={mode}
+            onCommand={commandJoint}
+            onModeChange={setControlMode}
+          />
+
+          <TaskPanel
+            ikMessage={ikMessage}
+            ikResult={ikResult}
+            onSolveIk={solveIk}
+            onTargetChange={setTargetCoordinate}
+            onUseCurrentPose={() => {
+              if (tcpPose) setTargetPose(tcpPose);
+            }}
+            targetPose={targetPose}
+          />
+        </aside>
+
+        <section className="viewport-column">
+          <div className="viewport-toolbar">
+            <div className="viewport-title">
+              <span className="viewport-icon">⌘</span>
+              <div>
+                <strong>仿真视口</strong>
+                <span>交互旋转 · 缩放 · 平移</span>
+              </div>
+            </div>
+            <div className="viewport-actions">
+              <span className={physicsReady ? 'physics-pill ready' : 'physics-pill'}>
+                <i />
+                {physicsReady ? 'Physics ready' : 'Physics loading'}
+              </span>
+              <button
+                className="icon-button"
+                title={isRunning ? '暂停仿真' : '运行仿真'}
+                onClick={() => setIsRunning(!isRunning)}
+                type="button"
+              >
+                {isRunning ? 'Ⅱ' : '▶'}
+              </button>
+              <button
+                className="icon-button"
+                title="重置关节"
+                onClick={() => {
+                  if (!loadedRobot) return;
+                  loadedRobot.controller.setMode('position');
+                  loadedRobot.model.setJointValues({});
+                  const nextValues = loadedRobot.model.getJointValues();
+                  loadedRobot.model.getControllableJoints().forEach((joint) => {
+                    loadedRobot.controller.setCommand(joint.name, nextValues[joint.name]);
+                  });
+                  setMode('position');
+                  setJointValues(nextValues);
+                  setCommands(loadedRobot.controller.getCommands());
+                }}
+                type="button"
+              >
+                ↺
+              </button>
+            </div>
+          </div>
+
+          <div className="viewport-frame">
+            <div className="viewport-background-grid" />
+            {loadedRobot ? (
+              <SceneManager
+                commands={commands}
+                description={loadedRobot.description}
+                isRunning={isRunning}
+                mode={mode}
+                jointValues={jointValues}
+                modelId={modelId}
+                onJointState={updatePhysicsState}
+                onPhysicsReady={setPhysicsReady}
+              />
+            ) : (
+              <div className="loading-state">
+                <div className="loading-orbit">
+                  <span />
+                </div>
+                <strong>{loadError ? '等待模型资源' : '正在加载机械臂'}</strong>
+                <span>
+                  {loadError ? '请检查 ROS 描述目录和资源同步' : '解析 URDF 几何与关节树…'}
+                </span>
+              </div>
+            )}
+            <DebugOverlay jointValues={jointValues} pose={tcpPose} />
+            <div className="view-axis">
+              <span>X</span>
+              <span>Y</span>
+              <span>Z</span>
+              <div />
+            </div>
+          </div>
+
+          <StatusBar
+            isRunning={isRunning}
+            jointCount={loadedRobot?.model.getControllableJoints().length ?? 0}
+            modelId={modelId}
+            pose={tcpPose}
+          />
+        </section>
+      </div>
+    </main>
+  );
+};
