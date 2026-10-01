@@ -81,6 +81,10 @@ export const App = () => {
         const description = parseUrdf(await response.text());
         const model = new RobotModel(description);
         if (!active) return;
+        if (modelId === 'RS') {
+          model.setJointValue('joint2', 0.1);
+          model.setJointValue('joint3', 0.1);
+        }
 
         setLoadedRobot({
           description,
