@@ -41,6 +41,14 @@ const clampJointValue = (joint: JointDescription, value: number): number =>
     Math.min(joint.limit?.upper ?? Number.POSITIVE_INFINITY, value),
   );
 
+const isOutwardStepAtLimit = (
+  joint: JointDescription,
+  value: number,
+  step: number,
+): boolean =>
+  (joint.limit?.lower !== undefined && value <= joint.limit.lower + 1e-8 && step < 0) ||
+  (joint.limit?.upper !== undefined && value >= joint.limit.upper - 1e-8 && step > 0);
+
 const vectorNorm = (values: number[]): number => Math.hypot(...values);
 
 const solveLinearSystem = (matrix: number[][], vector: number[]): number[] | undefined => {
@@ -142,32 +150,54 @@ export class Kinematics {
 
     while (iterations < settings.maxIterations && !this.isConverged(residual, settings)) {
       const tipPose = current.linkPoses[this.description.tipLink];
-      const jacobian = variables.map((joint) =>
-        this.jacobianColumn(joint, current.jointFrames[joint.name], tipPose.position),
-      );
       const error = [
         ...subtractVectors(targetPose.position, tipPose.position),
         ...poseErrorRotation(targetPose.orientation, tipPose.orientation),
       ];
-      const normalMatrix = Array.from({ length: 6 }, (_, row) =>
-        Array.from(
-          { length: 6 },
-          (_, column) =>
-            jacobian.reduce((sum, axis) => sum + axis[row] * axis[column], 0) +
-            (row === column ? settings.damping ** 2 : 0),
-        ),
-      );
-      const solved = solveLinearSystem(normalMatrix, error);
-      if (!solved || variables.length === 0) break;
+      let activeVariables = variables;
+      let jointSteps: number[] = [];
+      let solved: number[] | undefined;
+
+      while (activeVariables.length > 0) {
+        const jacobian = activeVariables.map((joint) =>
+          this.jacobianColumn(joint, current.jointFrames[joint.name], tipPose.position),
+        );
+        const normalMatrix = Array.from({ length: 6 }, (_, row) =>
+          Array.from(
+            { length: 6 },
+            (_, column) =>
+              jacobian.reduce((sum, axis) => sum + axis[row] * axis[column], 0) +
+              (row === column ? settings.damping ** 2 : 0),
+          ),
+        );
+        const solution = solveLinearSystem(normalMatrix, error);
+        solved = solution;
+        if (!solution) break;
+
+        jointSteps = activeVariables.map((_, index) =>
+          dotVectors(jacobian[index].slice(0, 3) as Vec3, solution.slice(0, 3) as Vec3) +
+          dotVectors(jacobian[index].slice(3, 6) as Vec3, solution.slice(3, 6) as Vec3),
+        );
+        const blockedJoints = new Set(
+          activeVariables
+            .filter((joint, index) =>
+              isOutwardStepAtLimit(joint, jointValues[joint.name], jointSteps[index]),
+            )
+            .map((joint) => joint.name),
+        );
+        if (blockedJoints.size === 0) break;
+
+        // 触限关节若被要求继续越界，就从本轮雅可比中移除并重算其他关节的步长。
+        activeVariables = activeVariables.filter((joint) => !blockedJoints.has(joint.name));
+      }
+
+      if (!solved || activeVariables.length === 0) break;
 
       const nextValues = { ...jointValues };
-      variables.forEach((joint, index) => {
-        const rawStep =
-          dotVectors(jacobian[index].slice(0, 3) as Vec3, solved.slice(0, 3) as Vec3) +
-          dotVectors(jacobian[index].slice(3, 6) as Vec3, solved.slice(3, 6) as Vec3);
+      activeVariables.forEach((joint, index) => {
         const maximumStep =
           joint.type === 'prismatic' ? settings.maxLinearStep : settings.maxAngularStep;
-        const step = Math.max(-maximumStep, Math.min(maximumStep, rawStep));
+        const step = Math.max(-maximumStep, Math.min(maximumStep, jointSteps[index]));
         nextValues[joint.name] = clampJointValue(joint, jointValues[joint.name] + step);
       });
 
