@@ -1,3 +1,4 @@
+- [x] 在 robot-sim README 中补充前后端启动命令
 - [x] 在 robot-sim 中实现 RS、DM 双型号浏览器仿真首版
 - [x] 接入官方 UMI 权重与仿真腕部相机在线推理
 - [x] 在 robot-sim 前端实时显示腕部相机画面
