@@ -19,6 +19,7 @@
 - [x] 按完整 UMI 预测序列生成在线动作块
 - [x] 将 RS 浏览器仿真的 joint2、joint3 初始角设为 0.1 rad 并同步物理反馈
 - [x] 将 ACK 等待时间延长到覆盖完整动作块回放
+- [x] 将在线 UMI 仿真 IK 位置容差设为 5 mm
 - [ ] 将本机训练 checkpoint 接入 Gazebo 回放启动参数
 - [ ] 接通 Gazebo 相机与 UMI 推理观测
 - [ ] 将实时 UMI 策略接入 ReBot RS 实机控制链路

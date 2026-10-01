@@ -79,7 +79,7 @@ workerScope.onmessage = (event) => {
             : ([0, 0, 0, 1] as [number, number, number, number]),
       };
       const targetPose = composePoses(request.startPose, deltaPose);
-      const result = kinematics.solveIK(targetPose, seed, { positionTolerance: 0.003 });
+      const result = kinematics.solveIK(targetPose, seed, { positionTolerance: 0.005 });
       if (!result.converged) {
         workerScope.postMessage({
           type: 'error',
