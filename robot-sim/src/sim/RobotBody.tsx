@@ -46,6 +46,7 @@ interface SimulatedJoint {
   childAnchor: Vector3;
   parentAnchor: Vector3;
   initialRelativeRotation: Quaternion;
+  initialPosition: number;
 }
 
 interface BodyFrame {
@@ -198,6 +199,7 @@ const createJoint = (
   childLinkPose: Pose,
   parentBodyRotation: Quaternion,
   childBodyRotation: Quaternion,
+  initialPosition: number,
 ): SimulatedJoint | null => {
   if (joint.type === 'floating' || joint.type === 'planar') return null;
 
@@ -274,6 +276,7 @@ const createJoint = (
     childAnchor,
     parentAnchor,
     initialRelativeRotation,
+    initialPosition,
   };
 };
 
@@ -326,7 +329,8 @@ const readJointState = (joints: SimulatedJoint[]): JointValues => {
         .applyQuaternion(
           new Quaternion(parentRotation.x, parentRotation.y, parentRotation.z, parentRotation.w),
         );
-      values[entry.description.name] = childAnchor.sub(parentAnchor).dot(axisWorld);
+      values[entry.description.name] =
+        entry.initialPosition + childAnchor.sub(parentAnchor).dot(axisWorld);
       return;
     }
 
@@ -341,7 +345,7 @@ const readJointState = (joints: SimulatedJoint[]): JointValues => {
     const delta = entry.initialRelativeRotation.clone().invert().multiply(relative).normalize();
     const projected =
       delta.x * entry.axisLocal.x + delta.y * entry.axisLocal.y + delta.z * entry.axisLocal.z;
-    values[entry.description.name] = 2 * Math.atan2(projected, delta.w);
+    values[entry.description.name] = entry.initialPosition + 2 * Math.atan2(projected, delta.w);
   });
   return values;
 };
@@ -387,7 +391,8 @@ export const RobotBody = ({
     heldPositionMode.current = latestMode.current;
     let colliderCount = 0;
     const kinematics = new Kinematics(description);
-    const currentPoses = kinematics.forwardKinematicsAll(latestValues.current);
+    const initialValues = { ...latestValues.current };
+    const currentPoses = kinematics.forwardKinematicsAll(initialValues);
 
     const initialize = async () => {
       try {
@@ -492,6 +497,7 @@ export const RobotBody = ({
               childPose,
               parentBodyRotation,
               childBodyRotation,
+              initialValues[joint.name] ?? 0,
             );
             if (simulatedJoint) createdJoints.push(simulatedJoint);
             publishDebugEvent('physics:progress', { stage: 'joint-created', joint: joint.name });
@@ -580,7 +586,7 @@ export const RobotBody = ({
       applyJointCommand(joint, activeMode, activeCommands[joint.name], currentPosition, {
         position: (target) =>
           entry.joint.configureMotorPosition?.(
-            target,
+            target - entry.initialPosition,
             DEFAULT_JOINT_STIFFNESS,
             DEFAULT_JOINT_DAMPING,
           ),
