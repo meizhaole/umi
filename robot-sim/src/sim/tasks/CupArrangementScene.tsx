@@ -1,4 +1,4 @@
-import { useCallback, useRef } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import type { ThreeEvent } from '@react-three/fiber';
 import {
   CuboidCollider,
@@ -58,6 +58,7 @@ const EspressoCup = ({ bodyRef, onDragStateChange }: EspressoCupProps) => {
   const dragOffset = useRef(new Vector2());
   const dragPoint = useRef(new Vector3());
   const isDragging = useRef(false);
+  const [isSelected, setIsSelected] = useState(false);
 
   const enforceCupBounds = useCallback(() => {
     const body = bodyRef.current;
@@ -106,7 +107,11 @@ const EspressoCup = ({ bodyRef, onDragStateChange }: EspressoCupProps) => {
 
   const handlePointerDown = useCallback(
     (event: ThreeEvent<PointerEvent>) => {
+      if (event.button !== 0) return;
       event.stopPropagation();
+      event.nativeEvent.preventDefault();
+      event.nativeEvent.stopImmediatePropagation();
+      setIsSelected(true);
       const body = bodyRef.current;
       if (!body || !event.ray.intersectPlane(DRAG_PLANE, dragPoint.current)) return;
 
@@ -122,9 +127,15 @@ const EspressoCup = ({ bodyRef, onDragStateChange }: EspressoCupProps) => {
 
   const handlePointerMove = useCallback(
     (event: ThreeEvent<PointerEvent>) => {
-      const body = bodyRef.current;
-      if (!isDragging.current || !body || !event.ray.intersectPlane(DRAG_PLANE, dragPoint.current))
+      if (!isDragging.current) return;
+      if ((event.nativeEvent.buttons & 1) === 0) {
+        isDragging.current = false;
+        onDragStateChange(false);
         return;
+      }
+
+      const body = bodyRef.current;
+      if (!body || !event.ray.intersectPlane(DRAG_PLANE, dragPoint.current)) return;
 
       let x = dragPoint.current.x + dragOffset.current.x;
       let z = dragPoint.current.z + dragOffset.current.y;
@@ -135,7 +146,7 @@ const EspressoCup = ({ bodyRef, onDragStateChange }: EspressoCupProps) => {
       }
       body.setTranslation({ x, y: CUP_POSITION[1], z }, true);
     },
-    [bodyRef],
+    [bodyRef, onDragStateChange],
   );
 
   const handlePointerUp = useCallback(
@@ -185,7 +196,11 @@ const EspressoCup = ({ bodyRef, onDragStateChange }: EspressoCupProps) => {
         receiveShadow
       >
         <latheGeometry args={[CUP_PROFILE, 32]} />
-        <meshStandardMaterial color="#75aeb4" roughness={0.24} side={DoubleSide} />
+        <meshStandardMaterial
+          color={isSelected ? '#8fcbd0' : '#75aeb4'}
+          roughness={0.24}
+          side={DoubleSide}
+        />
       </mesh>
       <mesh
         position={[0.055, 0.04, 0]}
@@ -197,7 +212,7 @@ const EspressoCup = ({ bodyRef, onDragStateChange }: EspressoCupProps) => {
         onPointerCancel={handlePointerUp}
       >
         <torusGeometry args={[0.023, 0.004, 10, 32]} />
-        <meshStandardMaterial color="#75aeb4" roughness={0.24} />
+        <meshStandardMaterial color={isSelected ? '#8fcbd0' : '#75aeb4'} roughness={0.24} />
       </mesh>
     </RigidBody>
   );

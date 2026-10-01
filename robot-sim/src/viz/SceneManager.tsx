@@ -105,7 +105,7 @@ const CameraControls = ({ cupBodyRef, inferenceActive, onControlsChange }: Camer
   const panDelta = useMemo(() => new Vector3(), []);
 
   useEffect(() => {
-    controls.enableDamping = true;
+    controls.enableDamping = false;
     controls.minDistance = 0.7;
     controls.maxDistance = 5.5;
     controls.target.set(0, 0.2, 0);
