@@ -214,7 +214,7 @@ export const App = () => {
     }
   };
 
-  const applyReplayStep = (values: JointValues) => {
+  const applyReplayStep = (values: JointValues, isFinal: boolean) => {
     if (!loadedRobot) return;
     loadedRobot.model.setJointValues(values);
     const nextValues = loadedRobot.model.getJointValues();
@@ -223,7 +223,7 @@ export const App = () => {
     });
     setJointValues(nextValues);
     setCommands(loadedRobot.controller.getCommands());
-    publishDebugEvent('inference:action_applied', { joints: nextValues });
+    if (isFinal) publishDebugEvent('inference:action_applied', { joints: nextValues });
   };
 
   const setTargetCoordinate = (field: 'position' | 'orientation', index: number, value: number) => {

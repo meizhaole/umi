@@ -21,23 +21,34 @@ interface SceneManagerProps {
   playback: PlaybackChunk | null;
   onJointState: (values: JointValues) => void;
   onPhysicsReady: (ready: boolean) => void;
-  onPlaybackStep: (values: JointValues) => void;
+  onPlaybackStep: (values: JointValues, isFinal: boolean) => void;
   onPlaybackComplete: (token: number) => void;
   cameraEnabled: boolean;
   tcpPose: Pose;
   onCameraFrame: (frame: SimCameraFrame) => void;
 }
 
-const PLAYBACK_STEP_SECONDS = 0.05;
+const PLAYBACK_ACTION_SECONDS = 0.5;
+const MAX_PLAYBACK_DELTA_SECONDS = 0.05;
 
 interface ActionPlaybackProps {
   playback: PlaybackChunk | null;
-  onStep: (values: JointValues) => void;
+  jointValues: JointValues;
+  onStep: (values: JointValues, isFinal: boolean) => void;
   onComplete: (token: number) => void;
 }
 
-const ActionPlayback = ({ playback, onStep, onComplete }: ActionPlaybackProps) => {
-  const accumulator = useMemo(() => ({ seconds: 0, index: 0, token: 0 }), []);
+const ActionPlayback = ({ playback, jointValues, onStep, onComplete }: ActionPlaybackProps) => {
+  const accumulator = useMemo(
+    () => ({
+      seconds: 0,
+      index: 0,
+      token: 0,
+      startValues: {} as JointValues,
+      targetValues: null as JointValues | null,
+    }),
+    [],
+  );
 
   useFrame((_, delta) => {
     if (!playback) return;
@@ -45,21 +56,34 @@ const ActionPlayback = ({ playback, onStep, onComplete }: ActionPlaybackProps) =
       accumulator.seconds = 0;
       accumulator.index = 0;
       accumulator.token = playback.token;
+      accumulator.startValues = { ...jointValues };
+      accumulator.targetValues = null;
     }
 
-    accumulator.seconds += Math.max(0, delta);
-    while (accumulator.seconds >= PLAYBACK_STEP_SECONDS) {
-      const action = playback.actions[accumulator.index];
-      if (!action) break;
-      accumulator.seconds -= PLAYBACK_STEP_SECONDS;
-      onStep(action.jointValues);
-      accumulator.index += 1;
-    }
-
-    if (accumulator.index === playback.actions.length) {
-      accumulator.seconds = 0;
+    const action = playback.actions[accumulator.index];
+    if (!action) {
       onComplete(playback.token);
+      return;
     }
+    if (!accumulator.targetValues) accumulator.targetValues = action.jointValues;
+
+    accumulator.seconds += Math.min(Math.max(0, delta), MAX_PLAYBACK_DELTA_SECONDS);
+    const progress = Math.min(accumulator.seconds / PLAYBACK_ACTION_SECONDS, 1);
+    const easedProgress = progress * progress * (3 - 2 * progress);
+    const interpolatedValues = Object.fromEntries(
+      Object.entries(accumulator.targetValues).map(([jointName, targetValue]) => {
+        const startValue = accumulator.startValues[jointName] ?? targetValue;
+        return [jointName, startValue + (targetValue - startValue) * easedProgress];
+      }),
+    ) as JointValues;
+    onStep(interpolatedValues, progress === 1);
+
+    if (progress < 1) return;
+    accumulator.seconds = 0;
+    accumulator.index += 1;
+    accumulator.startValues = { ...accumulator.targetValues };
+    accumulator.targetValues = null;
+    if (accumulator.index === playback.actions.length) onComplete(playback.token);
   });
   return null;
 };
@@ -114,7 +138,12 @@ export const SceneManager = ({
       <pointLight color="#5ce1c5" intensity={8} position={[1.5, 0.2, -2]} />
       <gridHelper args={[3.5, 35, '#315056', '#1d2c35']} position={[0, -0.012, 0]} />
       <axesHelper args={[0.3]} />
-      <ActionPlayback onComplete={onPlaybackComplete} onStep={onPlaybackStep} playback={playback} />
+      <ActionPlayback
+        jointValues={jointValues}
+        onComplete={onPlaybackComplete}
+        onStep={onPlaybackStep}
+        playback={playback}
+      />
       <Physics
         colliders={false}
         gravity={SIMULATION_CONFIG.gravity}
