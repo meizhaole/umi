@@ -11,7 +11,8 @@ else:
     from load_model import ReplayError
 
 
-ACK_TIMEOUT_SECONDS = 2.0
+# 16 步动作每步回放 0.5 秒约需 8 秒，额外留出 IK 和浏览器调度时间。
+ACK_TIMEOUT_SECONDS = 20.0
 MAX_WEBSOCKET_MESSAGE_BYTES = 1024 * 1024
 
 
