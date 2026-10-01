@@ -95,7 +95,8 @@ def emit_actions(args):
             )
             with contextlib.redirect_stdout(sys.stderr):
                 with torch.inference_mode():
-                    prediction = policy.predict_action(obs)["action"][0].float().cpu().numpy()
+                    prediction = policy.predict_action(obs)["action_pred"][0]
+                    prediction = prediction.float().cpu().numpy()
 
             # 将完整预测序列还原到世界坐标，统计每个目标偏移和整段路径长度。
             current_pose = pose_to_mat(
@@ -142,11 +143,10 @@ def emit_actions(args):
                 ),
             }
 
-            # 保持单步回放行为不变，只将完整预测序列作为诊断信息传给服务端。
-            first_prediction = prediction[:1]
-            relative_pose = mat_to_pose(pose10d_to_mat(first_prediction[:, :9]))
+            # 将完整预测序列逐点转换为动作块。
+            relative_pose = mat_to_pose(pose10d_to_mat(prediction[:, :9]))
             robot_actions = np.concatenate(
-                [relative_pose, first_prediction[:, 9:10]],
+                [relative_pose, prediction[:, 9:10]],
                 axis=-1
             )
             output = {
