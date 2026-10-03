@@ -8,6 +8,7 @@
     "dev": "node scripts/syncRobotAssets.mjs && vite",
     "build": "node scripts/syncRobotAssets.mjs && tsc --noEmit && vite build",
     "preview": "vite preview",
+    "ik:multiseed": "node scripts/replay-ik-multiseed.mjs",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "format": "prettier --write .",

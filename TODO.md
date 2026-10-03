@@ -22,6 +22,7 @@
 - [x] 将在线 UMI 仿真 IK 位置容差设为 5 mm
 - [x] 为在线 IK 失败事件记录目标、种子关节值和退出原因
 - [x] 持久化记录 UMI IK action、Seed、位姿和逐轮 trace
+- [x] 对固定 IK 失败目标完成合法多 Seed 诊断实验
 - [x] 审计 UMI 在线坐标、旋转、时间与抓放链路并记录
 - [ ] 将本机训练 checkpoint 接入 Gazebo 回放启动参数
 - [ ] 接通 Gazebo 相机与 UMI 推理观测
