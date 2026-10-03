@@ -1,19 +1,24 @@
 # 处理 UMI 在线推理 WebSocket 的消息协议
 import asyncio
 import json
+import logging
 import math
+from typing import Optional
 
 from fastapi import WebSocket, WebSocketDisconnect
 
 if __package__:
+    from .ik_debug_log import record_ik_debug
     from .load_model import ReplayError
 else:
+    from ik_debug_log import record_ik_debug
     from load_model import ReplayError
 
 
 # 16 步动作每步回放 0.5 秒约需 8 秒，额外留出 IK 和浏览器调度时间。
 ACK_TIMEOUT_SECONDS = 20.0
 MAX_WEBSOCKET_MESSAGE_BYTES = 1024 * 1024
+LOGGER = logging.getLogger("umi_replay_server")
 
 
 def _read_joint_angles(message: dict, context: dict) -> list[dict[str, float]]:
@@ -46,6 +51,31 @@ def _read_joint_angles(message: dict, context: dict) -> list[dict[str, float]]:
     return joint_angles
 
 
+def _read_ik_trace(message: dict, context: dict) -> Optional[dict]:
+    record = message.get("record")
+    if not isinstance(record, dict):
+        return None
+    request_id = record.get("request_id")
+    episode_index = record.get("episode_index")
+    frame_index = record.get("frame_index")
+    action_index = record.get("action_index")
+    if (
+        not isinstance(request_id, str)
+        or not request_id
+        or isinstance(episode_index, bool)
+        or not isinstance(episode_index, int)
+        or episode_index != context["episode_index"]
+        or isinstance(frame_index, bool)
+        or not isinstance(frame_index, int)
+        or frame_index != context["frame_index"]
+        or isinstance(action_index, bool)
+        or not isinstance(action_index, int)
+        or action_index < 0
+    ):
+        return None
+    return record
+
+
 async def send_error(websocket: WebSocket, error: ReplayError) -> None:
     try:
         await websocket.send_json(error.as_event())
@@ -57,6 +87,7 @@ async def send_error(websocket: WebSocket, error: ReplayError) -> None:
 def serialize_action_chunk(chunk: dict) -> str:
     message = {
         "type": "action_chunk",
+        "request_id": chunk["request_id"],
         "episode_index": chunk["episode_index"],
         "frame_index": chunk["frame_index"],
         "last_chunk": chunk["last_chunk"],
@@ -105,68 +136,96 @@ async def wait_for_ack(
         "episode_index": chunk["episode_index"],
         "frame_index": frame_index,
     }
-    receive_task = asyncio.create_task(websocket.receive_text())
     exit_task = None
 
     if not chunk["last_chunk"]:
         exit_task = asyncio.create_task(worker.wait_for_process_exit())
 
-    wait_tasks = [receive_task]
-    if exit_task is not None:
-        wait_tasks.append(exit_task)
-
-    done, pending = await asyncio.wait(
-        wait_tasks,
-        timeout=ACK_TIMEOUT_SECONDS,
-        return_when=asyncio.FIRST_COMPLETED,
-    )
-
-    if not done:
-        for task in pending:
-            task.cancel()
-        await asyncio.gather(*pending, return_exceptions=True)
-        raise ReplayError(
-            "ack_timeout",
-            "wait_for_ack",
-            f"等待 frame_index={frame_index} 的 ACK 超时（{ACK_TIMEOUT_SECONDS:g} 秒）",
-            context=context,
-        )
-
-    if exit_task is not None and exit_task in done:
-        receive_task.cancel()
-        await asyncio.gather(receive_task, return_exceptions=True)
-        return_code = exit_task.result()
-        raise ReplayError(
-            "worker_exited",
-            "wait_for_ack",
-            f"UMI worker 在收到动作块 ACK 前退出，退出码为 {return_code}",
-            details=worker.stderr_details,
-            context=context,
-        )
-
-    if exit_task is not None:
-        exit_task.cancel()
-        await asyncio.gather(exit_task, return_exceptions=True)
-
-    raw_message = receive_task.result()
+    deadline = asyncio.get_running_loop().time() + ACK_TIMEOUT_SECONDS
     try:
-        message = json.loads(raw_message)
-    except json.JSONDecodeError as error:
-        raise ReplayError(
-            "invalid_message",
-            "wait_for_ack",
-            "客户端消息不是有效的 JSON",
-            details=str(error),
-            context=context,
-        ) from error
+        while True:
+            receive_task = asyncio.create_task(websocket.receive_text())
+            wait_tasks = [receive_task]
+            if exit_task is not None:
+                wait_tasks.append(exit_task)
 
-    if not isinstance(message, dict):
-        raise ReplayError(
-            "invalid_message",
-            "wait_for_ack",
-            "客户端消息必须是 JSON 对象",
-            context=context,
-        )
+            done, _ = await asyncio.wait(
+                wait_tasks,
+                timeout=max(0, deadline - asyncio.get_running_loop().time()),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            if not done:
+                receive_task.cancel()
+                await asyncio.gather(receive_task, return_exceptions=True)
+                raise ReplayError(
+                    "ack_timeout",
+                    "wait_for_ack",
+                    f"等待 frame_index={frame_index} 的 ACK 超时（{ACK_TIMEOUT_SECONDS:g} 秒）",
+                    context=context,
+                )
+
+            if exit_task is not None and exit_task in done:
+                receive_task.cancel()
+                await asyncio.gather(receive_task, return_exceptions=True)
+                return_code = exit_task.result()
+                raise ReplayError(
+                    "worker_exited",
+                    "wait_for_ack",
+                    f"UMI worker 在收到动作块 ACK 前退出，退出码为 {return_code}",
+                    details=worker.stderr_details,
+                    context=context,
+                )
+
+            raw_message = receive_task.result()
+            try:
+                message = json.loads(raw_message)
+            except json.JSONDecodeError as error:
+                raise ReplayError(
+                    "invalid_message",
+                    "wait_for_ack",
+                    "客户端消息不是有效的 JSON",
+                    details=str(error),
+                    context=context,
+                ) from error
+
+            if not isinstance(message, dict):
+                raise ReplayError(
+                    "invalid_message",
+                    "wait_for_ack",
+                    "客户端消息必须是 JSON 对象",
+                    context=context,
+                )
+
+            if message.get("type") != "ik_trace":
+                if exit_task is not None:
+                    exit_task.cancel()
+                    await asyncio.gather(exit_task, return_exceptions=True)
+                    exit_task = None
+                break
+
+            record = _read_ik_trace(message, context)
+            if record is None:
+                LOGGER.warning(
+                    "忽略无效 IK trace frame_index=%s",
+                    frame_index,
+                )
+                continue
+            try:
+                record_ik_debug(record)
+            except (OSError, TypeError, ValueError) as error:
+                LOGGER.error(
+                    "IK trace 写入失败 request_id=%s frame_index=%s "
+                    "action_index=%s error=%s",
+                    record["request_id"],
+                    frame_index,
+                    record["action_index"],
+                    error,
+                )
+    finally:
+        if exit_task is not None and not exit_task.done():
+            exit_task.cancel()
+            await asyncio.gather(exit_task, return_exceptions=True)
 
     if message.get("type") == "stop":
         return False, _read_joint_angles(message, context)

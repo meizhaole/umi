@@ -9,6 +9,7 @@ LOG_PATH = LOG_DIR / "inference-predictions.jsonl"
 
 def record_prediction(chunk: dict) -> None:
     record = {
+        "request_id": chunk.get("request_id"),
         "episode_index": chunk["episode_index"],
         "frame_index": chunk["frame_index"],
         "action_pose_repr": chunk["action_pose_repr"],

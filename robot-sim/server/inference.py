@@ -1,5 +1,6 @@
 # 组装 UMI 在线推理 WebSocket 路由
 import logging
+import uuid
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
@@ -81,8 +82,13 @@ async def inference(websocket: WebSocket) -> None:
                 return
 
             frame_index = observation["frame_index"]
+            request_id = uuid.uuid4().hex
             # 将当前帧写入错误上下文，便于定位模型推理阶段的问题。
-            worker.context = {"episode_index": 0, "frame_index": frame_index}
+            worker.context = {
+                "episode_index": 0,
+                "frame_index": frame_index,
+                "request_id": request_id,
+            }
             await worker.send_observation(observation)
 
             # 读取模型生成的动作块；停止消息也会终止当前订阅。
@@ -90,6 +96,8 @@ async def inference(websocket: WebSocket) -> None:
             if chunk is None:
                 await websocket.send_json({"type": "complete", "state": "stopped"})
                 return
+
+            chunk = {**chunk, "request_id": request_id}
 
             # 保存完整预测序列，并输出三毫米阈值的轨迹统计。
             record_prediction(chunk)

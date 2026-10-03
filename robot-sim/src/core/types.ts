@@ -128,3 +128,39 @@ export interface IKResult {
   terminationReason: IKTerminationReason;
   blockedJoints: string[];
 }
+
+export type IKIterationExitCondition =
+  | 'continue'
+  | 'converged'
+  | 'max_iterations'
+  | 'linear_solve_failed'
+  | 'joint_limits_blocked'
+  | 'no_joint_motion';
+
+export interface IKIterationTrace {
+  iteration_index: number;
+  q_before: JointValues;
+  current_position_residual: number;
+  current_orientation_residual: number;
+  delta_q_raw: Record<string, number> | null;
+  delta_q_after_active_set: Record<string, number | null>;
+  delta_q_after_step_limiting: Record<string, number | null>;
+  q_candidate: JointValues;
+  q_after: JointValues;
+  blocked_joints: string[];
+  active_joints: string[];
+  clamp_information: Record<
+    string,
+    {
+      blocked_by_active_set: boolean;
+      step_limited: boolean;
+      joint_limit_clamped: boolean;
+      requested_joint_value: number | null;
+      clamped_joint_value: number;
+    }
+  >;
+  joint_limit_margin: Record<string, { before: number | null; candidate: number | null }>;
+  exit_condition: IKIterationExitCondition;
+}
+
+export type IKIterationObserver = (iteration: IKIterationTrace) => void;

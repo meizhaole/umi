@@ -3,6 +3,7 @@ import type { JointValues, Pose, RobotDescription } from '../core/types';
 import { publishDebugEvent } from './debugBus';
 import type {
   ActionChunk,
+  IKActionDebugRecord,
   IkWorkerRequest,
   IkWorkerResponse,
   InferenceError,
@@ -13,6 +14,9 @@ import type {
 
 const INFERENCE_SOCKET_URL = 'ws://localhost:8000/ws/inference';
 const IK_TIMEOUT_MS = 1000;
+
+const isIkTraceEnabled = (): boolean =>
+  new URLSearchParams(window.location.search).get('ikTrace') === '1';
 
 interface ReplayContext {
   description: RobotDescription | null;
@@ -34,6 +38,8 @@ const selectJointAngles = (description: RobotDescription, jointValues: JointValu
 const isActionChunk = (value: unknown): value is ActionChunk => {
   if (!isRecord(value) || value.type !== 'action_chunk') return false;
   if (
+    typeof value.request_id !== 'string' ||
+    !value.request_id ||
     !Number.isInteger(value.episode_index) ||
     !Number.isInteger(value.frame_index) ||
     typeof value.last_chunk !== 'boolean' ||
@@ -238,6 +244,22 @@ export const useInferenceReplay = ({
         }
         return;
       }
+      if (response.type === 'ik_record') {
+        const socket = socketRef.current;
+        if (socket?.readyState === WebSocket.OPEN) {
+          const record: IKActionDebugRecord = response.record;
+          socket.send(JSON.stringify({ type: 'ik_trace', record }));
+          publishDebugEvent('inference:ik_trace', {
+            request_id: record.request_id,
+            episode_index: record.episode_index,
+            frame_index: record.frame_index,
+            action_index: record.action_index,
+            status: record.status,
+            trace_level: record.trace_level,
+          });
+        }
+        return;
+      }
       if (response.type === 'error') {
         fail(
           {
@@ -308,10 +330,14 @@ export const useInferenceReplay = ({
 
     const request: IkWorkerRequest = {
       type: 'solve',
+      request_id: chunk.request_id,
+      episode_index: chunk.episode_index,
+      frame_index: chunk.frame_index,
       description: context.description,
       startPose: context.tcpPose,
       initialJointValues: context.jointValues,
       actions: chunk.actions,
+      traceAllIterations: isIkTraceEnabled(),
     };
     worker.postMessage(request);
   };

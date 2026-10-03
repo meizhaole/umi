@@ -5,3 +5,7 @@
 旧版 `inference-actions.jsonl` 作为历史日志保留，新推理不再写入该文件。
 
 `inference-predictions.jsonl` 每行记录一次官方策略的完整反归一化预测，包含检查点的动作表示、全部预测点、实际回放的首个动作，以及三毫米阈值统计。`target_displacement_mm` 表示每个目标相对当前末端位置的偏移；`cumulative_path_mm` 表示从当前末端位置开始，沿预测目标序列逐段累加的路径长度。两项均以毫米为单位，超过三毫米的首个点使用从 1 开始的编号。
+
+`ik-debug.jsonl` 每行记录一个 IK action 事件，使用 `request_id`、`episode_index`、`frame_index` 和 `action_index` 关联策略动作。`record_phase=started` 保存进入 IK 时的原始 action、start pose 和 Seed；`record_phase=result` 保存求解摘要。失败结果始终包含完整迭代 trace，成功结果默认只保存摘要。
+
+完整记录成功 action 的迭代过程时，在仿真页面 URL 加上 `?ikTrace=1`。关闭时移除该参数或使用 `?ikTrace=0`。`action_pose_repr` 当前记为 `null`，并以 `action_pose_repr_status=unavailable` 标明浏览器 IK 请求拿不到该字段；日志不会推断或填造其值。

@@ -1,4 +1,6 @@
 import type {
+  IKIterationExitCondition,
+  IKIterationObserver,
   IKOptions,
   IKResidual,
   IKResult,
@@ -42,11 +44,15 @@ const clampJointValue = (joint: JointDescription, value: number): number =>
     Math.min(joint.limit?.upper ?? Number.POSITIVE_INFINITY, value),
   );
 
-const isOutwardStepAtLimit = (
-  joint: JointDescription,
-  value: number,
-  step: number,
-): boolean =>
+const getJointLimitMargin = (joint: JointDescription, value: number): number | null => {
+  const margins = [
+    joint.limit?.lower === undefined ? null : value - joint.limit.lower,
+    joint.limit?.upper === undefined ? null : joint.limit.upper - value,
+  ].filter((margin): margin is number => margin !== null);
+  return margins.length > 0 ? Math.min(...margins) : null;
+};
+
+const isOutwardStepAtLimit = (joint: JointDescription, value: number, step: number): boolean =>
   (joint.limit?.lower !== undefined && value <= joint.limit.lower + 1e-8 && step < 0) ||
   (joint.limit?.upper !== undefined && value >= joint.limit.upper - 1e-8 && step > 0);
 
@@ -130,6 +136,7 @@ export class Kinematics {
     targetPose: Pose,
     initialJointValues: JointValues = {},
     options: IKOptions = {},
+    onIteration?: IKIterationObserver,
   ): IKResult {
     const settings = {
       maxIterations: options.maxIterations ?? 100,
@@ -148,10 +155,15 @@ export class Kinematics {
     let current = this.forward(jointValues);
     let residual = this.measureResidual(targetPose, current.linkPoses[this.description.tipLink]);
     let iterations = 0;
+    let iterationIndex = 0;
     let terminationReason: IKTerminationReason = 'max_iterations';
     const blockedJointNames = new Set<string>();
 
     while (iterations < settings.maxIterations && !this.isConverged(residual, settings)) {
+      const currentIterationIndex = iterationIndex;
+      iterationIndex += 1;
+      const qBefore = { ...jointValues };
+      const currentResidual = { ...residual };
       const tipPose = current.linkPoses[this.description.tipLink];
       const error = [
         ...subtractVectors(targetPose.position, tipPose.position),
@@ -159,7 +171,9 @@ export class Kinematics {
       ];
       let activeVariables = variables;
       let jointSteps: number[] = [];
+      let rawJointSteps: number[] | null = null;
       let solved: number[] | undefined;
+      const blockedJointsThisIteration = new Set<string>();
 
       while (activeVariables.length > 0) {
         const jacobian = activeVariables.map((joint) =>
@@ -177,10 +191,12 @@ export class Kinematics {
         solved = solution;
         if (!solution) break;
 
-        jointSteps = activeVariables.map((_, index) =>
-          dotVectors(jacobian[index].slice(0, 3) as Vec3, solution.slice(0, 3) as Vec3) +
-          dotVectors(jacobian[index].slice(3, 6) as Vec3, solution.slice(3, 6) as Vec3),
+        jointSteps = activeVariables.map(
+          (_, index) =>
+            dotVectors(jacobian[index].slice(0, 3) as Vec3, solution.slice(0, 3) as Vec3) +
+            dotVectors(jacobian[index].slice(3, 6) as Vec3, solution.slice(3, 6) as Vec3),
         );
+        if (rawJointSteps === null) rawJointSteps = [...jointSteps];
         const blockedJoints = new Set(
           activeVariables
             .filter((joint, index) =>
@@ -189,14 +205,101 @@ export class Kinematics {
             .map((joint) => joint.name),
         );
         if (blockedJoints.size === 0) break;
-        blockedJoints.forEach((jointName) => blockedJointNames.add(jointName));
+        blockedJoints.forEach((jointName) => {
+          blockedJointNames.add(jointName);
+          blockedJointsThisIteration.add(jointName);
+        });
 
         // 触限关节若被要求继续越界，就从本轮雅可比中移除并重算其他关节的步长。
         activeVariables = activeVariables.filter((joint) => !blockedJoints.has(joint.name));
       }
 
+      const stepInformation = new Map<
+        string,
+        {
+          step: number;
+          stepLimited: boolean;
+          jointLimitClamped: boolean;
+          requestedJointValue: number;
+          clampedJointValue: number;
+        }
+      >();
+      const emitIteration = (
+        exitCondition: IKIterationExitCondition,
+        qCandidate: JointValues = qBefore,
+        qAfter: JointValues = qBefore,
+      ) => {
+        if (!onIteration) return;
+        const activeStepByName = new Map(
+          activeVariables.map((joint, index) => [joint.name, jointSteps[index]]),
+        );
+        const rawStepByName = rawJointSteps
+          ? new Map(variables.map((joint, index) => [joint.name, rawJointSteps?.[index] ?? 0]))
+          : null;
+        const deltaAfterStepLimiting = Object.fromEntries(
+          variables.map((joint) => [
+            joint.name,
+            blockedJointsThisIteration.has(joint.name)
+              ? 0
+              : (stepInformation.get(joint.name)?.step ?? null),
+          ]),
+        );
+        const clampInformation = Object.fromEntries(
+          variables.map((joint) => {
+            const information = stepInformation.get(joint.name);
+            return [
+              joint.name,
+              {
+                blocked_by_active_set: blockedJointsThisIteration.has(joint.name),
+                step_limited: information?.stepLimited ?? false,
+                joint_limit_clamped: information?.jointLimitClamped ?? false,
+                requested_joint_value: information?.requestedJointValue ?? null,
+                clamped_joint_value: information?.clampedJointValue ?? qBefore[joint.name],
+              },
+            ];
+          }),
+        );
+        const trace = {
+          iteration_index: currentIterationIndex,
+          q_before: qBefore,
+          current_position_residual: currentResidual.position,
+          current_orientation_residual: currentResidual.orientation,
+          delta_q_raw: rawStepByName ? Object.fromEntries(rawStepByName) : null,
+          delta_q_after_active_set: Object.fromEntries(
+            variables.map((joint) => [
+              joint.name,
+              blockedJointsThisIteration.has(joint.name)
+                ? null
+                : (activeStepByName.get(joint.name) ?? null),
+            ]),
+          ),
+          delta_q_after_step_limiting: deltaAfterStepLimiting,
+          q_candidate: { ...qCandidate },
+          q_after: { ...qAfter },
+          blocked_joints: Array.from(blockedJointsThisIteration),
+          active_joints: activeVariables.map((joint) => joint.name),
+          clamp_information: clampInformation,
+          joint_limit_margin: Object.fromEntries(
+            variables.map((joint) => [
+              joint.name,
+              {
+                before: getJointLimitMargin(joint, qBefore[joint.name]),
+                candidate: getJointLimitMargin(joint, qCandidate[joint.name]),
+              },
+            ]),
+          ),
+          exit_condition: exitCondition,
+        };
+        try {
+          onIteration(trace);
+        } catch {
+          // 调试回调异常不能改变 IK 求解结果。
+        }
+      };
+
       if (!solved || activeVariables.length === 0) {
         terminationReason = solved ? 'joint_limits_blocked' : 'linear_solve_failed';
+        emitIteration(terminationReason);
         break;
       }
 
@@ -204,8 +307,18 @@ export class Kinematics {
       activeVariables.forEach((joint, index) => {
         const maximumStep =
           joint.type === 'prismatic' ? settings.maxLinearStep : settings.maxAngularStep;
-        const step = Math.max(-maximumStep, Math.min(maximumStep, jointSteps[index]));
-        nextValues[joint.name] = clampJointValue(joint, jointValues[joint.name] + step);
+        const rawStep = jointSteps[index];
+        const step = Math.max(-maximumStep, Math.min(maximumStep, rawStep));
+        const requestedJointValue = jointValues[joint.name] + step;
+        const clampedJointValue = clampJointValue(joint, requestedJointValue);
+        nextValues[joint.name] = clampedJointValue;
+        stepInformation.set(joint.name, {
+          step,
+          stepLimited: step !== rawStep,
+          jointLimitClamped: clampedJointValue !== requestedJointValue,
+          requestedJointValue,
+          clampedJointValue,
+        });
       });
 
       if (
@@ -214,6 +327,7 @@ export class Kinematics {
         )
       ) {
         terminationReason = 'no_joint_motion';
+        emitIteration(terminationReason, nextValues);
         break;
       }
 
@@ -221,6 +335,15 @@ export class Kinematics {
       current = this.forward(jointValues);
       residual = this.measureResidual(targetPose, current.linkPoses[this.description.tipLink]);
       iterations += 1;
+      emitIteration(
+        this.isConverged(residual, settings)
+          ? 'converged'
+          : iterations >= settings.maxIterations
+            ? 'max_iterations'
+            : 'continue',
+        nextValues,
+        jointValues,
+      );
     }
 
     const converged = this.isConverged(residual, settings);

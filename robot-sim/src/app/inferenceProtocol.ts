@@ -1,7 +1,15 @@
-import type { JointValues, Pose, RobotDescription } from '../core/types';
+import type {
+  IKIterationTrace,
+  IKOptions,
+  IKTerminationReason,
+  JointValues,
+  Pose,
+  RobotDescription,
+} from '../core/types';
 
 export interface ActionChunk {
   type: 'action_chunk';
+  request_id: string;
   episode_index: number;
   frame_index: number;
   last_chunk: boolean;
@@ -36,14 +44,46 @@ export interface InferenceError {
 
 export interface IkWorkerRequest {
   type: 'solve';
+  request_id: string;
+  episode_index: number;
+  frame_index: number;
   description: RobotDescription;
   startPose: Pose;
   initialJointValues: JointValues;
   actions: number[][];
+  traceAllIterations: boolean;
+}
+
+export interface IKActionDebugRecord {
+  record_phase: 'started' | 'result';
+  request_id: string;
+  episode_index: number;
+  frame_index: number;
+  action_index: number;
+  action_pose_repr: null;
+  action_pose_repr_status: 'unavailable';
+  status: 'in_progress' | 'success' | 'failure';
+  trace_level: 'summary' | 'full';
+  raw_action: unknown;
+  start_pose: Pose;
+  target_pose: Pose | null;
+  seed_joint_values: JointValues;
+  previous_action_output_seed: JointValues | null;
+  solver_options: IKOptions;
+  final_joint_values: JointValues | null;
+  action_output_seed: JointValues | null;
+  position_residual: number | null;
+  orientation_residual: number | null;
+  iterations: number | null;
+  blocked_joints: string[] | null;
+  termination_reason: IKTerminationReason | 'invalid_action' | 'solver_exception' | null;
+  iteration_trace?: IKIterationTrace[];
+  error_message?: string;
 }
 
 export type IkWorkerResponse =
   | { type: 'progress'; actionIndex: number; total: number }
+  | { type: 'ik_record'; record: IKActionDebugRecord }
   | { type: 'solved'; actions: ResolvedAction[] }
   | { type: 'error'; error: InferenceError };
 
