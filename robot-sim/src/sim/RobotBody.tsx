@@ -12,11 +12,15 @@ import type {
   RobotDescription,
 } from '../core/types';
 import { composePoses } from '../utils/math';
+import { resolvePackageUri } from '../utils/resolvePackageUri.mjs';
+import { getRapierMassProperties } from '../utils/urdfInertialProperties';
 import { applyJointCommand } from './JointActuator';
 import { publishDebugEvent } from '../app/debugBus';
 
 interface RobotBodyProps {
   description: RobotDescription;
+  packageMappings: Readonly<Record<string, string>>;
+  positionExecution: 'joint_motors' | 'kinematic_fk';
   jointValues: JointValues;
   commands: Record<string, JointCommand>;
   mode: ControlMode;
@@ -52,6 +56,7 @@ interface SimulatedJoint {
 interface BodyFrame {
   body: RapierBody;
   robotToBodyRotation: Quaternion;
+  isDynamicLink: boolean;
 }
 
 const ROS_TO_SCENE = new Quaternion().setFromAxisAngle(new Vector3(1, 0, 0), -Math.PI / 2);
@@ -74,14 +79,11 @@ const worldPose = (pose: Pose): { position: Vector3; rotation: Quaternion } => (
   rotation: ROS_TO_SCENE.clone().multiply(new Quaternion(...pose.orientation)),
 });
 
-const meshUrl = (uri: string): string => {
-  const prefix = 'package://rebotarm_bringup/';
-  if (!uri.startsWith(prefix)) throw new Error(`不支持的碰撞网格 URI：${uri}`);
-  return `/robot/${uri.slice(prefix.length)}`;
-};
-
-const loadMeshPoints = async (uri: string): Promise<Float32Array> => {
-  const url = meshUrl(uri);
+const loadMeshPoints = async (
+  uri: string,
+  packageMappings: Readonly<Record<string, string>>,
+): Promise<Float32Array> => {
+  const url = resolvePackageUri(uri, packageMappings);
   const cached = meshPointCache.get(url);
   if (cached) return cached;
 
@@ -155,6 +157,7 @@ const geometryDescriptor = async (
   rapier: RapierModule,
   collision: CollisionDescription,
   linkToBody: Quaternion,
+  packageMappings: Readonly<Record<string, string>>,
 ) => {
   const bodyFromLink = linkToBody.clone().invert();
   const originRotation = new Quaternion(...collision.origin.orientation);
@@ -164,7 +167,7 @@ const geometryDescriptor = async (
   let descriptor: InstanceType<typeof rapier.ColliderDesc> | null = null;
 
   if (geometry.type === 'mesh') {
-    const source = await loadMeshPoints(geometry.filename);
+    const source = await loadMeshPoints(geometry.filename, packageMappings);
     const vertices = sampleHullPoints(source, new Vector3(...geometry.scale));
     descriptor = rapier.ColliderDesc.convexHull(vertices);
   } else if (geometry.type === 'box') {
@@ -302,6 +305,21 @@ const setKinematicBodies = (
   });
 };
 
+const setRobotPositionControl = (
+  rapier: RapierModule,
+  frames: Map<string, BodyFrame>,
+  enabled: boolean,
+): void => {
+  frames.forEach((frame) => {
+    if (!frame.isDynamicLink) return;
+    if (enabled && frame.body.isDynamic()) {
+      frame.body.setBodyType(rapier.RigidBodyType.KinematicPositionBased, true);
+    } else if (!enabled && !frame.body.isDynamic()) {
+      frame.body.setBodyType(rapier.RigidBodyType.Dynamic, true);
+    }
+  });
+};
+
 const readJointState = (joints: SimulatedJoint[]): JointValues => {
   const values: JointValues = {};
   joints.forEach((entry) => {
@@ -360,6 +378,8 @@ const axisInWorld = (joint: SimulatedJoint): Vector3 => {
 
 export const RobotBody = ({
   description,
+  packageMappings,
+  positionExecution,
   jointValues,
   commands,
   mode,
@@ -376,6 +396,8 @@ export const RobotBody = ({
   const heldGripperPositions = useRef(new Map<string, number>());
   const heldPositionMode = useRef(mode);
   const lastStatePublish = useRef(0);
+  const lastPhysicsSignature = useRef('');
+  const lastCommandSignature = useRef('');
 
   latestValues.current = jointValues;
   latestCommands.current = commands;
@@ -389,6 +411,7 @@ export const RobotBody = ({
     const createdJoints: SimulatedJoint[] = [];
     heldGripperPositions.current.clear();
     heldPositionMode.current = latestMode.current;
+    lastPhysicsSignature.current = '';
     let colliderCount = 0;
     const kinematics = new Kinematics(description);
     const initialValues = { ...latestValues.current };
@@ -414,8 +437,16 @@ export const RobotBody = ({
         bodyFrames.set(description.rootLink, {
           body: rootBody,
           robotToBodyRotation: new Quaternion(),
+          isDynamicLink: false,
         });
-        await attachCollisions(rapier, world, rootBody, rootLink, new Quaternion());
+        await attachCollisions(
+          rapier,
+          world,
+          rootBody,
+          rootLink,
+          new Quaternion(),
+          packageMappings,
+        );
         publishDebugEvent('physics:progress', { stage: 'root-colliders' });
 
         const jointsByParent = new Map<string, JointDescription[]>();
@@ -438,35 +469,33 @@ export const RobotBody = ({
             const link = description.links.find((item) => item.name === joint.child);
             const childPose = currentPoses[joint.child];
             if (!link || !childPose) throw new Error(`URDF 子连杆不存在：${joint.child}`);
-            const jointPose = composePoses(parentPose, joint.origin);
-            const jointWorldRotation = worldPose({
-              position: [0, 0, 0],
-              orientation: jointPose.orientation,
-            }).rotation;
-            const jointWorldAxis = new Vector3(...joint.axis)
-              .applyQuaternion(jointWorldRotation)
-              .normalize();
             const parentBodyRotation = new Quaternion(
               parentFrame.body.rotation().x,
               parentFrame.body.rotation().y,
               parentFrame.body.rotation().z,
               parentFrame.body.rotation().w,
             );
-            const parentAxis = jointWorldAxis
-              .clone()
-              .applyQuaternion(parentBodyRotation.clone().invert());
-            const childBodyRotation =
-              joint.type === 'fixed'
-                ? parentBodyRotation.clone()
-                : new Quaternion().setFromUnitVectors(parentAxis, jointWorldAxis);
+            const childBodyRotation = parentBodyRotation.clone();
             const childTransform = worldPose(childPose);
-            const rigidBodyDescription = !link.inertial
-              ? rapier.RigidBodyDesc.kinematicPositionBased()
-              : rapier.RigidBodyDesc.dynamic()
-                  .setAdditionalMass(Math.max(link.inertial.mass, 0.001))
+            const childLinkToBodyRotation = childTransform.rotation
+              .clone()
+              .invert()
+              .multiply(childBodyRotation);
+            const massProperties = link.inertial
+              ? getRapierMassProperties(link.inertial, childLinkToBodyRotation)
+              : null;
+            const rigidBodyDescription = massProperties
+              ? rapier.RigidBodyDesc.dynamic()
+                  .setAdditionalMassProperties(
+                    massProperties.mass,
+                    vectorObject(massProperties.centerOfMass),
+                    vectorObject(massProperties.principalAngularInertia),
+                    rotationObject(massProperties.angularInertiaLocalFrame),
+                  )
                   .setLinearDamping(0.6)
                   .setAngularDamping(1.2)
-                  .setGravityScale(0);
+                  .setGravityScale(0)
+              : rapier.RigidBodyDesc.kinematicPositionBased();
             const body = world.createRigidBody(
               rigidBodyDescription
                 .setTranslation(
@@ -477,13 +506,20 @@ export const RobotBody = ({
                 .setRotation(rotationObject(childBodyRotation)),
             );
             createdBodies.push(body);
-            const childLinkToBodyRotation = childTransform.rotation
-              .clone()
-              .invert()
-              .multiply(childBodyRotation);
-            const frame: BodyFrame = { body, robotToBodyRotation: childLinkToBodyRotation };
+            const frame: BodyFrame = {
+              body,
+              robotToBodyRotation: childLinkToBodyRotation,
+              isDynamicLink: Boolean(link.inertial),
+            };
             bodyFrames.set(link.name, frame);
-            await attachCollisions(rapier, world, body, link, childLinkToBodyRotation);
+            await attachCollisions(
+              rapier,
+              world,
+              body,
+              link,
+              childLinkToBodyRotation,
+              packageMappings,
+            );
             if (cancelled) break;
             publishDebugEvent('physics:progress', { stage: 'child-colliders', joint: joint.name });
 
@@ -536,9 +572,10 @@ export const RobotBody = ({
       body: RapierBody,
       link: RobotDescription['links'][number],
       linkToBodyRotation: Quaternion,
+      mappings: Readonly<Record<string, string>>,
     ) => {
       for (const collision of link.collisions) {
-        const collider = await geometryDescriptor(module, collision, linkToBodyRotation);
+        const collider = await geometryDescriptor(module, collision, linkToBodyRotation, mappings);
         if (cancelled) return;
         if (collider) {
           physicsWorld.createCollider(collider, body);
@@ -552,15 +589,32 @@ export const RobotBody = ({
       cancelled = true;
       bodies.current = new Map();
       joints.current = [];
+      lastPhysicsSignature.current = '';
       meshPointCache.clear();
       onReady(false);
     };
-  }, [description, onReady, rapier, world]);
+  }, [description, onReady, packageMappings, rapier, world]);
 
   const applyCommands = useCallback(() => {
     const values = latestValues.current;
     const activeMode = latestMode.current;
     const activeCommands = latestCommands.current;
+    const positionControl = activeMode === 'position' && positionExecution === 'kinematic_fk';
+    setRobotPositionControl(rapier, bodies.current, positionControl);
+    const commandSignature = JSON.stringify({ mode: activeMode, commands: activeCommands });
+    if (commandSignature !== lastCommandSignature.current) {
+      lastCommandSignature.current = commandSignature;
+      publishDebugEvent('robot:physics_command', {
+        mode: activeMode,
+        commands: activeCommands,
+        motorAvailability: Object.fromEntries(
+          joints.current.map((entry) => [
+            entry.description.name,
+            typeof entry.joint.configureMotorPosition === 'function',
+          ]),
+        ),
+      });
+    }
     if (activeMode !== heldPositionMode.current) {
       heldGripperPositions.current.clear();
       heldPositionMode.current = activeMode;
@@ -606,7 +660,7 @@ export const RobotBody = ({
     });
 
     setKinematicBodies(description, values, bodies.current);
-  }, [description]);
+  }, [description, positionExecution, rapier]);
 
   useBeforePhysicsStep(applyCommands);
   useAfterPhysicsStep(() => {
@@ -615,6 +669,26 @@ export const RobotBody = ({
     lastStatePublish.current = now;
     const measured = readJointState(joints.current);
     if (Object.keys(measured).length > 0) {
+      const signature = Object.entries(measured)
+        .map(([name, value]) => `${name}:${value.toFixed(4)}`)
+        .join('|');
+      if (signature !== lastPhysicsSignature.current) {
+        lastPhysicsSignature.current = signature;
+        const linkPoses = Object.fromEntries(
+          Array.from(bodies.current, ([name, frame]) => {
+            const position = frame.body.translation();
+            const orientation = frame.body.rotation();
+            return [
+              name,
+              {
+                position: [position.x, position.y, position.z],
+                orientation: [orientation.x, orientation.y, orientation.z, orientation.w],
+              },
+            ];
+          }),
+        );
+        publishDebugEvent('robot:physics_state', { jointValues: measured, linkPoses });
+      }
       latestStateCallback.current({ ...latestValues.current, ...measured });
     }
   });

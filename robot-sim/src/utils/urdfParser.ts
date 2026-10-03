@@ -228,7 +228,7 @@ const findTipLink = (
         .at(-1) as string);
 };
 
-export const parseUrdf = (xml: string): RobotDescription => {
+export const parseUrdf = (xml: string, options: { tipLink?: string } = {}): RobotDescription => {
   if (typeof DOMParser === 'undefined') throw new Error('parseUrdf 需要浏览器 DOMParser');
   const document = new DOMParser().parseFromString(xml, 'application/xml');
   if (document.querySelector('parsererror')) throw new Error('URDF XML 格式无效');
@@ -272,10 +272,12 @@ export const parseUrdf = (xml: string): RobotDescription => {
   });
 
   const rootLink = findRootLink(links, joints);
+  const tipLink = options.tipLink ?? findTipLink(links, joints, rootLink);
+  if (!linkNames.has(tipLink)) throw new Error(`URDF tipLink 不存在：${tipLink}`);
   return {
     name: robot.getAttribute('name') ?? 'robot',
     rootLink,
-    tipLink: findTipLink(links, joints, rootLink),
+    tipLink,
     links,
     joints,
   };

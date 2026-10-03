@@ -769,6 +769,41 @@ button {
   pointer-events: none;
   min-width: 112px;
 }
+.debug-overlay-ur5 {
+  max-width: min(360px, calc(100% - 30px));
+  max-height: calc(100% - 30px);
+  overflow: auto;
+  pointer-events: none;
+  min-width: 240px;
+}
+.debug-ur5-details {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px 12px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(98, 121, 140, 0.24);
+}
+.debug-ur5-details > span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: #a8b9c4;
+  font: 9px var(--font-mono);
+  overflow-wrap: anywhere;
+}
+.debug-ur5-details > span b {
+  color: #687c8a;
+  font-size: 7px;
+  font-weight: 500;
+  letter-spacing: 0.5px;
+}
+.debug-ur5-details > span small {
+  color: #6b7b87;
+  font-size: 7px;
+}
+.debug-ur5-details > .debug-pose {
+  grid-column: 1 / -1;
+}
 .debug-overlay > span {
   display: flex;
   align-items: baseline;

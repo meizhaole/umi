@@ -11,9 +11,17 @@ import type {
   RobotDescription,
 } from '../core/types';
 import { parseUrdf } from '../utils/urdfParser';
+import { configureRobotUrdf } from '../utils/configureRobotUrdf';
+import { resolvePackageUris } from '../utils/resolvePackageUri.mjs';
 import { publishDebugEvent } from './debugBus';
 import { useInferenceReplay } from './useInferenceReplay';
-import { findRobotConfig, ROBOT_MODELS, SIMULATION_CONFIG, type RobotModelId } from './config';
+import {
+  DEFAULT_ROBOT_MODEL_ID,
+  findRobotConfig,
+  ROBOT_MODELS,
+  SIMULATION_CONFIG,
+  type RobotModelId,
+} from './config';
 import { DebugOverlay } from '../viz/DebugOverlay';
 import { SceneManager } from '../viz/SceneManager';
 import { JointPanel } from '../ui/JointPanel';
@@ -27,6 +35,7 @@ import { CAMERA_IMAGE_SIZE } from '../sim/sensors/CameraSensor';
 
 interface LoadedRobot {
   description: RobotDescription;
+  urdfXml: string;
   controller: JointController;
   kinematics: Kinematics;
   model: RobotModel;
@@ -39,7 +48,7 @@ const DEFAULT_TARGET: Pose = {
 const CAMERA_PREVIEW_INTERVAL_MS = 100;
 
 export const App = () => {
-  const [modelId, setModelId] = useState<RobotModelId>('RS');
+  const [modelId, setModelId] = useState<RobotModelId>(DEFAULT_ROBOT_MODEL_ID);
   const [loadedRobot, setLoadedRobot] = useState<LoadedRobot | null>(null);
   const [loadError, setLoadError] = useState('');
   const [jointValues, setJointValues] = useState<JointValues>({});
@@ -48,6 +57,8 @@ export const App = () => {
   const [isRunning, setIsRunning] = useState(true);
   const [targetPose, setTargetPose] = useState<Pose>(DEFAULT_TARGET);
   const [ikResult, setIkResult] = useState<IKResult | null>(null);
+  const [ikTargetPose, setIkTargetPose] = useState<Pose | null>(null);
+  const [jointDeltaNorm, setJointDeltaNorm] = useState<number | null>(null);
   const [ikMessage, setIkMessage] = useState('');
   const [physicsReady, setPhysicsReady] = useState(false);
   const [cameraPreviewReady, setCameraPreviewReady] = useState(false);
@@ -64,6 +75,10 @@ export const App = () => {
     let active = true;
     setLoadedRobot(null);
     setLoadError('');
+    setIkResult(null);
+    setIkTargetPose(null);
+    setJointDeltaNorm(null);
+    setIkMessage('');
     setJointValues({});
     setCommands({});
     setPhysicsReady(false);
@@ -75,25 +90,32 @@ export const App = () => {
 
     const loadRobot = async () => {
       try {
-        const url = `${SIMULATION_CONFIG.robotAssetRoot}/${modelId}/urdf/${currentModel.file}`;
+        const url = `${SIMULATION_CONFIG.robotAssetRoot}/${currentModel.file}`;
         const response = await fetch(url);
         if (!response.ok) throw new Error(`URDF 加载失败：HTTP ${response.status}`);
-        const description = parseUrdf(await response.text());
+        const sourceUrdf = configureRobotUrdf(await response.text(), currentModel);
+        const urdfXml = resolvePackageUris(sourceUrdf, currentModel.packageMappings);
+        const description = parseUrdf(sourceUrdf, { tipLink: currentModel.tipLink });
         const model = new RobotModel(description);
+        model.setJointValues(currentModel.initialJoints);
         if (!active) return;
-        if (modelId === 'RS') {
-          model.setJointValue('joint2', 0.1);
-          model.setJointValue('joint3', 0.1);
-        }
 
         setLoadedRobot({
           description,
+          urdfXml,
           controller: new JointController(model),
           kinematics: new Kinematics(description),
           model,
         });
         setJointValues(model.getJointValues());
-        publishDebugEvent('robot:loaded', { model: modelId, name: description.name });
+        publishDebugEvent('robot:loaded', {
+          model: modelId,
+          type: currentModel.type,
+          name: description.name,
+          rootLink: description.rootLink,
+          tipLink: description.tipLink,
+          joints: model.getControllableJoints().map((joint) => joint.name),
+        });
       } catch (error) {
         if (!active) return;
         const message = error instanceof Error ? error.message : String(error);
@@ -106,9 +128,12 @@ export const App = () => {
     return () => {
       active = false;
     };
-  }, [currentModel.file, modelId]);
+  }, [currentModel, modelId]);
 
   const tcpPose = loadedRobot?.model.getLinkPose() ?? null;
+  const tool0Pose = loadedRobot?.description.links.some((link) => link.name === 'tool0')
+    ? loadedRobot.model.getLinkPose('tool0')
+    : null;
   const handleCameraFrame = useCallback((frame: SimCameraFrame) => {
     cameraFramesRef.current = [...cameraFramesRef.current.slice(-1), frame];
 
@@ -198,14 +223,33 @@ export const App = () => {
 
   const solveIk = () => {
     if (!loadedRobot || inference.isLocked) return;
-    const result = loadedRobot.kinematics.solveIK(targetPose, jointValues);
+    const startJointValues = { ...jointValues };
+    const requestedPose = {
+      position: [...targetPose.position] as [number, number, number],
+      orientation: [...targetPose.orientation] as [number, number, number, number],
+    };
+    const result = loadedRobot.kinematics.solveIK(requestedPose, startJointValues);
+    const deltaNorm = Math.hypot(
+      ...loadedRobot.model
+        .getControllableJoints()
+        .map(
+          (joint) => (result.jointValues[joint.name] ?? 0) - (startJointValues[joint.name] ?? 0),
+        ),
+    );
     setIkResult(result);
+    setIkTargetPose(requestedPose);
+    setJointDeltaNorm(deltaNorm);
     setIkMessage(
       result.converged
         ? `收敛于 ${result.iterations} 次迭代`
         : `未收敛，位置残差 ${result.residual.position.toFixed(4)} m`,
     );
-    publishDebugEvent('ik:result', result);
+    publishDebugEvent('ik:result', {
+      ...result,
+      targetPose: requestedPose,
+      startJointValues,
+      jointDeltaNorm: deltaNorm,
+    });
     if (result.converged) {
       setControlMode('position');
       loadedRobot.model.setJointValues(result.jointValues);
@@ -386,7 +430,7 @@ export const App = () => {
                 onClick={() => {
                   if (!loadedRobot) return;
                   loadedRobot.controller.setMode('position');
-                  loadedRobot.model.setJointValues({});
+                  loadedRobot.model.setJointValues(currentModel.initialJoints);
                   const nextValues = loadedRobot.model.getJointValues();
                   loadedRobot.model.getControllableJoints().forEach((joint) => {
                     loadedRobot.controller.setCommand(joint.name, nextValues[joint.name]);
@@ -434,6 +478,7 @@ export const App = () => {
               <SceneManager
                 commands={commands}
                 description={loadedRobot.description}
+                urdfXml={loadedRobot.urdfXml}
                 isRunning={isRunning}
                 mode={mode}
                 jointValues={jointValues}
@@ -459,7 +504,19 @@ export const App = () => {
                 </span>
               </div>
             )}
-            <DebugOverlay jointValues={jointValues} pose={tcpPose} />
+            <DebugOverlay
+              controllableJointNames={
+                loadedRobot?.model.getControllableJoints().map((joint) => joint.name) ?? []
+              }
+              ikResult={ikResult}
+              ikTargetPose={ikTargetPose}
+              jointDeltaNorm={jointDeltaNorm}
+              jointValues={jointValues}
+              pose={tcpPose}
+              robotType={currentModel.type}
+              targetPose={targetPose}
+              tool0Pose={tool0Pose}
+            />
             <div className="view-axis">
               <span>X</span>
               <span>Y</span>

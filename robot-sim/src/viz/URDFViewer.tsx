@@ -1,15 +1,16 @@
 import { useEffect, useState } from 'react';
+import { LoadingManager, Quaternion, Vector3 } from 'three';
 import type { URDFRobot } from 'urdf-loader';
 import URDFLoader from 'urdf-loader';
 import type { JointValues } from '../core/types';
-import { SIMULATION_CONFIG } from '../app/config';
 import type { RobotDescription, Pose } from '../core/types';
+import { publishDebugEvent } from '../app/debugBus';
 import { WristCameraCapture, type SimCameraFrame } from '../sim/sensors/WristCameraCapture';
 import type { CupBodyRef } from '../sim/tasks/CupArrangementScene';
 
 interface URDFViewerProps {
-  modelId: string;
-  urdfFile: string;
+  urdfXml: string;
+  packageMappings: Readonly<Record<string, string>>;
   jointValues: JointValues;
   onError: (message: string) => void;
   onLoaded: () => void;
@@ -22,8 +23,8 @@ interface URDFViewerProps {
 }
 
 export const URDFViewer = ({
-  modelId,
-  urdfFile,
+  urdfXml,
+  packageMappings,
   jointValues,
   onError,
   onLoaded,
@@ -39,33 +40,48 @@ export const URDFViewer = ({
   useEffect(() => {
     let active = true;
     setRobot(null);
-    const loader = new URDFLoader();
-    loader.packages = { rebotarm_bringup: '/robot/' };
-    loader.parseCollision = true;
-    loader.load(
-      `${SIMULATION_CONFIG.robotAssetRoot}/${modelId}/urdf/${urdfFile}`,
-      (loadedRobot) => {
-        if (!active) return;
-        loadedRobot.rotation.set(-Math.PI / 2, 0, 0);
-        Object.values(loadedRobot.colliders).forEach((collider) => {
-          collider.visible = false;
-        });
-        setRobot(loadedRobot);
+    const manager = new LoadingManager();
+    manager.onLoad = () => {
+      if (active) {
+        publishDebugEvent('robot:visual_assets_loaded', { name: description.name });
         onLoaded();
-      },
-      undefined,
-      (error) => {
-        if (active) onError(error instanceof Error ? error.message : String(error));
-      },
-    );
+      }
+    };
+    manager.onError = (url) => {
+      if (active) onError(`URDF 网格加载失败：${url}`);
+    };
+    const loader = new URDFLoader(manager);
+    loader.packages = packageMappings;
+    loader.parseCollision = true;
+    try {
+      const loadedRobot = loader.parse(urdfXml);
+      loadedRobot.rotation.set(-Math.PI / 2, 0, 0);
+      Object.values(loadedRobot.colliders).forEach((collider) => {
+        collider.visible = false;
+      });
+      setRobot(loadedRobot);
+    } catch (error) {
+      if (active) onError(error instanceof Error ? error.message : String(error));
+    }
     return () => {
       active = false;
     };
-  }, [modelId, onError, onLoaded, urdfFile]);
+  }, [description.name, onError, onLoaded, packageMappings, urdfXml]);
 
   useEffect(() => {
     if (!robot) return;
     robot.setJointValues(jointValues);
+    robot.updateMatrixWorld(true);
+    const linkPoses = Object.fromEntries(
+      Object.entries(robot.links).map(([name, link]) => [
+        name,
+        {
+          position: link.getWorldPosition(new Vector3()).toArray(),
+          orientation: link.getWorldQuaternion(new Quaternion()).toArray(),
+        },
+      ]),
+    );
+    publishDebugEvent('robot:visual_state', { jointValues, linkPoses });
   }, [jointValues, robot]);
 
   return robot ? (

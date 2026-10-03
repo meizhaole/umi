@@ -6,7 +6,10 @@ import { JointController } from '../src/core/JointController';
 import { Kinematics } from '../src/core/Kinematics';
 import { RobotModel } from '../src/core/RobotModel';
 import { applyJointCommand } from '../src/sim/JointActuator';
+import { DEFAULT_ROBOT_MODEL_ID, findRobotConfig, ROBOT_MODELS } from '../src/app/config';
+import { configureRobotUrdf } from '../src/utils/configureRobotUrdf';
 import { parseUrdf } from '../src/utils/urdfParser';
+import { quaternionFromEuler } from '../src/utils/math';
 
 const planarUrdf = (upperLimit = 2): string => `
   <robot name="planar">
@@ -29,8 +32,10 @@ const planarUrdf = (upperLimit = 2): string => `
   </robot>
 `;
 
-const readDescription = (relativePath: string) =>
-  parseUrdf(readFileSync(new URL(relativePath, import.meta.url), 'utf8'));
+const readUrdf = (relativePath: string) =>
+  readFileSync(new URL(relativePath, import.meta.url), 'utf8');
+
+const readDescription = (relativePath: string) => parseUrdf(readUrdf(relativePath));
 
 describe('URDF 解析', () => {
   it('读取 RS 的关节、惯性和碰撞网格', () => {
@@ -173,5 +178,177 @@ describe('RS / DM Rapier 关节命令适配', () => {
         joint.type === 'prismatic' ? 'force' : 'torque',
       ]);
     });
+  });
+});
+
+describe('UR5 官方描述、TCP、FK 与 IK', () => {
+  const ur5Config = findRobotConfig('UR5');
+  const officialUrdf = readUrdf('../assets/ur_description/urdf/ur5.urdf');
+  const makeUr5Description = (tcpOffset = ur5Config.tcpOffset ?? 0) => {
+    const config = { ...ur5Config, tcpOffset };
+    const xml = configureRobotUrdf(officialUrdf, config);
+    return parseUrdf(xml, { tipLink: config.tipLink });
+  };
+  const startJoints = ur5Config.initialJoints;
+  const expectedJointNames = [
+    'shoulder_pan_joint',
+    'shoulder_lift_joint',
+    'elbow_joint',
+    'wrist_1_joint',
+    'wrist_2_joint',
+    'wrist_3_joint',
+  ];
+
+  it('保留 RS、DM 并以 RS 为默认型号', () => {
+    expect(ROBOT_MODELS.map((robot) => robot.id)).toEqual(['RS', 'DM', 'UR5']);
+    expect(DEFAULT_ROBOT_MODEL_ID).toBe('RS');
+    expect(findRobotConfig('RS').positionExecution).toBe('joint_motors');
+    expect(findRobotConfig('DM').positionExecution).toBe('joint_motors');
+    expect(findRobotConfig('UR5').positionExecution).toBe('kinematic_fk');
+  });
+
+  it('解析官方六关节、关键连杆和显式 umi_tcp', () => {
+    const description = makeUr5Description();
+    const revoluteJoints = description.joints
+      .filter((joint) => joint.type === 'revolute')
+      .map((joint) => joint.name);
+
+    expect(revoluteJoints).toEqual(expectedJointNames);
+    expect(description.links.map((link) => link.name)).toEqual(
+      expect.arrayContaining(['base_link', 'wrist_3_link', 'flange', 'tool0', 'umi_tcp']),
+    );
+    expect(description.tipLink).toBe('umi_tcp');
+    expect(description.joints.find((joint) => joint.child === 'umi_tcp')?.type).toBe('fixed');
+    expectedJointNames.forEach((jointName) => {
+      const joint = description.joints.find((item) => item.name === jointName);
+      expect(joint?.axis).toEqual([0, 0, 1]);
+      expect(joint?.limit?.lower).toBeDefined();
+      expect(joint?.limit?.upper).toBeDefined();
+    });
+  });
+
+  it('初始 FK 的 tool0 与 umi_tcp 在 tcpOffset 为零时重合', () => {
+    const description = makeUr5Description();
+    const kinematics = new Kinematics(description);
+    const tool0Pose = kinematics.forwardKinematics(startJoints, 'tool0');
+    const umiTcpPose = kinematics.forwardKinematics(startJoints, 'umi_tcp');
+
+    console.info('UR5 initial FK', JSON.stringify({ tool0Pose, umiTcpPose }));
+    tool0Pose.position.forEach((value, index) => {
+      expect(umiTcpPose.position[index]).toBeCloseTo(value, 12);
+    });
+    tool0Pose.orientation.forEach((value, index) => {
+      expect(umiTcpPose.orientation[index]).toBeCloseTo(value, 12);
+    });
+  });
+
+  it('tcpOffset 配置沿 tool0 局部 Z 轴建立固定变换', () => {
+    const description = makeUr5Description(0.035);
+    const kinematics = new Kinematics(description);
+    const tool0 = kinematics.forwardKinematics(startJoints, 'tool0');
+    const umiTcp = kinematics.forwardKinematics(startJoints, 'umi_tcp');
+    const offset = Math.hypot(
+      umiTcp.position[0] - tool0.position[0],
+      umiTcp.position[1] - tool0.position[1],
+      umiTcp.position[2] - tool0.position[2],
+    );
+
+    expect(offset).toBeCloseTo(0.035, 10);
+  });
+
+  it('六个关节分别改变自己的子 link，且不移动父 link', () => {
+    const description = makeUr5Description();
+    const kinematics = new Kinematics(description);
+    const initialPoses = kinematics.forwardKinematicsAll(startJoints);
+
+    expectedJointNames.forEach((jointName) => {
+      const joint = description.joints.find((item) => item.name === jointName);
+      if (!joint) throw new Error(`缺少 UR5 joint：${jointName}`);
+      const movedValues = { ...startJoints, [jointName]: startJoints[jointName] + 0.1 };
+      const movedPoses = kinematics.forwardKinematicsAll(movedValues);
+
+      expect(movedPoses[joint.parent].position).toEqual(initialPoses[joint.parent].position);
+      expect(movedPoses[joint.child].orientation).not.toEqual(
+        initialPoses[joint.child].orientation,
+      );
+      console.info(
+        'UR5 joint FK',
+        JSON.stringify({ jointName, parent: joint.parent, child: joint.child }),
+      );
+    });
+  });
+
+  it.each([
+    { axis: 'x', index: 0, delta: 0.02 },
+    { axis: 'x', index: 0, delta: -0.02 },
+    { axis: 'y', index: 1, delta: 0.02 },
+    { axis: 'y', index: 1, delta: -0.02 },
+    { axis: 'z', index: 2, delta: 0.02 },
+    { axis: 'z', index: 2, delta: -0.02 },
+  ])('IK 目标沿 $axis 轴移动 $delta m', ({ axis, index, delta }) => {
+    const description = makeUr5Description();
+    const kinematics = new Kinematics(description);
+    const startPose = kinematics.forwardKinematics(startJoints, 'umi_tcp');
+    const targetPose: Pose = {
+      position: [...startPose.position],
+      orientation: [...startPose.orientation],
+    };
+    targetPose.position[index] += delta;
+
+    const result = kinematics.solveIK(targetPose, startJoints);
+    const jointDeltaNorm = Math.hypot(
+      ...expectedJointNames.map(
+        (jointName) => (result.jointValues[jointName] ?? 0) - (startJoints[jointName] ?? 0),
+      ),
+    );
+    console.info(
+      `UR5 IK ${axis} ${delta > 0 ? '+' : ''}${delta}`,
+      JSON.stringify({
+        targetPose,
+        startJoints,
+        solutionJoints: Object.fromEntries(
+          expectedJointNames.map((jointName) => [jointName, result.jointValues[jointName]]),
+        ),
+        success: result.converged,
+        positionResidual: result.residual.position,
+        orientationResidual: result.residual.orientation,
+        jointDeltaNorm,
+      }),
+    );
+
+    expect(result.converged).toBe(true);
+    expect(result.residual.position).toBeLessThanOrEqual(0.001);
+    expect(result.residual.orientation).toBeLessThanOrEqual(0.01);
+    expect(jointDeltaNorm).toBeGreaterThan(0);
+  });
+
+  it('通用 parser 保留 xyz、rpy、任意关节轴和 fixed 变换', () => {
+    const xml = `
+      <robot name="generic_transform">
+        <link name="base" />
+        <link name="arm" />
+        <link name="tip" />
+        <joint name="axis_y" type="revolute">
+          <origin xyz="0.1 0.2 0.3" rpy="0.3 -0.2 0.5" />
+          <parent link="base" />
+          <child link="arm" />
+          <axis xyz="0 1 0" />
+          <limit lower="-1" upper="1" effort="10" velocity="2" />
+        </joint>
+        <joint name="fixed_tip" type="fixed">
+          <origin xyz="0 0 0.05" />
+          <parent link="arm" />
+          <child link="tip" />
+        </joint>
+      </robot>
+    `;
+    const description = parseUrdf(xml, { tipLink: 'tip' });
+    const pose = new Kinematics(description).forwardKinematics({}, 'arm');
+    const joint = description.joints.find((item) => item.name === 'axis_y');
+
+    expect(description.tipLink).toBe('tip');
+    expect(joint?.origin.position).toEqual([0.1, 0.2, 0.3]);
+    expect(joint?.axis).toEqual([0, 1, 0]);
+    expect(pose.orientation).toEqual(quaternionFromEuler(0.3, -0.2, 0.5));
   });
 });

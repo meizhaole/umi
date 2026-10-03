@@ -1,9 +1,10 @@
-// 同步 RS、DM URDF 实际引用的 STL 到 Vite 静态目录。
+// 同步 robot-sim 支持的模型 URDF 和其引用网格。
 import { constants } from 'node:fs';
 import { copyFile, lstat, mkdir, readFile, realpath, rename, rm } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { basename, extname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { resolvePackageUri } from '../src/utils/resolvePackageUri.mjs';
 
 const SCRIPT_DIRECTORY = fileURLToPath(new URL('.', import.meta.url));
 const PROJECT_DIRECTORY = resolve(SCRIPT_DIRECTORY, '..');
@@ -11,12 +12,33 @@ const ROS_PACKAGE_DIRECTORY = resolve(
   PROJECT_DIRECTORY,
   '../reBotArmController_ROS2/src/rebotarm_bringup',
 );
+const UR_DESCRIPTION_DIRECTORY = resolve(PROJECT_DIRECTORY, 'assets/ur_description');
 const ROBOT_ASSET_DIRECTORY = resolve(PROJECT_DIRECTORY, 'public/robot');
-const URDF_MODELS = [
-  { name: 'RS', file: 'description/RS/urdf/ReBot_Arm_RS.urdf' },
-  { name: 'DM', file: 'description/DM/urdf/ReBot_Arm_DM.urdf' },
+const SOURCE_PACKAGE_ROOTS = {
+  rebotarm_bringup: ROS_PACKAGE_DIRECTORY,
+  ur_description: UR_DESCRIPTION_DIRECTORY,
+};
+const DESTINATION_PACKAGE_ROOTS = {
+  rebotarm_bringup: ROBOT_ASSET_DIRECTORY,
+  ur_description: resolve(ROBOT_ASSET_DIRECTORY, 'ur_description'),
+};
+const ROBOT_URDFS = [
+  {
+    model: 'RS',
+    package: 'rebotarm_bringup',
+    file: 'description/RS/urdf/ReBot_Arm_RS.urdf',
+  },
+  {
+    model: 'DM',
+    package: 'rebotarm_bringup',
+    file: 'description/DM/urdf/ReBot_Arm_DM.urdf',
+  },
+  {
+    model: 'UR5',
+    package: 'ur_description',
+    file: 'urdf/ur5.urdf',
+  },
 ];
-const PACKAGE_NAME = 'rebotarm_bringup';
 const PACKAGE_URI_PATTERN = /package:\/\/[^"'`\s<>]+/gu;
 
 function isPathInside(parent, candidate) {
@@ -28,42 +50,6 @@ function isPathInside(parent, candidate) {
     !pathFromParent.startsWith(`..${sep}`) &&
     !isAbsolute(pathFromParent)
   );
-}
-
-function assetPathFromUri(uri, modelName) {
-  const match = /^package:\/\/([^/]+)\/(.+)$/u.exec(uri);
-
-  if (!match || match[1] !== PACKAGE_NAME) {
-    throw new Error(`URDF 使用了不支持的资源 URI：${uri}`);
-  }
-
-  let decodedPath;
-  try {
-    decodedPath = decodeURIComponent(match[2]);
-  } catch {
-    throw new Error(`资源 URI 编码无效：${uri}`);
-  }
-
-  const segments = decodedPath.split('/');
-  if (
-    decodedPath.includes('\\') ||
-    decodedPath.includes('\0') ||
-    decodedPath.includes('?') ||
-    decodedPath.includes('#') ||
-    segments.some((segment) => segment === '' || segment === '.' || segment === '..')
-  ) {
-    throw new Error(`资源 URI 包含不安全的路径：${uri}`);
-  }
-
-  if (segments[0] !== 'description' || segments[1] !== modelName) {
-    throw new Error(`资源 URI 未指向 ${modelName} 描述目录：${uri}`);
-  }
-
-  if (extname(segments.at(-1)).toLowerCase() !== '.stl') {
-    throw new Error(`当前资源同步仅支持 STL 网格：${uri}`);
-  }
-
-  return segments;
 }
 
 async function ensureDirectory(parent, segments) {
@@ -81,9 +67,7 @@ async function ensureDirectory(parent, segments) {
         throw new Error(`目标路径不是普通目录：${currentDirectory}`);
       }
     } catch (error) {
-      if (error.code !== 'ENOENT') {
-        throw error;
-      }
+      if (error.code !== 'ENOENT') throw error;
       await mkdir(currentDirectory);
     }
   }
@@ -91,10 +75,10 @@ async function ensureDirectory(parent, segments) {
   return currentDirectory;
 }
 
-async function checkedSourcePath(segments) {
-  const sourcePath = resolve(ROS_PACKAGE_DIRECTORY, ...segments);
-  if (!isPathInside(ROS_PACKAGE_DIRECTORY, sourcePath)) {
-    throw new Error(`源资源超出 ROS 包目录：${segments.join('/')}`);
+async function checkedSourcePath(packageName, sourcePath) {
+  const packageRoot = SOURCE_PACKAGE_ROOTS[packageName];
+  if (!packageRoot || !isPathInside(packageRoot, sourcePath)) {
+    throw new Error(`源资源超出 ${packageName} 包目录：${sourcePath}`);
   }
 
   let resolvedSource;
@@ -107,16 +91,13 @@ async function checkedSourcePath(segments) {
     throw error;
   }
 
-  const resolvedPackage = await realpath(ROS_PACKAGE_DIRECTORY);
+  const resolvedPackage = await realpath(packageRoot);
   if (!isPathInside(resolvedPackage, resolvedSource)) {
-    throw new Error(`源资源通过符号链接离开 ROS 包目录：${sourcePath}`);
+    throw new Error(`源资源通过符号链接离开 ${packageName} 包目录：${sourcePath}`);
   }
 
   const info = await lstat(resolvedSource);
-  if (!info.isFile()) {
-    throw new Error(`URDF 引用的资源不是普通文件：${sourcePath}`);
-  }
-
+  if (!info.isFile()) throw new Error(`URDF 引用的资源不是普通文件：${sourcePath}`);
   return resolvedSource;
 }
 
@@ -136,9 +117,7 @@ async function copySafely(sourcePath, relativeDestination) {
       throw new Error(`拒绝覆盖非普通文件：${destinationPath}`);
     }
   } catch (error) {
-    if (error.code !== 'ENOENT') {
-      throw error;
-    }
+    if (error.code !== 'ENOENT') throw error;
   }
 
   const temporaryPath = resolve(
@@ -155,21 +134,35 @@ async function copySafely(sourcePath, relativeDestination) {
   }
 }
 
+async function addToCopyPlan(copyPlan, uri, packageName) {
+  const sourcePath = resolvePackageUri(uri, SOURCE_PACKAGE_ROOTS);
+  const destinationPath = resolvePackageUri(uri, DESTINATION_PACKAGE_ROOTS);
+  if (!isPathInside(ROBOT_ASSET_DIRECTORY, destinationPath)) {
+    throw new Error(`静态资源目标超出 robot 目录：${destinationPath}`);
+  }
+
+  const source = await checkedSourcePath(packageName, sourcePath);
+  const destination = relative(ROBOT_ASSET_DIRECTORY, destinationPath);
+  if (!copyPlan.has(destination)) copyPlan.set(destination, source);
+}
+
 async function buildCopyPlan() {
   const copyPlan = new Map();
 
-  for (const model of URDF_MODELS) {
-    const urdfSegments = model.file.split('/');
-    const urdfSource = await checkedSourcePath(urdfSegments);
+  for (const robot of ROBOT_URDFS) {
+    const urdfUri = `package://${robot.package}/${robot.file}`;
+    const urdfSource = await checkedSourcePath(
+      robot.package,
+      resolvePackageUri(urdfUri, SOURCE_PACKAGE_ROOTS),
+    );
+    await addToCopyPlan(copyPlan, urdfUri, robot.package);
     const urdfContents = await readFile(urdfSource, 'utf8');
-    copyPlan.set(model.file, urdfSource);
 
     for (const match of urdfContents.matchAll(PACKAGE_URI_PATTERN)) {
-      const assetSegments = assetPathFromUri(match[0], model.name);
-      const assetDestination = assetSegments.join('/');
-      if (!copyPlan.has(assetDestination)) {
-        copyPlan.set(assetDestination, await checkedSourcePath(assetSegments));
-      }
+      const uri = match[0];
+      const packageName = /^package:\/\/([^/]+)\//u.exec(uri)?.[1];
+      if (!packageName) throw new Error(`URDF 资源 URI 无效：${uri}`);
+      await addToCopyPlan(copyPlan, uri, packageName);
     }
   }
 
@@ -177,9 +170,7 @@ async function buildCopyPlan() {
 }
 
 function color(text, code) {
-  if (!process.stdout.isTTY || process.env.NO_COLOR) {
-    return text;
-  }
+  if (!process.stdout.isTTY || process.env.NO_COLOR) return text;
   return `\u001b[${code}m${text}\u001b[0m`;
 }
 
@@ -191,12 +182,12 @@ async function main() {
     await copySafely(source, destination);
   }
 
-  const stlCount = [...copyPlan.keys()].filter(
-    (file) => extname(file).toLowerCase() === '.stl',
+  const meshCount = [...copyPlan.keys()].filter((file) =>
+    ['.dae', '.stl'].includes(extname(file).toLowerCase()),
   ).length;
   console.log(
     color(
-      `模型资源同步完成：${URDF_MODELS.length} 份 URDF，${stlCount} 个唯一 STL → public/robot/description/`,
+      `模型资源同步完成：${ROBOT_URDFS.length} 份 URDF，${meshCount} 个唯一网格 → public/robot/`,
       32,
     ),
   );

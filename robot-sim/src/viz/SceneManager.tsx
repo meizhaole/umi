@@ -1,4 +1,4 @@
-import { Suspense, useCallback, useEffect, useMemo, useRef } from 'react';
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import type { RapierRigidBody } from '@react-three/rapier';
 import { Vector3 } from 'three';
@@ -17,6 +17,7 @@ import type { Pose } from '../core/types';
 interface SceneManagerProps {
   modelId: RobotModelId;
   description: RobotDescription;
+  urdfXml: string;
   jointValues: JointValues;
   commands: Record<string, JointCommand>;
   mode: ControlMode;
@@ -133,6 +134,7 @@ const CameraControls = ({ cupBodyRef, inferenceActive, onControlsChange }: Camer
 export const SceneManager = ({
   modelId,
   description,
+  urdfXml,
   jointValues,
   commands,
   mode,
@@ -148,6 +150,8 @@ export const SceneManager = ({
   onCameraFrame,
 }: SceneManagerProps) => {
   const model = findRobotConfig(modelId);
+  const [readyModelId, setReadyModelId] = useState<RobotModelId | null>(null);
+  const robotPhysicsReady = readyModelId === modelId;
   const controlsRef = useRef<OrbitControls | null>(null);
   const cupBodyRef = useRef<RapierRigidBody | null>(null);
   const handleControlsChange = useCallback((controls: OrbitControls | null) => {
@@ -160,6 +164,16 @@ export const SceneManager = ({
     console.error(message);
   }, []);
   const handleViewerLoaded = useCallback(() => undefined, []);
+  const handlePhysicsReady = useCallback(
+    (ready: boolean) => {
+      setReadyModelId((current) => {
+        if (ready) return modelId;
+        return current === modelId ? null : current;
+      });
+      onPhysicsReady(ready);
+    },
+    [modelId, onPhysicsReady],
+  );
 
   return (
     <Canvas
@@ -183,7 +197,7 @@ export const SceneManager = ({
       <Physics
         colliders={false}
         gravity={SIMULATION_CONFIG.gravity}
-        paused={!isRunning}
+        paused={!isRunning || !robotPhysicsReady}
         timeStep={SIMULATION_CONFIG.fixedTimeStep}
       >
         <PhysicsWorld />
@@ -194,16 +208,17 @@ export const SceneManager = ({
         <RobotBody
           commands={commands}
           description={description}
+          packageMappings={model.packageMappings}
+          positionExecution={model.positionExecution}
           jointValues={jointValues}
           mode={mode}
           onJointState={onJointState}
-          onReady={onPhysicsReady}
+          onReady={handlePhysicsReady}
         />
       </Physics>
       <Suspense fallback={null}>
         <URDFViewer
           jointValues={jointValues}
-          modelId={modelId}
           onError={handleViewerError}
           onLoaded={handleViewerLoaded}
           description={description}
@@ -212,7 +227,8 @@ export const SceneManager = ({
           inferenceActive={inferenceActive}
           tcpPose={tcpPose}
           onCameraFrame={onCameraFrame}
-          urdfFile={model.file}
+          packageMappings={model.packageMappings}
+          urdfXml={urdfXml}
         />
       </Suspense>
       <CameraControls
