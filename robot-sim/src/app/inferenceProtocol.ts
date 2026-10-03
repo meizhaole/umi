@@ -14,7 +14,34 @@ export interface ActionChunk {
   frame_index: number;
   last_chunk: boolean;
   actions: number[][];
+  action_pose_repr: string;
 }
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null;
+
+export const isActionChunk = (value: unknown): value is ActionChunk => {
+  if (!isRecord(value) || value.type !== 'action_chunk') return false;
+  if (
+    typeof value.request_id !== 'string' ||
+    !value.request_id ||
+    !Number.isInteger(value.episode_index) ||
+    !Number.isInteger(value.frame_index) ||
+    typeof value.last_chunk !== 'boolean' ||
+    typeof value.action_pose_repr !== 'string' ||
+    !value.action_pose_repr.trim() ||
+    !Array.isArray(value.actions) ||
+    value.actions.length === 0
+  ) {
+    return false;
+  }
+  return value.actions.every(
+    (action) =>
+      Array.isArray(action) &&
+      action.length === 7 &&
+      action.every((number) => typeof number === 'number' && Number.isFinite(number)),
+  );
+};
 
 export interface ResolvedAction {
   actionIndex: number;
@@ -51,6 +78,7 @@ export interface IkWorkerRequest {
   startPose: Pose;
   initialJointValues: JointValues;
   actions: number[][];
+  action_pose_repr: string;
   traceAllIterations: boolean;
 }
 
@@ -60,8 +88,8 @@ export interface IKActionDebugRecord {
   episode_index: number;
   frame_index: number;
   action_index: number;
-  action_pose_repr: null;
-  action_pose_repr_status: 'unavailable';
+  action_pose_repr: string;
+  action_pose_repr_status: 'available';
   status: 'in_progress' | 'success' | 'failure';
   trace_level: 'summary' | 'full';
   raw_action: unknown;

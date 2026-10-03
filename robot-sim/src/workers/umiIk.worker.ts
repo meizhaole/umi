@@ -24,6 +24,27 @@ const IK_OPTIONS: IKOptions = {
   maxLinearStep: 0.01,
 };
 
+type ActionPoseDecoder = (startPose: Pose, actionPose: Pose) => Pose;
+
+const getActionPoseDecoder = (actionPoseRepr: string): ActionPoseDecoder | null => {
+  switch (actionPoseRepr) {
+    case 'relative':
+      return composePoses;
+    default:
+      return null;
+  }
+};
+
+export const decodeActionPose = (
+  actionPoseRepr: string,
+  startPose: Pose,
+  actionPose: Pose,
+): Pose => {
+  const decoder = getActionPoseDecoder(actionPoseRepr);
+  if (!decoder) throw new Error(`不支持 action_pose_repr：${actionPoseRepr}`);
+  return decoder(startPose, actionPose);
+};
+
 const getGripperJoints = (description: IkWorkerRequest['description']) =>
   description.joints.filter(
     (joint) =>
@@ -67,8 +88,8 @@ const createDebugRecord = (
     episode_index: request.episode_index,
     frame_index: request.frame_index,
     action_index: actionIndex,
-    action_pose_repr: null,
-    action_pose_repr_status: 'unavailable',
+    action_pose_repr: request.action_pose_repr,
+    action_pose_repr_status: 'available',
     status: recordPhase === 'started' ? 'in_progress' : converged ? 'success' : 'failure',
     trace_level: includeTrace ? 'full' : 'summary',
     raw_action: Array.isArray(action) ? [...action] : action,
@@ -95,6 +116,23 @@ export const runIkSolve = (
   postMessage: (message: IkWorkerResponse) => void,
 ): void => {
   if (request.type !== 'solve') return;
+
+  const actionPoseDecoder = getActionPoseDecoder(request.action_pose_repr);
+  if (!actionPoseDecoder) {
+    postMessage({
+      type: 'error',
+      error: {
+        code: 'UNSUPPORTED_ACTION_POSE_REPR',
+        stage: 'ik',
+        message: `Browser IK 暂不支持 action_pose_repr：${request.action_pose_repr}`,
+        request_id: request.request_id,
+        episode_index: request.episode_index,
+        frame_index: request.frame_index,
+        action_pose_repr: request.action_pose_repr,
+      },
+    });
+    return;
+  }
 
   const robot = new RobotModel(request.description);
   const kinematics = new Kinematics(request.description);
@@ -185,7 +223,7 @@ export const runIkSolve = (
               )
             : ([0, 0, 0, 1] as [number, number, number, number]),
       };
-      targetPose = composePoses(request.startPose, deltaPose);
+      targetPose = actionPoseDecoder(request.startPose, deltaPose);
       result = kinematics.solveIK(targetPose, actionSeed, IK_OPTIONS, (iteration) => {
         iterationTrace.push(iteration);
       });

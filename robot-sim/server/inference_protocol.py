@@ -85,6 +85,18 @@ async def send_error(websocket: WebSocket, error: ReplayError) -> None:
 
 
 def serialize_action_chunk(chunk: dict) -> str:
+    action_pose_repr = chunk.get("action_pose_repr")
+    if not isinstance(action_pose_repr, str) or not action_pose_repr.strip():
+        raise ReplayError(
+            "invalid_action_chunk",
+            "serialize_action_chunk",
+            "动作块缺少有效的 action_pose_repr",
+            context={
+                "episode_index": chunk["episode_index"],
+                "frame_index": chunk["frame_index"],
+            },
+        )
+
     message = {
         "type": "action_chunk",
         "request_id": chunk["request_id"],
@@ -92,6 +104,7 @@ def serialize_action_chunk(chunk: dict) -> str:
         "frame_index": chunk["frame_index"],
         "last_chunk": chunk["last_chunk"],
         "actions": chunk["actions"],
+        "action_pose_repr": action_pose_repr,
     }
     try:
         serialized = json.dumps(

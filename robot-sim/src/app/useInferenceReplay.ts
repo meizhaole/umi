@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { JointValues, Pose, RobotDescription } from '../core/types';
 import { publishDebugEvent } from './debugBus';
+import { isActionChunk } from './inferenceProtocol';
 import type {
   ActionChunk,
   IKActionDebugRecord,
@@ -34,27 +35,6 @@ const selectJointAngles = (description: RobotDescription, jointValues: JointValu
       .filter((joint) => joint.type === 'revolute' || joint.type === 'continuous')
       .map((joint) => [joint.name, jointValues[joint.name]]),
   );
-
-const isActionChunk = (value: unknown): value is ActionChunk => {
-  if (!isRecord(value) || value.type !== 'action_chunk') return false;
-  if (
-    typeof value.request_id !== 'string' ||
-    !value.request_id ||
-    !Number.isInteger(value.episode_index) ||
-    !Number.isInteger(value.frame_index) ||
-    typeof value.last_chunk !== 'boolean' ||
-    !Array.isArray(value.actions) ||
-    value.actions.length === 0
-  ) {
-    return false;
-  }
-  return value.actions.every(
-    (action) =>
-      Array.isArray(action) &&
-      action.length === 7 &&
-      action.every((number) => typeof number === 'number' && Number.isFinite(number)),
-  );
-};
 
 const parseServerError = (value: unknown): InferenceError => {
   const candidate = isRecord(value) ? value : {};
@@ -210,6 +190,7 @@ export const useInferenceReplay = ({
       action_count: chunk.actions.length,
       action_layout: ['dx', 'dy', 'dz', 'rx', 'ry', 'rz', 'gripper_width'],
       action_units: ['m', 'm', 'm', 'rad', 'rad', 'rad', 'm'],
+      action_pose_repr: chunk.action_pose_repr,
       actions: chunk.actions,
     });
 
@@ -337,6 +318,7 @@ export const useInferenceReplay = ({
       startPose: context.tcpPose,
       initialJointValues: context.jointValues,
       actions: chunk.actions,
+      action_pose_repr: chunk.action_pose_repr,
       traceAllIterations: isIkTraceEnabled(),
     };
     worker.postMessage(request);

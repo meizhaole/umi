@@ -199,6 +199,15 @@ class ReplayWorker:
             "episode_index": episode_index,
             "frame_index": frame_index,
         }
+        action_pose_repr = chunk.get("action_pose_repr")
+        if not isinstance(action_pose_repr, str) or not action_pose_repr.strip():
+            raise ReplayError(
+                "invalid_worker_output",
+                "validate_action_chunk",
+                "worker 动作块缺少有效的 action_pose_repr",
+                context=self.context,
+            )
+
         actions = chunk.get("actions")
         if (
             not isinstance(chunk.get("last_chunk"), bool)

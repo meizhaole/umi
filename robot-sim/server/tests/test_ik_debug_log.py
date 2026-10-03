@@ -54,6 +54,7 @@ class IkDebugLogTest(unittest.TestCase):
                 "frame_index": 1,
                 "last_chunk": False,
                 "actions": [[0, 0, 0, 0, 0, 0, 0]],
+                "action_pose_repr": "relative",
             }
         )
 
