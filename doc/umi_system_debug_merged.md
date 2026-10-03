@@ -5,16 +5,18 @@
 > 审计范围：UMI 策略输出、动作表示与 WebSocket 协议、浏览器端逆运动学（IK）、动作预求解与播放、相机输入、工具中心点（TCP）与相机外参、数据集与模型检查点配置
 > 证据原则：以当前工作区源码、日志和用户提供的故障记录交叉核对。下文明确区分源码事实、运行记录和未验证推断。
 
-> 术语说明：Policy 指策略模型；IK / FK 分别指逆运动学 / 正向运动学；Seed 指求解开始时的关节初值；Residual 指目标与当前末端位姿之间的残差；`relative` 指相对位姿表示；proprio 指机器人本体状态；action chunk 指一次发送的一组动作；ACK 指动作完成后的确认消息；Checkpoint 指模型检查点。代码字段、状态码和路径保留原名，方便对照源码。
+> 术语说明：策略模型根据观测生成动作；逆运动学（IK）由目标位姿计算关节值，正向运动学（FK）由关节值计算末端位姿；求解初值是求解开始时使用的关节值；误差残差是目标与当前末端位姿之间的差；`relative` 表示“相对于当前位姿”的动作格式；本体状态数据包括机器人位置等状态；动作块是一组一起发送的动作；`ACK` 表示动作段播放完毕；模型检查点保存训练后的模型和配置。只有在说明源码字段时才保留英文名称，方便定位代码。
+
+> 白话速读：模型一次给出 16 项动作。浏览器会先计算整段动作的关节值，再开始移动；第 9 项计算失败后，这一整段都没有播放。现有记录只能说明“为什么停下来”，还不足以说明“最初为什么会停”。
 
 ## 1. 结论摘要
 
-- **失败位置：** 用户提供的记录显示，第 1 帧的第 8 号动作（`frame_index=1`、`action_index=8`）在浏览器端 IK 预求解时因 `no_joint_motion`（关节没有产生有效移动）而停止。位置残差为 6.0155 mm，高于 5 mm 容差；姿态残差为 0.0017429 rad，低于 0.01 rad 容差。
-- **直接停止机制：** 位置误差没有达到收敛阈值，求解器也没有产生超过更新阈值的关节变化，因此第 9 个目标未收敛。IK 工作线程只有在整段动作全部求解成功后才返回 `solved`，所以本次动作段没有开始播放。
-- **根因尚未确认：** 当前日志没有保存 action 8 的完整世界坐标目标、求解初值、每轮关节变化或残差。初值敏感性、求解局部停滞、关节限位影响，以及目标是否超出所有合法关节姿态的可达范围，都还无法裁定。
-- **已排除的直接原因：** 本次运行使用 `relative`（相对位姿）表示，UMI 与浏览器的组合公式一致；姿态误差没有超限；前 8 个 IK 解并未实际播放；播放时长发生在 IK 预求解之后。
-- **独立系统问题：** 服务端序列化动作块时丢弃了 `action_pose_repr`，浏览器则固定按 `relative` 解码。本次样本恰好也是 `relative`，因此该协议缺陷不是本次失败原因。当前系统还需要人工点击才能在一段动作播放完后获取下一次观测。
-- **下一步优先事项：** 保存这次失败的完整输入、求解初值和逐轮求解记录，再用多个初值重放同一个目标。本次故障数值来自用户提供的记录；本轮没有在代码、日志或仿真中重放故障。
+- **发生了什么：** 用户提供的记录显示，第 1 帧中从 0 开始编号的第 8 号动作（即第 9 个动作）在浏览器计算关节值时停止。记录给出的末端位置误差是 6.0155 mm，超过 5 mm 通过标准；姿态误差是 0.0017429 rad，没有超过 0.01 rad 通过标准。
+- **为什么没有播放：** 求解器没有把位置误差降到通过标准，也没有算出有效的关节变化，并以 `no_joint_motion` 结束。程序要求整段动作全部算出关节值后才开始播放；其中一项失败，就会取消本段播放。
+- **故障根因还不知道：** 日志没有保存这一项的完整目标、求解开始时的关节值和每一轮计算结果。因此目前无法判断是初始姿态影响了求解、求解过程停住、关节限位造成影响，还是目标超出机械臂的可达范围。
+- **哪些原因已排除：** 本次使用的 `relative`（相对位姿）公式与浏览器实现一致；姿态误差没有超限；前 8 项只算出了关节解，没有在本段中实际播放；播放时长也没有参与这次失败，因为失败发生在播放开始之前。
+- **另一个已确认的软件问题：** 服务端没有把动作表示字段 `action_pose_repr` 传给浏览器。本次动作恰好使用浏览器默认支持的相对位姿格式，所以这个问题不是本次失败原因。播放结束后还需要人工点击，系统才会获取下一次观测。
+- **建议先做什么：** 保存原始目标、初始关节值和逐轮计算结果，再用不同初始关节值重复求解同一个目标。本次误差数值来自用户提供的记录；本轮没有在代码、日志或仿真中重新运行故障。
 
 ## 2. 系统架构与控制闭环
 
@@ -33,7 +35,7 @@ flowchart TD
         SER --> CHUNK["浏览器收到 action_chunk（动作块）"]
     end
     subgraph ik["逆运动学求解"]
-        CHUNK --> DEC["浏览器固定按 relative 方式组合目标"]
+        CHUNK --> DEC["浏览器固定按 relative（相对位姿）方式组合目标"]
         DEC --> SOLVE["IK 工作线程：逐项预求解"]
         SOLVE -->|第 8 号动作未收敛| ERR["返回错误；本动作段不播放"]
         SOLVE -->|整段全部成功| PLAY["建立 PlaybackChunk（播放动作段）"]
@@ -60,11 +62,11 @@ flowchart TD
 
 | 字段 | 本次记录 | 证据与限制 |
 |---|---|---|
-| 任务序列 / 帧 / 动作 | episode 0；第 1 帧；第 8 号动作 | 预测日志包含任务序列和帧信息；动作索引来自用户提供的故障记录。索引从 0 开始，因此第 8 号动作实际是第 9 项。 |
+| 任务序列 / 帧 / 动作 | 第 0 个任务序列；第 1 帧；第 8 号动作 | 预测日志包含任务序列和帧信息；动作编号来自用户提供的故障记录。编号从 0 开始，因此第 8 号动作实际是第 9 项。 |
 | 动作表示 | relative（相对位姿） | robot-sim/server/logs/inference-predictions.jsonl:42 记录了表示标签。 |
 | 动作数 | 16 项 | 同一预测日志行记录了 16 项；这只表示本次长度，不能证明所有检查点或动作块都固定为 16 项。 |
 | 第 8 号动作的相对平移 | [-0.0011583543, 0.0017238006, -0.0232709367] m | 来自预测日志；这是策略给出的相对动作分量，不是 IK 残差。 |
-| 目标直线位移 | 23.3634 mm | 当前末端到第 8 号动作目标点的直线距离，来自预测日志的 trajectory_summary。 |
+| 目标直线位移 | 23.3634 mm | 当前末端到第 8 号动作目标点的直线距离，来自预测日志字段 `trajectory_summary`。 |
 | 累计路径长度 | 24.4122 mm | 从当前末端起，沿预测目标逐点累加到第 8 号动作的路径长度；来自同一日志。 |
 | 位置残差 | 6.0155 mm | 来自用户提供的故障记录；比 5 mm 容差高 1.0155 mm。当前项目没有保存本次完整浏览器错误对象。 |
 | 姿态残差 | 0.0017429 rad | 来自用户提供的故障记录；低于 0.01 rad 容差。 |
@@ -79,7 +81,7 @@ flowchart TD
 - **位置残差（`position_residual`）：** 当前关节值经 FK 计算出的末端位置，与固定 IK 目标之间的欧氏距离。
 - **姿态残差（`orientation_residual`）：** 当前 FK 姿态与固定 IK 目标之间的旋转误差大小。
 
-因此，第 8 号动作的 23.3634 mm 目标直线位移、24.4122 mm 累计路径长度和 6.0155 mm IK 位置残差含义不同。前两项来自预测日志；残差来自故障记录。
+因此，第 8 号动作的 23.3634 mm 目标直线位移、24.4122 mm 累计路径长度和 6.0155 mm 逆运动学位置残差含义不同。前两项来自预测日志；残差来自故障记录。
 
 ## 4. 已确认事实
 
@@ -90,9 +92,9 @@ flowchart TD
 - 求解器只有在位置和姿态两项误差分别达到容差时才判定成功。证据：robot-sim/src/core/Kinematics.ts:326-343。
 - URDF 中 joint2 与 joint3 的合法范围均为 [0, 3.14] rad。证据：reBotArmController_ROS2/src/rebotarm_bringup/description/RS/urdf/ReBot_Arm_RS.urdf:193-210,307-324。
 - UMI 工作进程的预测日志没有保存 IK 的 `startPose`、输入初值、最终残差或逐轮求解历史；动作 CSV 只保留最近 30 条关节记录，也没有帧号和动作号。证据：robot-sim/server/prediction_log.py:10-18、robot-sim/server/logs/README.md:3-7。
-- 当前仿真推理接口发送一张 224×224 RGB 图像与最多两条 proprio（本体状态）记录；若只有一条记录，就会重复该记录。Python 工作进程将 RGB 解码为 224×224×3。证据：robot-sim/src/app/App.tsx:141-159、robot-sim/src/app/inferenceProtocol.ts:62-68、universal_manipulation_interface/scripts/umi_sim_replay_worker.py:58-79。
-- 相机帧对象包含采集时间戳，但观测消息只发送最新 RGB 与 proprio 数组，没有发送该时间戳；因此无法从当前消息还原图像和状态样本的准确采集时刻。证据：robot-sim/src/sim/sensors/WristCameraCapture.tsx:10-16,122-128、robot-sim/src/app/App.tsx:141-159、robot-sim/src/app/inferenceProtocol.ts:62-68。
-- 仓库默认任务配置写有双帧图像历史、双帧 proprio 和 16 项动作预测范围；这是模板值，不能替代当前模型检查点里保存的 cfg。证据：universal_manipulation_interface/diffusion_policy/config/task/umi.yaml:9-20,78-90。
+- 当前仿真推理接口发送一张 224×224 RGB 图像与最多两条本体状态记录；若只有一条记录，就会重复该记录。Python 工作进程将 RGB 解码为 224×224×3。证据：robot-sim/src/app/App.tsx:141-159、robot-sim/src/app/inferenceProtocol.ts:62-68、universal_manipulation_interface/scripts/umi_sim_replay_worker.py:58-79。
+- 相机帧对象包含采集时间戳，但观测消息只发送最新 RGB 与本体状态数组，没有发送该时间戳；因此无法从当前消息还原图像和状态样本的准确采集时刻。证据：robot-sim/src/sim/sensors/WristCameraCapture.tsx:10-16,122-128、robot-sim/src/app/App.tsx:141-159、robot-sim/src/app/inferenceProtocol.ts:62-68。
+- 仓库默认任务配置写有双帧图像历史、双帧本体状态历史和 16 项动作预测范围；这是模板值，不能替代当前模型检查点里保存的配置。证据：universal_manipulation_interface/diffusion_policy/config/task/umi.yaml:9-20,78-90。
 
 上述失败残差、停止原因和受限关节信息来自用户提供的故障记录，并非当前服务端日志独立重建出的运行轨迹。
 
@@ -102,10 +104,10 @@ flowchart TD
 
 已确认的数据路径是：
 
-1. Python 工作进程从模型检查点配置读取 `action_pose_repr`，并把标签连同动作写入输出。证据：universal_manipulation_interface/scripts/umi_sim_replay_worker.py:48-50,146-159。
+1. Python 工作进程从模型检查点配置读取动作位姿格式字段 `action_pose_repr`，并把格式标签与动作一起输出。证据：universal_manipulation_interface/scripts/umi_sim_replay_worker.py:48-50,146-159。
 2. 服务端预测日志也保留该标签。证据：robot-sim/server/prediction_log.py:10-18。
-3. 服务端函数 `serialize_action_chunk` 只序列化 `episode`、`frame`、`last_chunk` 和 `actions`，没有序列化 `action_pose_repr`。证据：robot-sim/server/inference_protocol.py:57-64。
-4. 前端 `ActionChunk` 与 IK 请求类型都不含该字段；IK 工作线程固定调用 `composePoses(startPose, deltaPose)`。证据：robot-sim/src/app/inferenceProtocol.ts:3-9,37-43、robot-sim/src/workers/umiIk.worker.ts:77-91。
+3. 服务端函数 `serialize_action_chunk`（动作块序列化函数）只保留任务序列、帧号、是否最后一段和动作数组，没有传递 `action_pose_repr`。证据：robot-sim/server/inference_protocol.py:57-64。
+4. 前端动作块类型 `ActionChunk` 与 IK 请求类型都没有该字段；IK 工作线程固定调用 `composePoses(startPose, deltaPose)`（按相对位姿合成目标）。证据：robot-sim/src/app/inferenceProtocol.ts:3-9,37-43、robot-sim/src/workers/umiIk.worker.ts:77-91。
 
 这是已确认的协议缺陷。本次日志中的表示为 `relative`，浏览器的组合公式也与其一致，因此该缺陷没有导致第 8 号动作失败。如果将来模型检查点输出旧版 `rel`、绝对位姿 `abs` 或增量 `delta`，浏览器因缺少表示标签就可能按错误方式解码。修复时应让表示字段从模型输出到浏览器完整传递，并按标签选择解码方式。
 
@@ -133,23 +135,23 @@ UMI 中两种名称相近的位姿表示不能混为一谈：
 `Kinematics.solveIK` 使用阻尼最小二乘法，并在关节到达限位时暂时排除继续朝边界外移动的关节。大致流程如下：
 
 ```text
-q = 将输入的关节初值限制在合法范围内
-pose = 根据 q 计算末端正向运动学位置和姿态
-residual = 目标与当前末端位姿的位置、姿态误差
+q = 将输入关节初值限制在合法范围内
+末端位姿 = 根据 q 用正向运动学计算末端位置和姿态
+残差 = 目标与当前末端位姿的位置差和姿态差
 
 当尚有迭代次数且位置、姿态误差未同时满足容差时：
-  error = 位置误差与姿态误差组成的向量
+  误差向量 = 位置误差与姿态误差合成的数值
   J = 当前关节到末端的雅可比矩阵
-  解 (J × Jᵀ + 阻尼系数² × I) × y = error
-  deltaQ = Jᵀ × y
+  解 (J × Jᵀ + 阻尼系数² × I) × y = 误差向量
+  deltaQ = 根据误差计算出的关节变化量
   对已到限位且本轮还要向边界外移动的关节：
     暂时排除该关节
     用其余关节重新计算 deltaQ
   限制每个关节的单步幅度
   将 q + deltaQ 限制在各关节的合法范围内
-  若所有可动关节的实际变化都小于 1e-10：
+  若所有可动关节的实际变化量都小于 1e-10：
     以 no_joint_motion 退出
-  否则接受新的 q，重新计算末端位姿和位置、姿态误差
+  否则接受新的 q，重新计算末端位姿和残差
 
 返回最终关节值、是否收敛、迭代次数、残差、退出原因和求解期间累计受限的关节
 ```
@@ -185,7 +187,7 @@ joint2 / joint3 位于下限时仍可向正方向进入合法范围；CSV 中其
 
 | 概念 | 含义 | 当前 robot-sim | UMI 官方实机评估程序 |
 |---|---|---|---|
-| 预测时域（action horizon） | 策略一次生成的未来动作范围 | 当前预测日志长度为 16；工作进程发送完整序列 | 从模型检查点配置读取预测序列；当前检查点内的 cfg 尚未核实 |
+| 动作预测长度（`action_horizon`） | 策略一次生成多少个未来动作 | 当前预测日志长度为 16；工作进程发送完整序列 | 从模型检查点配置读取预测序列；检查点内部配置尚未核实 |
 | 执行时域 | 获取下一次观测前实际播放的动作范围 | 只有整段 IK 成功后才播放整个动作块；本次失败，因此播放 0 项 | 根据动作时间戳筛选仍在未来的目标，再提交给控制器 |
 | 重新规划时域 | 到下一次观测与策略推理之间的时间或步数 | 播放整段并自动发送 ACK 后，仍需人工点击下一步 | 默认频率为 10 Hz、每次推进 6 个时隙，名义上约 0.6 秒后进入下一轮 |
 
@@ -199,7 +201,7 @@ joint2 / joint3 位于下限时仍可向正方向进入合法范围；CSV 中其
 
 ### 当前执行方式
 
-当前工作线程对完整 `actions` 数组逐项求解，并将每项求得的关节值作为下一项的初值。第 8 号动作未收敛时，工作线程立即返回；之前第 0 至第 7 号动作的关节解只保存在内存中，没有进入 `PlaybackChunk`。只有整段全部通过求解后才开始播放。证据：robot-sim/src/workers/umiIk.worker.ts:50-56,77-91,92-119,122-144、robot-sim/src/app/useInferenceReplay.ts:241-275。
+当前工作线程对完整的 `actions` 数组逐项求解，并将每项算出的关节值作为下一项的初值。第 8 号动作未收敛时，工作线程立即返回；之前第 0 至第 7 号动作的关节解只保存在内存中，没有进入 `PlaybackChunk`（播放动作段）。只有整段全部求解成功后才开始播放。证据：robot-sim/src/workers/umiIk.worker.ts:50-56,77-91,92-119,122-144、robot-sim/src/app/useInferenceReplay.ts:241-275。
 
 因此，同一个动作块中较后的目标求解失败，会导致较早且已经求解成功的目标也无法执行。这是已确认的整段拒绝行为，不能据此推断第 0 至第 7 号动作已经带来实际运动。
 
@@ -215,27 +217,27 @@ joint2 / joint3 位于下限时仍可向正方向进入合法范围；CSV 中其
 
 | 环节 | 当前 robot-sim | UMI 官方实机评估程序 |
 |---|---|---|
-| 获取观测 | 最新的 224×224 RGB 图像与最多两条 proprio 记录；发送后等待策略返回 | 从实机相机与机器人状态取得带时间信息的观测；图像和 proprio 历史长度由加载的 cfg 决定 |
+| 获取观测 | 最新的 224×224 RGB 图像与最多两条机器人本体状态记录；发送后等待策略返回 | 从实机相机与机器人状态取得带时间信息的观测；图像和本体状态历史长度由加载的模型配置决定 |
 | 推理频率 | 不会自动连续循环；成功播放一个动作块后等待人工点击 | 默认控制频率为 10 Hz，每次按 `steps_per_inference=6` 推进时间轴 |
 | IK 与动作调度 | 播放前先对整段动作求解 | 为预测动作标注时间戳，筛出未来目标并提交给控制器 |
 | 单项动作时间 | 每项名义 0.5 秒；SceneManager 每帧最多累计 0.05 秒仿真进度 | 按 0.1 秒控制时隙调度；UR5 插值控制器频率为 500 Hz |
 | 再次观测 | 16 项动作全部求解并播放后自动发送 ACK，再等待人工点击；播放中不会自动重新推理 | 一个时间周期结束后获取下一次观测并重新推理 |
 | 本次失败的影响 | 第 8 号动作在播放前失败，本段没有播放任何 0.5 秒动作 | 不适用 |
 
-如果 16 项动作全部通过 IK，名义播放时间为 16 × 0.5 = 8 秒；实际墙钟时间可能更长，因为每帧的仿真进度最多增加 0.05 秒。这个 8 秒只适用于完整动作段成功播放的情况，不适用于本次失败段。官方实机评估程序按时间戳调度，并以较短时间间隔推进，两者的重新规划节奏存在架构差异。证据：robot-sim/src/viz/SceneManager.tsx:35-36,57-90、universal_manipulation_interface/scripts_real/eval_real_umi.py:86-89,412-435,479-481、universal_manipulation_interface/umi/real_world/umi_env.py:231-244。
+如果 16 项动作全部通过 IK，名义播放时间为 16 × 0.5 = 8 秒；实际经过的时间可能更长，因为每帧的仿真进度最多增加 0.05 秒。这个 8 秒只适用于完整动作段成功播放的情况，不适用于本次失败段。官方实机评估程序按时间戳安排动作，并以较短时间间隔推进；两者重新获取观测和制定动作的节奏不同。证据：robot-sim/src/viz/SceneManager.tsx:35-36,57-90、universal_manipulation_interface/scripts_real/eval_real_umi.py:86-89,412-435,479-481、universal_manipulation_interface/umi/real_world/umi_env.py:231-244。
 
 ## 12. 相机与视觉输入分布审计
 
 | 属性 | 当前 robot-sim | UMI 数据与实现 | 审计判断 |
 |---|---|---|---|
-| 输出尺寸 | 浏览器渲染为 224×224 RGB，送入工作进程前按 224×224×3 解码 | 示例 cup_in_the_wild 的 camera0_rgb 为 224×224×3、uint8；实机输入按加载的 cfg 目标尺寸处理 | 分辨率相同不代表图像分布相同 |
+| 输出尺寸 | 浏览器渲染为 224×224 RGB，送入工作进程前按 224×224×3 解码 | 示例 cup_in_the_wild 的 camera0_rgb 为 224×224×3、uint8；实机输入按加载配置中的目标尺寸处理 | 分辨率相同不代表图像分布相同 |
 | 投影与镜头 | Three.js 透视相机参数为 60°，渲染区域为正方形 | 仓库 GoPro 标定样例标记为鱼眼镜头并含畸变参数；实机评估程序可选鱼眼矫正 | 没有证据证明“当前策略输入等于 155° 透视相机”；检查点使用的镜头与矫正选项未知 |
 | 相机安装 | 相机挂在机器人 `tipLink`，局部位置为 (0, 0, 0.055)，局部旋转为 (0, 1.355-π/2, 0) | UMI 数据计划与实机配置取决于设备安装变换 | 仿真与数据采集相机之间的外参尚未对齐 |
-| 运行时朝向 | `inferenceActive` 时读取杯子的世界坐标，把目标设为 (x, y+0.039, z)，再调用 `camera.lookAt`；非推理时恢复固定局部旋转 | UMI 实机相机朝向由实际安装和观测变换决定；所查代码没有根据仿真杯子真值主动转动相机的逻辑 | 仿真相机受杯子真值引导已确认；它是否影响策略表现仍需对照实验 |
-| 图像处理 | 从 RenderTarget 读回 RGB 并垂直翻转；该路径没有鱼眼矫正、裁剪或遮罩 | UMI 实时与离线路径支持缩放、鱼眼矫正、镜像、镜像裁剪和预定义遮罩；具体选项由运行参数决定 | 只能确认仓库支持这些处理分支，不能据此推断当前检查点用了哪一种 |
-| 数据增强 | 当前仿真采集没有应用训练增强 | 仓库部分训练配置含 RandomCrop 等增强 | 示例训练配置不代表当前检查点的训练流程 |
+| 运行时朝向 | `inferenceActive`（推理进行中）时读取杯子的世界坐标，把目标设为 (x, y+0.039, z)，再调用 `camera.lookAt`；非推理时恢复固定局部旋转 | UMI 实机相机朝向由实际安装和观测变换决定；所查代码没有根据仿真杯子真值主动转动相机的逻辑 | 仿真相机受杯子真值引导已确认；它是否影响策略表现仍需对照实验 |
+| 图像处理 | 从 `RenderTarget`（渲染目标）读回 RGB 并垂直翻转；该路径没有鱼眼矫正、裁剪或遮罩 | UMI 实时与离线路径支持缩放、鱼眼矫正、镜像、镜像裁剪和预定义遮罩；具体选项由运行参数决定 | 只能确认仓库支持这些处理分支，不能据此推断当前检查点用了哪一种 |
+| 数据增强 | 当前仿真采集没有应用训练增强 | 仓库部分训练配置含 `RandomCrop`（随机裁剪）等增强 | 示例训练配置不代表当前检查点的训练流程 |
 
-源码证据：仿真相机与读回见 robot-sim/src/sim/sensors/WristCameraCapture.tsx:29-32,61-71,86-120；实机图像处理分支见 universal_manipulation_interface/umi/real_world/umi_env.py:117-175；实时鱼眼矫正参数为可选项，见 universal_manipulation_interface/scripts_real/eval_real_umi.py:91-95,120-130；标定样例见 universal_manipulation_interface/example/calibration/gopro_intrinsics_2_7k.json:3-16；离线处理见 universal_manipulation_interface/scripts_slam_pipeline/07_generate_replay_buffer.py:58-66,215-235；示例 RandomCrop 配置见 universal_manipulation_interface/diffusion_policy/config/train_diffusion_unet_timm_umi_workspace.yaml:63-65。
+源码证据：仿真相机与图像读回见 robot-sim/src/sim/sensors/WristCameraCapture.tsx:29-32,61-71,86-120；实机图像处理分支见 universal_manipulation_interface/umi/real_world/umi_env.py:117-175；实时鱼眼矫正参数为可选项，见 universal_manipulation_interface/scripts_real/eval_real_umi.py:91-95,120-130；标定样例见 universal_manipulation_interface/example/calibration/gopro_intrinsics_2_7k.json:3-16；离线处理见 universal_manipulation_interface/scripts_slam_pipeline/07_generate_replay_buffer.py:58-66,215-235；示例随机裁剪配置见 universal_manipulation_interface/diffusion_policy/config/train_diffusion_unet_timm_umi_workspace.yaml:63-65。
 
 **当前结论：尚不能判断（INCONCLUSIVE）。** 源码可确认 robot-sim 使用 60° 透视相机、垂直翻转图像，并在推理时调用 `lookAt(cup)`；仓库还支持鱼眼矫正、图像裁剪和遮罩等处理。但当前模型检查点的 cfg、训练图像和实际送入策略模型的 RGB 尚未对照。视觉输入差异可能改变策略生成的目标；目标确定后，它不能直接解释固定目标下 IK 为何停止移动。
 
@@ -267,14 +269,14 @@ joint2 / joint3 位于下限时仍可向正方向进入合法范围；CSV 中其
 
 该归档的 RGB 元数据还声明使用 JPEG XL，且 `lossless=false`（有损压缩）。question_find.md:981-1009 曾记录本机 Zarr 编解码器注册表无法读取 imagecodecs_jpegxl。本轮只核对了归档元数据，没有重新检查 Conda 解码环境，因此不把旧报错列为当前已确认的阻塞问题。提取训练帧时应重新检查。
 
-服务端从 universal_manipulation_interface/data/pretrained/cup_wild_vit_l_1img.ckpt 加载模型，工作进程调用 `load_policy` 读取模型检查点中的 cfg。证据：robot-sim/server/load_model.py:18,86-95、universal_manipulation_interface/scripts/umi_sim_replay_worker.py:41-50。本报告没有读取检查点内部的 cfg。仓库默认 YAML 中的 `dataset_frequeny: 0`、图像历史长度 2、本体状态历史长度 2、动作预测范围 16 和默认位姿表示都只是模板，不能替代检查点中的真实配置；当前配置文件路径为 universal_manipulation_interface/diffusion_policy/config/task/umi.yaml:6-20,78-90。
+服务端从 universal_manipulation_interface/data/pretrained/cup_wild_vit_l_1img.ckpt 加载模型，工作进程调用 `load_policy` 读取检查点内部配置。证据：robot-sim/server/load_model.py:18,86-95、universal_manipulation_interface/scripts/umi_sim_replay_worker.py:41-50。本报告没有读取检查点内部的配置。仓库默认 YAML 中的 `dataset_frequeny: 0`、图像历史长度 2、本体状态历史长度 2、动作预测范围 16 和默认位姿表示都只是模板，不能替代检查点中的真实配置；当前配置文件路径为 universal_manipulation_interface/diffusion_policy/config/task/umi.yaml:6-20,78-90。
 
 | 未知项 | 当前证据状态 |
 |---|---|
-| 检查点实际 cfg、训练工作区与数据来源 | 未知（UNKNOWN）；本次没有读取检查点内容中的 cfg。 |
+| 检查点实际配置、训练工作区与数据来源 | 未知（UNKNOWN）；本次没有读取检查点中的配置。 |
 | 检查点实际使用的图像预处理、数据增强、镜头模型与训练帧 | 未知（UNKNOWN）；仓库源码只能证明存在若干可选处理方式。 |
 | 训练采样频率与动作时间步 | 未知（UNKNOWN）；数据成员没有时间戳或帧率，`dataset_frequeny: 0` 不能证明实际采样频率。 |
-| 当前仿真图像历史长度是否符合该检查点要求 | 尚不能判断（INCONCLUSIVE）；前端只发送一张最新 RGB，工作进程以单帧图像调用辅助函数，辅助函数保留输入帧数；默认 YAML 图像历史长度为 2。尚未读取检查点 cfg，因此不知道是否与当前模型要求不符。证据：universal_manipulation_interface/scripts/umi_sim_replay_worker.py:58-63、universal_manipulation_interface/umi/real_world/real_inference_util.py:76-91、universal_manipulation_interface/diffusion_policy/config/task/umi.yaml:9-20。 |
+| 当前仿真图像历史长度是否符合该检查点要求 | 尚不能判断（INCONCLUSIVE）；前端只发送一张最新 RGB，工作进程以单帧图像调用辅助函数，辅助函数保留输入帧数；默认 YAML 图像历史长度为 2。尚未读取检查点配置，因此不知道是否符合当前模型要求。证据：universal_manipulation_interface/scripts/umi_sim_replay_worker.py:58-63、universal_manipulation_interface/umi/real_world/real_inference_util.py:76-91、universal_manipulation_interface/diffusion_policy/config/task/umi.yaml:9-20。 |
 | 仿真杯子的精确位置是否出现在训练数据中 | 未知（UNKNOWN）；所查数据没有杯子世界坐标。 |
 | 跨系统 TCP 与相机外参 | 未知 / 未标定（UNKNOWN / UNCALIBRATED）；没有完整的刚体变换标定。 |
 | 本次失败使用的 IK 目标、`startPose` 和第 8 号动作初值 | 未知（UNKNOWN）；现存预测日志没有这些 IK 运行输入。 |
@@ -316,7 +318,7 @@ joint2 / joint3 位于下限时仍可向正方向进入合法范围；CSV 中其
 - 原始相对动作、观测中的 `startPose`、解码后的世界坐标目标位姿。
 - 求解第 8 号动作时实际使用的关节初值，以及第 7 号动作的求解结果。
 - 输出关节值、位置与姿态残差、迭代次数、受限关节、退出原因和 IK 参数。
-- 每条记录关联同一个 `inference request id`，避免把 CSV 中相邻行误认作输入初值。
+- 每条记录关联同一个推理请求编号（`inference request id`），避免把 CSV 中相邻行误认作输入初值。
 
 先确保能用相同输入重放失败，才能解释求解器为何停止。
 
@@ -358,18 +360,18 @@ joint2 / joint3 位于下限时仍可向正方向进入合法范围；CSV 中其
 
 - 策略动作预测范围、`num_inference_steps`。
 - 观测和动作采用的位姿表示。
-- 图像与 proprio 历史长度、`shape_meta`。
+- 图像与本体状态历史长度、图像形状配置（`shape_meta`）。
 - 数据集路径、训练预处理和数据增强配置。
 
 将检查结果与仓库默认配置 universal_manipulation_interface/diffusion_policy/config/task/umi.yaml 分开保存。
 
 ### 实验 6：提取并检查训练图像
 
-先根据检查点配置确认训练数据来源，再从对应训练 Zarr 中提取多个 episode 的起始、中间和结束帧。检查送入模型前的图像、镜头效果和物体像素尺寸。目前的 cup_in_the_wild 只能作为样例，不能预先假定它就是该检查点的训练数据。
+先根据检查点配置确认训练数据来源，再从对应的 Zarr 数据集中选取多个操作片段的起始、中间和结束图像。检查送入模型前的图像、镜头效果和物体像素尺寸。目前的 cup_in_the_wild 只能作为样例，不能预先假定它就是该检查点的训练数据。
 
 ### 实验 7：保存仿真实际发送给策略模型的输入
 
-保存最终发送给策略模型的 RGB 字节，以及对应的 proprio 和图像形状信息。应使用 Python 工作进程实际解码后的 224×224 RGB；浏览器界面的相机预览截图不能替代网络中实际发送的图像。
+保存最终发送给策略模型的 RGB 字节，以及对应的机器人本体状态和图像形状信息。应使用 Python 工作进程实际解码后的 224×224 RGB；浏览器界面的相机预览截图不能替代网络中实际发送的图像。
 
 ### 实验 8：对照训练图像与仿真输入
 
