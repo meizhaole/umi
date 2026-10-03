@@ -88,6 +88,10 @@ const createDebugRecord = (
     episode_index: request.episode_index,
     frame_index: request.frame_index,
     action_index: actionIndex,
+    prediction_count: request.predictionCount,
+    configured_execution_horizon: request.configuredExecutionHorizon,
+    execution_count: request.executionCount,
+    selected_action_indexes: [...request.selectedActionIndexes],
     action_pose_repr: request.action_pose_repr,
     action_pose_repr_status: 'available',
     status: recordPhase === 'started' ? 'in_progress' : converged ? 'success' : 'failure',
@@ -149,8 +153,9 @@ export const runIkSolve = (
   robot.setJointValues(seed);
   seed = robot.getJointValues();
 
-  for (let actionIndex = 0; actionIndex < request.actions.length; actionIndex += 1) {
-    const action = request.actions[actionIndex];
+  for (let executionIndex = 0; executionIndex < request.actions.length; executionIndex += 1) {
+    const actionIndex = request.selectedActionIndexes[executionIndex];
+    const action = request.actions[executionIndex];
     if (!Array.isArray(action) || action.length !== 7 || !action.every(Number.isFinite)) {
       const message = '动作必须包含 7 个有限数值。';
       const record = createDebugRecord(
@@ -186,7 +191,7 @@ export const runIkSolve = (
     postMessage({
       type: 'progress',
       actionIndex,
-      total: request.actions.length,
+      total: request.executionCount,
     });
 
     const actionSeed = { ...seed };

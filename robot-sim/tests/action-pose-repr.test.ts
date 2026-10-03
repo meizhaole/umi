@@ -16,6 +16,10 @@ const makeWorkerRequest = (actionPoseRepr: string): IkWorkerRequest => ({
   startPose: { position: [0, 0, 0], orientation: [0, 0, 0, 1] },
   initialJointValues: {},
   actions: [[0, 0, 0, 0, 0, 0, 0]],
+  predictionCount: 1,
+  configuredExecutionHorizon: 6,
+  executionCount: 1,
+  selectedActionIndexes: [0],
   action_pose_repr: actionPoseRepr,
   traceAllIterations: false,
 });

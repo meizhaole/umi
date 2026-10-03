@@ -78,6 +78,10 @@ export interface IkWorkerRequest {
   startPose: Pose;
   initialJointValues: JointValues;
   actions: number[][];
+  predictionCount: number;
+  configuredExecutionHorizon: number;
+  executionCount: number;
+  selectedActionIndexes: number[];
   action_pose_repr: string;
   traceAllIterations: boolean;
 }
@@ -88,6 +92,10 @@ export interface IKActionDebugRecord {
   episode_index: number;
   frame_index: number;
   action_index: number;
+  prediction_count?: number;
+  configured_execution_horizon?: number;
+  execution_count?: number;
+  selected_action_indexes?: number[];
   action_pose_repr: string;
   action_pose_repr_status: 'available';
   status: 'in_progress' | 'success' | 'failure';

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { JointValues, Pose, RobotDescription } from '../core/types';
 import { publishDebugEvent } from './debugBus';
+import { selectExecutionActions } from './executionHorizon';
 import { isActionChunk } from './inferenceProtocol';
 import type {
   ActionChunk,
@@ -178,6 +179,7 @@ export const useInferenceReplay = ({
     activeChunkRef.current = chunk;
     activeActionIndexRef.current = null;
     activeJointAnglesRef.current = [];
+    const selection = selectExecutionActions(chunk.actions);
     if (mountedRef.current) {
       setError(null);
       setProgress('正在启动 IK Worker');
@@ -192,6 +194,16 @@ export const useInferenceReplay = ({
       action_units: ['m', 'm', 'm', 'rad', 'rad', 'rad', 'm'],
       action_pose_repr: chunk.action_pose_repr,
       actions: chunk.actions,
+    });
+    publishDebugEvent('inference:execution_selection', {
+      request_id: chunk.request_id,
+      episode_index: chunk.episode_index,
+      frame_index: chunk.frame_index,
+      prediction_count: selection.predictionCount,
+      configured_execution_horizon: selection.configuredExecutionHorizon,
+      execution_count: selection.executionCount,
+      selected_action_indexes: selection.selectedActionIndexes,
+      action_pose_repr: chunk.action_pose_repr,
     });
 
     const worker =
@@ -317,7 +329,11 @@ export const useInferenceReplay = ({
       description: context.description,
       startPose: context.tcpPose,
       initialJointValues: context.jointValues,
-      actions: chunk.actions,
+      actions: selection.actions,
+      predictionCount: selection.predictionCount,
+      configuredExecutionHorizon: selection.configuredExecutionHorizon,
+      executionCount: selection.executionCount,
+      selectedActionIndexes: selection.selectedActionIndexes,
       action_pose_repr: chunk.action_pose_repr,
       traceAllIterations: isIkTraceEnabled(),
     };
