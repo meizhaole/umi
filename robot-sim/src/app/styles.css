@@ -1113,6 +1113,11 @@ button {
   color: var(--rose);
 }
 
+.dataset-replay-state.state-tracking_error {
+  border-color: rgba(252, 142, 149, 0.65);
+  color: var(--rose);
+}
+
 .dataset-replay-meta {
   display: grid;
   grid-template-columns: 1fr 1fr;

@@ -35,6 +35,9 @@ import type { SimCameraFrame } from '../sim/sensors/WristCameraCapture';
 import { CAMERA_IMAGE_SIZE } from '../sim/sensors/CameraSensor';
 import {
   DATASET_REPLAY_REPORT_URL,
+  classifyDatasetReplaySettlement,
+  DATASET_REPLAY_MAX_TRACKING_ERROR_RAD,
+  DATASET_REPLAY_MAX_VELOCITY_RAD_PER_SEC,
   type DatasetReplayFrame,
   type DatasetReplayReport,
   parseDatasetReplayReport,
@@ -62,7 +65,7 @@ const REPLAY_STEP_TIMEOUT_MS = 15000;
 
 interface DatasetReplayStepRecord {
   frame_index: number;
-  replay_state: 'SETTLED' | 'ERROR';
+  replay_state: 'SETTLED' | 'TRACKING_ERROR' | 'ERROR';
   error_reason: string | null;
   target_tcp_pose: Pose;
   commanded_joint_positions: JointValues;
@@ -70,6 +73,8 @@ interface DatasetReplayStepRecord {
   joint_tracking_error: JointValues;
   max_joint_tracking_error_rad: number;
   max_joint_tracking_error_joint: string;
+  max_joint_velocity_rad_per_sec: number;
+  max_joint_velocity_joint: string;
   actual_tcp_pose: Pose;
   tcp_position_tracking_error_m: number;
   tcp_orientation_tracking_error_rad: number;
@@ -84,6 +89,8 @@ interface DatasetReplayStepRecord {
 interface DatasetReplayStepSample {
   elapsed_ms: number;
   actual_joint_positions: JointValues;
+  joint_velocity_rad_per_sec: JointValues;
+  max_joint_velocity_rad_per_sec: number;
   joint_tracking_error: JointValues;
   max_joint_tracking_error_rad: number;
   actual_tcp_pose: Pose;
@@ -105,9 +112,14 @@ interface DatasetReplayMotionState {
   started_at_ms: number;
   baseline_joints: JointValues;
   previous_actual_joints: JointValues;
+  previous_sample_at_ms: number;
   expected_joint_delta_norm: number;
   stable_sample_count: number;
   maximum_sample_delta_rad: number;
+  maximum_joint_velocity_rad_per_sec: number;
+  maximum_joint_tracking_error_rad: number;
+  maximum_joint_velocity_joint: string;
+  maximum_joint_tracking_error_joint: string;
   samples: DatasetReplayStepSample[];
 }
 
@@ -144,9 +156,14 @@ export const App = () => {
     started_at_ms: 0,
     baseline_joints: {},
     previous_actual_joints: {},
+    previous_sample_at_ms: 0,
     expected_joint_delta_norm: 0,
     stable_sample_count: 0,
     maximum_sample_delta_rad: 0,
+    maximum_joint_velocity_rad_per_sec: 0,
+    maximum_joint_tracking_error_rad: 0,
+    maximum_joint_velocity_joint: '',
+    maximum_joint_tracking_error_joint: '',
     samples: [],
   });
   const [cameraPreviewReady, setCameraPreviewReady] = useState(false);
@@ -461,6 +478,7 @@ export const App = () => {
     const expectedJointDeltaNorm = Math.hypot(
       ...jointNames.map((name) => resolvedCommandValues[name] - baselineJoints[name]),
     );
+    const startedAtMs = performance.now();
 
     setMode('position');
     setCommands(nextCommands);
@@ -470,12 +488,17 @@ export const App = () => {
     setDatasetReplayError('');
     datasetReplayMotionRef.current = {
       frame_index: frameIndex,
-      started_at_ms: performance.now(),
+      started_at_ms: startedAtMs,
       baseline_joints: baselineJoints,
       previous_actual_joints: baselineJoints,
+      previous_sample_at_ms: startedAtMs,
       expected_joint_delta_norm: expectedJointDeltaNorm,
       stable_sample_count: 0,
       maximum_sample_delta_rad: 0,
+      maximum_joint_velocity_rad_per_sec: 0,
+      maximum_joint_tracking_error_rad: 0,
+      maximum_joint_velocity_joint: '',
+      maximum_joint_tracking_error_joint: '',
       samples: [],
     };
     writeDatasetReplaySnapshot(frameIndex, 'MOVING', report.frames);
@@ -537,7 +560,7 @@ export const App = () => {
   };
 
   const writeDatasetReplayStepResult = (
-    resultState: 'SETTLED' | 'ERROR',
+    resultState: 'SETTLED' | 'TRACKING_ERROR' | 'ERROR',
     errorReason: string | null,
     actualValues: JointValues,
     maxJointChangePerSample: number,
@@ -561,11 +584,6 @@ export const App = () => {
     const trackingErrors = Object.fromEntries(
       jointNames.map((name) => [name, actualJoints[name] - commandedJoints[name]]),
     );
-    const maximumJointEntry = Object.entries(trackingErrors).reduce<[string, number]>(
-      (maximum, entry) =>
-        Math.abs(entry[1]) > Math.abs(maximum[1]) ? [entry[0], entry[1]] : maximum,
-      [jointNames[0], trackingErrors[jointNames[0]]],
-    );
     const actualTcpPose = loadedRobot.kinematics.forwardKinematics(
       actualValues,
       loadedRobot.description.tipLink,
@@ -584,8 +602,10 @@ export const App = () => {
       commanded_joint_positions: commandedJoints,
       actual_joint_positions: actualJoints,
       joint_tracking_error: trackingErrors,
-      max_joint_tracking_error_rad: Math.abs(maximumJointEntry[1]),
-      max_joint_tracking_error_joint: maximumJointEntry[0],
+      max_joint_tracking_error_rad: motionState.maximum_joint_tracking_error_rad,
+      max_joint_tracking_error_joint: motionState.maximum_joint_tracking_error_joint,
+      max_joint_velocity_rad_per_sec: motionState.maximum_joint_velocity_rad_per_sec,
+      max_joint_velocity_joint: motionState.maximum_joint_velocity_joint,
       actual_tcp_pose: actualTcpPose,
       tcp_position_tracking_error_m: new Vector3(...actualTcpPose.position).distanceTo(
         new Vector3(...datasetReplayTargetPose.position),
@@ -615,7 +635,9 @@ export const App = () => {
       datasetReplayState !== 'MOVING' ||
       datasetReplayFrameIndex === null ||
       !datasetReplayReport ||
-      !loadedRobot
+      !loadedRobot ||
+      !physicsReady ||
+      !isRunning
     ) {
       return;
     }
@@ -623,130 +645,164 @@ export const App = () => {
     const motionState = datasetReplayMotionRef.current;
     if (motionState.frame_index !== datasetReplayFrameIndex) return;
     const jointNames = loadedRobot.model.getControllableJoints().map((joint) => joint.name);
-    const actualJoints = Object.fromEntries(
-      jointNames.map((name) => [name, jointValues[name] ?? Number.NaN]),
-    );
-    if (Object.values(actualJoints).some((value) => !Number.isFinite(value))) {
-      finishDatasetReplayStepRef.current(
-        'ERROR',
-        'actual_joint_state_invalid: Rapier 未提供全部六个有限关节状态',
-        actualJoints,
-        Number.NaN,
+    const sampleActualState = () => {
+      const now = performance.now();
+      const actualJoints = Object.fromEntries(
+        jointNames.map((name) => [name, jointValues[name] ?? Number.NaN]),
       );
-      return;
-    }
+      if (Object.values(actualJoints).some((value) => !Number.isFinite(value))) {
+        finishDatasetReplayStepRef.current(
+          'ERROR',
+          'actual_joint_state_invalid: Rapier 未提供全部六个有限关节状态',
+          actualJoints,
+          Number.NaN,
+        );
+        return;
+      }
 
-    if (!physicsReady) {
-      finishDatasetReplayStepRef.current(
-        'ERROR',
-        'physics_not_ready: Rapier physics 未就绪',
-        actualJoints,
-        Number.NaN,
-      );
-      return;
-    }
-
-    const maximumSampleDelta = Math.max(
-      ...jointNames.map((name) =>
-        Math.abs(
+      const sampleDurationSec = Math.max((now - motionState.previous_sample_at_ms) / 1000, 0.001);
+      const jointDeltas = Object.fromEntries(
+        jointNames.map((name) => [
+          name,
           actualJoints[name] - (motionState.previous_actual_joints[name] ?? actualJoints[name]),
+        ]),
+      );
+      const jointVelocities = Object.fromEntries(
+        jointNames.map((name) => [name, jointDeltas[name] / sampleDurationSec]),
+      );
+      const maximumSampleDelta = Math.max(...Object.values(jointDeltas).map(Math.abs));
+      const maximumVelocityEntry = Object.entries(jointVelocities).reduce<[string, number]>(
+        (maximum, entry) =>
+          Math.abs(entry[1]) > Math.abs(maximum[1]) ? [entry[0], entry[1]] : maximum,
+        [jointNames[0], jointVelocities[jointNames[0]]],
+      );
+      const maximumVelocity = Math.abs(maximumVelocityEntry[1]);
+      motionState.maximum_sample_delta_rad = Math.max(
+        motionState.maximum_sample_delta_rad,
+        maximumSampleDelta,
+      );
+      motionState.maximum_joint_velocity_rad_per_sec = Math.max(
+        motionState.maximum_joint_velocity_rad_per_sec,
+        maximumVelocity,
+      );
+      if (maximumVelocity >= motionState.maximum_joint_velocity_rad_per_sec) {
+        motionState.maximum_joint_velocity_joint = maximumVelocityEntry[0];
+      }
+      motionState.stable_sample_count =
+        maximumVelocity <= DATASET_REPLAY_MAX_VELOCITY_RAD_PER_SEC
+          ? motionState.stable_sample_count + 1
+          : 0;
+
+      const elapsedMs = now - motionState.started_at_ms;
+      const actualMotionNorm = Math.hypot(
+        ...jointNames.map(
+          (name) => actualJoints[name] - (motionState.baseline_joints[name] ?? actualJoints[name]),
         ),
-      ),
-    );
-    motionState.maximum_sample_delta_rad = Math.max(
-      motionState.maximum_sample_delta_rad,
-      maximumSampleDelta,
-    );
-    motionState.stable_sample_count =
-      maximumSampleDelta <= REPLAY_STABLE_SAMPLE_DELTA_RAD
-        ? motionState.stable_sample_count + 1
-        : 0;
-    motionState.previous_actual_joints = actualJoints;
+      );
+      const frame = datasetReplayReport.frames[datasetReplayFrameIndex];
+      const activeCommands = loadedRobot.controller.getCommands();
+      const commandedJoints = Object.fromEntries(
+        jointNames.map((name) => [
+          name,
+          activeCommands[name]?.mode === 'position'
+            ? activeCommands[name].value
+            : frame.ik_solution_joints[name],
+        ]),
+      );
+      const trackingErrors = Object.fromEntries(
+        jointNames.map((name) => [name, actualJoints[name] - commandedJoints[name]]),
+      );
+      const maximumTrackingEntry = Object.entries(trackingErrors).reduce<[string, number]>(
+        (maximum, entry) =>
+          Math.abs(entry[1]) > Math.abs(maximum[1]) ? [entry[0], entry[1]] : maximum,
+        [jointNames[0], trackingErrors[jointNames[0]]],
+      );
+      const maximumTrackingError = Math.abs(maximumTrackingEntry[1]);
+      motionState.maximum_joint_tracking_error_rad = Math.max(
+        motionState.maximum_joint_tracking_error_rad,
+        maximumTrackingError,
+      );
+      if (maximumTrackingError >= motionState.maximum_joint_tracking_error_rad) {
+        motionState.maximum_joint_tracking_error_joint = maximumTrackingEntry[0];
+      }
+      const actualTcpPose = loadedRobot.kinematics.forwardKinematics(
+        actualJoints,
+        loadedRobot.description.tipLink,
+      );
+      const targetTcpPose: Pose = {
+        position: frame.aligned_target_position,
+        orientation: frame.aligned_target_quaternion,
+      };
+      motionState.samples.push({
+        elapsed_ms: elapsedMs,
+        actual_joint_positions: actualJoints,
+        joint_velocity_rad_per_sec: jointVelocities,
+        max_joint_velocity_rad_per_sec: maximumVelocity,
+        joint_tracking_error: trackingErrors,
+        max_joint_tracking_error_rad: maximumTrackingError,
+        actual_tcp_pose: actualTcpPose,
+        tcp_position_tracking_error_m: new Vector3(...actualTcpPose.position).distanceTo(
+          new Vector3(...targetTcpPose.position),
+        ),
+        tcp_orientation_tracking_error_rad: new Quaternion(...actualTcpPose.orientation).angleTo(
+          new Quaternion(...targetTcpPose.orientation),
+        ),
+      });
+      motionState.previous_actual_joints = actualJoints;
+      motionState.previous_sample_at_ms = now;
 
-    const elapsedMs = performance.now() - motionState.started_at_ms;
-    const actualMotionNorm = Math.hypot(
-      ...jointNames.map(
-        (name) => actualJoints[name] - (motionState.baseline_joints[name] ?? actualJoints[name]),
-      ),
-    );
-    const frame = datasetReplayReport.frames[datasetReplayFrameIndex];
-    const activeCommands = loadedRobot.controller.getCommands();
-    const commandedJoints = Object.fromEntries(
-      jointNames.map((name) => [
-        name,
-        activeCommands[name]?.mode === 'position'
-          ? activeCommands[name].value
-          : frame.ik_solution_joints[name],
-      ]),
-    );
-    const trackingErrors = Object.fromEntries(
-      jointNames.map((name) => [name, actualJoints[name] - commandedJoints[name]]),
-    );
-    const maximumTrackingError = Math.max(...Object.values(trackingErrors).map(Math.abs));
-    const actualTcpPose = loadedRobot.kinematics.forwardKinematics(
-      actualJoints,
-      loadedRobot.description.tipLink,
-    );
-    const targetTcpPose: Pose = {
-      position: frame.aligned_target_position,
-      orientation: frame.aligned_target_quaternion,
+      if (elapsedMs >= REPLAY_STEP_TIMEOUT_MS) {
+        finishDatasetReplayStepRef.current(
+          'ERROR',
+          `step_timeout: ${REPLAY_STEP_TIMEOUT_MS / 1000} 秒内实际关节状态未稳定`,
+          actualJoints,
+          motionState.maximum_sample_delta_rad,
+        );
+        return;
+      }
+
+      if (
+        motionState.expected_joint_delta_norm > REPLAY_STABLE_SAMPLE_DELTA_RAD &&
+        elapsedMs >= REPLAY_NO_MOTION_TIMEOUT_MS &&
+        actualMotionNorm < REPLAY_NO_MOTION_THRESHOLD_RAD
+      ) {
+        finishDatasetReplayStepRef.current(
+          'ERROR',
+          'no_joint_motion: commanded joints changed, but Rapier actual joints did not move',
+          actualJoints,
+          motionState.maximum_sample_delta_rad,
+        );
+        return;
+      }
+
+      if (
+        motionState.stable_sample_count >= REPLAY_STABLE_SAMPLE_COUNT &&
+        (motionState.expected_joint_delta_norm <= REPLAY_STABLE_SAMPLE_DELTA_RAD ||
+          actualMotionNorm >= REPLAY_NO_MOTION_THRESHOLD_RAD)
+      ) {
+        const settledState = classifyDatasetReplaySettlement(maximumVelocity, maximumTrackingError);
+        if (settledState) {
+          const errorReason =
+            settledState === 'TRACKING_ERROR'
+              ? `tracking_error: 关节速度低于 ${DATASET_REPLAY_MAX_VELOCITY_RAD_PER_SEC.toFixed(3)} rad/s，但最大跟踪误差 ${maximumTrackingError.toFixed(6)} rad 未低于 ${DATASET_REPLAY_MAX_TRACKING_ERROR_RAD.toFixed(3)} rad`
+              : null;
+          finishDatasetReplayStepRef.current(
+            settledState,
+            errorReason,
+            actualJoints,
+            motionState.maximum_sample_delta_rad,
+          );
+        }
+      }
     };
-    motionState.samples.push({
-      elapsed_ms: elapsedMs,
-      actual_joint_positions: actualJoints,
-      joint_tracking_error: trackingErrors,
-      max_joint_tracking_error_rad: maximumTrackingError,
-      actual_tcp_pose: actualTcpPose,
-      tcp_position_tracking_error_m: new Vector3(...actualTcpPose.position).distanceTo(
-        new Vector3(...targetTcpPose.position),
-      ),
-      tcp_orientation_tracking_error_rad: new Quaternion(...actualTcpPose.orientation).angleTo(
-        new Quaternion(...targetTcpPose.orientation),
-      ),
-    });
 
-    if (elapsedMs >= REPLAY_STEP_TIMEOUT_MS) {
-      finishDatasetReplayStepRef.current(
-        'ERROR',
-        `step_timeout: ${REPLAY_STEP_TIMEOUT_MS / 1000} 秒内实际关节状态未稳定`,
-        actualJoints,
-        motionState.maximum_sample_delta_rad,
-      );
-      return;
-    }
-
-    if (
-      motionState.expected_joint_delta_norm > REPLAY_STABLE_SAMPLE_DELTA_RAD &&
-      elapsedMs >= REPLAY_NO_MOTION_TIMEOUT_MS &&
-      actualMotionNorm < REPLAY_NO_MOTION_THRESHOLD_RAD
-    ) {
-      finishDatasetReplayStepRef.current(
-        'ERROR',
-        'no_joint_motion: commanded joints changed, but Rapier actual joints did not move',
-        actualJoints,
-        motionState.maximum_sample_delta_rad,
-      );
-      return;
-    }
-
-    if (
-      motionState.stable_sample_count >= REPLAY_STABLE_SAMPLE_COUNT &&
-      (motionState.expected_joint_delta_norm <= REPLAY_STABLE_SAMPLE_DELTA_RAD ||
-        actualMotionNorm >= REPLAY_NO_MOTION_THRESHOLD_RAD)
-    ) {
-      finishDatasetReplayStepRef.current(
-        'SETTLED',
-        null,
-        actualJoints,
-        motionState.maximum_sample_delta_rad,
-      );
-      return;
-    }
+    sampleActualState();
   }, [
     datasetReplayEnabled,
     datasetReplayFrameIndex,
     datasetReplayReport,
     datasetReplayState,
+    isRunning,
     jointValues,
     loadedRobot,
     physicsReady,

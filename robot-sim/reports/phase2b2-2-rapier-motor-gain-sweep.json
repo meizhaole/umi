@@ -1,0 +1,1269 @@
+{
+  "phase": "2B-2.2",
+  "episode": 0,
+  "frame": 0,
+  "testPurpose": "UR5 Rapier position motor static hold under gravity",
+  "commandedJoints": {
+    "shoulder_pan_joint": 0,
+    "shoulder_lift_joint": -1.5707963267948966,
+    "elbow_joint": -1.5707963267948966,
+    "wrist_1_joint": -1.5707963267948966,
+    "wrist_2_joint": 1.5707963267948966,
+    "wrist_3_joint": 0
+  },
+  "environment": {
+    "gravity": [0, -9.81, 0],
+    "timestepSec": 0.016666666666666666,
+    "ur5Colliders": 0,
+    "robotContactsPossible": false,
+    "reset": "Fresh page and UR5 physics world for each gain pair; command frame 0 before physics resume.",
+    "motorModel": "AccelerationBased, Rapier default; application does not explicitly set motor model.",
+    "maxMotorForceOrImpulse": "No application value configured; pinned JS API has no setter.",
+    "baseBody": "Fixed to world.",
+    "libraryVersions": {
+      "@react-three/rapier": "2.2.0",
+      "@dimforge/rapier3d-compat": "0.19.2"
+    },
+    "applicationDefaultGains": {
+      "stiffness": 100,
+      "damping": 18
+    },
+    "sweepGainSource": "Temporary browser runtime instrumentation; no permanent gain change."
+  },
+  "sampling": {
+    "requestedTimesSec": [1, 3, 6, 12],
+    "recordedData": "Each timed sample includes actual, commanded and error vectors for all six joints, joint velocities, max error and joint, max velocity and joint, TCP position and orientation errors."
+  },
+  "runs": [
+    {
+      "name": "baseline",
+      "stiffness": 100,
+      "damping": 20,
+      "elapsedMs": 12300,
+      "samplesRecorded": 737,
+      "robotColliders": 0,
+      "gravity": [0, -9.81, 0],
+      "timestepSec": 0.016666666666666666,
+      "timedSamples": [
+        {
+          "requestedTimeSec": 1,
+          "sampleTimeSec": 1.001,
+          "commanded": {
+            "shoulder_pan_joint": 0,
+            "shoulder_lift_joint": -1.5707963267948966,
+            "elbow_joint": -1.5707963267948966,
+            "wrist_1_joint": -1.5707963267948966,
+            "wrist_2_joint": 1.5707963267948966,
+            "wrist_3_joint": 0
+          },
+          "actual": {
+            "shoulder_pan_joint": 0.007583095467865267,
+            "shoulder_lift_joint": -1.5707893783200162,
+            "elbow_joint": -1.5895319494216147,
+            "wrist_1_joint": -1.5570339075873822,
+            "wrist_2_joint": 1.5785136763015895,
+            "wrist_3_joint": 0.12487099638785863
+          },
+          "trackingError": {
+            "shoulder_pan_joint": 0.007583095467865267,
+            "shoulder_lift_joint": 0.000006948474880363875,
+            "elbow_joint": -0.01873562262671813,
+            "wrist_1_joint": 0.01376241920751431,
+            "wrist_2_joint": 0.007717349506692894,
+            "wrist_3_joint": 0.12487099638785863
+          },
+          "maxJointError": {
+            "joint": "wrist_3_joint",
+            "rad": 0.12487099638785863
+          },
+          "jointVelocity": {
+            "shoulder_pan_joint": 0.040652044959538974,
+            "shoulder_lift_joint": -0.0003528202749462898,
+            "elbow_joint": 0.08287256850756415,
+            "wrist_1_joint": -0.08781024513364145,
+            "wrist_2_joint": 0.027024111398697294,
+            "wrist_3_joint": 0.17521507445227122
+          },
+          "maxJointVelocity": {
+            "joint": "wrist_3_joint",
+            "radPerSec": 0.17521507445227122
+          },
+          "tcpPositionErrorM": 0.008936606429058273,
+          "tcpOrientationErrorRad": 0.11766508145926433,
+          "replayState": "MOVING"
+        },
+        {
+          "requestedTimeSec": 3,
+          "sampleTimeSec": 2.984,
+          "commanded": {
+            "shoulder_pan_joint": 0,
+            "shoulder_lift_joint": -1.5707963267948966,
+            "elbow_joint": -1.5707963267948966,
+            "wrist_1_joint": -1.5707963267948966,
+            "wrist_2_joint": 1.5707963267948966,
+            "wrist_3_joint": 0
+          },
+          "actual": {
+            "shoulder_pan_joint": 0.005929472874086331,
+            "shoulder_lift_joint": -1.5707035497035597,
+            "elbow_joint": -1.6194512860113985,
+            "wrist_1_joint": -1.5575191343118528,
+            "wrist_2_joint": 1.5758010077691065,
+            "wrist_3_joint": 0.1774000843962968
+          },
+          "trackingError": {
+            "shoulder_pan_joint": 0.005929472874086331,
+            "shoulder_lift_joint": 0.00009277709133681533,
+            "elbow_joint": -0.04865495921650198,
+            "wrist_1_joint": 0.01327719248304371,
+            "wrist_2_joint": 0.0050046809742099185,
+            "wrist_3_joint": 0.1774000843962968
+          },
+          "maxJointError": {
+            "joint": "wrist_3_joint",
+            "rad": 0.1774000843962968
+          },
+          "jointVelocity": {
+            "shoulder_pan_joint": -0.004241669314099718,
+            "shoulder_lift_joint": 0.015039667683938277,
+            "elbow_joint": -0.027361203141109305,
+            "wrist_1_joint": 0.018180505367228792,
+            "wrist_2_joint": -0.029320843147828596,
+            "wrist_3_joint": -0.04407683389983496
+          },
+          "maxJointVelocity": {
+            "joint": "wrist_3_joint",
+            "radPerSec": 0.04407683389983496
+          },
+          "tcpPositionErrorM": 0.022743963488927967,
+          "tcpOrientationErrorRad": 0.17521247635130688,
+          "replayState": "MOVING"
+        },
+        {
+          "requestedTimeSec": 6,
+          "sampleTimeSec": 6.004,
+          "commanded": {
+            "shoulder_pan_joint": 0,
+            "shoulder_lift_joint": -1.5707963267948966,
+            "elbow_joint": -1.5707963267948966,
+            "wrist_1_joint": -1.5707963267948966,
+            "wrist_2_joint": 1.5707963267948966,
+            "wrist_3_joint": 0
+          },
+          "actual": {
+            "shoulder_pan_joint": 0.007010662804091188,
+            "shoulder_lift_joint": -1.570788402940128,
+            "elbow_joint": -1.655797084651547,
+            "wrist_1_joint": -1.5613857148814947,
+            "wrist_2_joint": 1.575947066316078,
+            "wrist_3_joint": 0.19048552036159147
+          },
+          "trackingError": {
+            "shoulder_pan_joint": 0.007010662804091188,
+            "shoulder_lift_joint": 0.000007923854768554506,
+            "elbow_joint": -0.08500075785665051,
+            "wrist_1_joint": 0.009410611913401867,
+            "wrist_2_joint": 0.005150739521181391,
+            "wrist_3_joint": 0.19048552036159147
+          },
+          "maxJointError": {
+            "joint": "wrist_3_joint",
+            "rad": 0.19048552036159147
+          },
+          "jointVelocity": {
+            "shoulder_pan_joint": -0.010834129763964782,
+            "shoulder_lift_joint": -0.0005105618693157218,
+            "elbow_joint": -0.022106152067338222,
+            "wrist_1_joint": -0.10761121325572834,
+            "wrist_2_joint": -0.0101499561833958,
+            "wrist_3_joint": -0.048295431587721496
+          },
+          "maxJointVelocity": {
+            "joint": "wrist_1_joint",
+            "radPerSec": 0.10761121325572834
+          },
+          "tcpPositionErrorM": 0.04101565445094439,
+          "tcpOrientationErrorRad": 0.1986391963158449,
+          "replayState": "MOVING"
+        },
+        {
+          "requestedTimeSec": 12,
+          "sampleTimeSec": 11.998,
+          "commanded": {
+            "shoulder_pan_joint": 0,
+            "shoulder_lift_joint": -1.5707963267948966,
+            "elbow_joint": -1.5707963267948966,
+            "wrist_1_joint": -1.5707963267948966,
+            "wrist_2_joint": 1.5707963267948966,
+            "wrist_3_joint": 0
+          },
+          "actual": {
+            "shoulder_pan_joint": 0.006849798072314531,
+            "shoulder_lift_joint": -1.5707999049240116,
+            "elbow_joint": -1.7121409313715141,
+            "wrist_1_joint": -1.5618393872234686,
+            "wrist_2_joint": 1.5764684308210488,
+            "wrist_3_joint": 0.19866861174678138
+          },
+          "trackingError": {
+            "shoulder_pan_joint": 0.006849798072314531,
+            "shoulder_lift_joint": -0.00000357812911500055,
+            "elbow_joint": -0.14134460457661757,
+            "wrist_1_joint": 0.008956939571427958,
+            "wrist_2_joint": 0.005672104026152258,
+            "wrist_3_joint": 0.19866861174678138
+          },
+          "maxJointError": {
+            "joint": "wrist_3_joint",
+            "rad": 0.19866861174678138
+          },
+          "jointVelocity": {
+            "shoulder_pan_joint": 0.004084531964018828,
+            "shoulder_lift_joint": -0.0014024584741479042,
+            "elbow_joint": -0.025029374928735297,
+            "wrist_1_joint": -0.05347404623264954,
+            "wrist_2_joint": -0.0018872190558439684,
+            "wrist_3_joint": 0.008768014492001017
+          },
+          "maxJointVelocity": {
+            "joint": "wrist_1_joint",
+            "radPerSec": 0.05347404623264954
+          },
+          "tcpPositionErrorM": 0.06876095822639156,
+          "tcpOrientationErrorRad": 0.23333276299101416,
+          "replayState": "SETTLED"
+        }
+      ],
+      "peakJointError": {
+        "shoulder_pan_joint": {
+          "error": 0.013905320586562495,
+          "timeSec": 0.2
+        },
+        "shoulder_lift_joint": {
+          "error": 0.0006592237402158752,
+          "timeSec": 0.572
+        },
+        "elbow_joint": {
+          "error": 0.14438332515014252,
+          "timeSec": 12.268
+        },
+        "wrist_1_joint": {
+          "error": 0.018894227923980766,
+          "timeSec": 0.084
+        },
+        "wrist_2_joint": {
+          "error": 0.014573774041856336,
+          "timeSec": 0.288
+        },
+        "wrist_3_joint": {
+          "error": 0.19894798639644873,
+          "timeSec": 12.103
+        }
+      },
+      "maxJointVelocityBetween10And12Sec": {
+        "joint": "wrist_1_joint",
+        "radPerSec": 0.11374248751271449,
+        "timeSec": 10.032
+      },
+      "maxTcpPositionErrorM": 0.06997640191501316,
+      "maxTcpOrientationErrorRad": 0.2345490277966674,
+      "targetCrossingsAfter1s": {
+        "shoulder_pan_joint": 0,
+        "shoulder_lift_joint": 0,
+        "elbow_joint": 0,
+        "wrist_1_joint": 0,
+        "wrist_2_joint": 2,
+        "wrist_3_joint": 0
+      },
+      "overshoot": true,
+      "oscillation": true,
+      "nonFiniteCount": 0,
+      "pageErrors": [],
+      "legacyReplayStateAt12sBeforeSettlementFix": "SETTLED"
+    },
+    {
+      "name": "G1",
+      "stiffness": 400,
+      "damping": 40,
+      "elapsedMs": 12309,
+      "samplesRecorded": 737,
+      "robotColliders": 0,
+      "gravity": [0, -9.81, 0],
+      "timestepSec": 0.016666666666666666,
+      "timedSamples": [
+        {
+          "requestedTimeSec": 1,
+          "sampleTimeSec": 0.996,
+          "commanded": {
+            "shoulder_pan_joint": 0,
+            "shoulder_lift_joint": -1.5707963267948966,
+            "elbow_joint": -1.5707963267948966,
+            "wrist_1_joint": -1.5707963267948966,
+            "wrist_2_joint": 1.5707963267948966,
+            "wrist_3_joint": 0
+          },
+          "actual": {
+            "shoulder_pan_joint": 0.00799613878896587,
+            "shoulder_lift_joint": -1.570783822932051,
+            "elbow_joint": -1.5860927161422453,
+            "wrist_1_joint": -1.5599125593112886,
+            "wrist_2_joint": 1.5769584256643265,
+            "wrist_3_joint": 0.12664059376415865
+          },
+          "trackingError": {
+            "shoulder_pan_joint": 0.00799613878896587,
+            "shoulder_lift_joint": 0.000012503862845569813,
+            "elbow_joint": -0.015296389347348782,
+            "wrist_1_joint": 0.010883767483607976,
+            "wrist_2_joint": 0.006162098869429977,
+            "wrist_3_joint": 0.12664059376415865
+          },
+          "maxJointError": {
+            "joint": "wrist_3_joint",
+            "rad": 0.12664059376415865
+          },
+          "jointVelocity": {
+            "shoulder_pan_joint": 0.0705470647438488,
+            "shoulder_lift_joint": 0.00014718098328450786,
+            "elbow_joint": 0.029690506119272445,
+            "wrist_1_joint": -0.029780139047546107,
+            "wrist_2_joint": -0.02406916896024813,
+            "wrist_3_joint": 0.2138237436424977
+          },
+          "maxJointVelocity": {
+            "joint": "wrist_3_joint",
+            "radPerSec": 0.2138237436424977
+          },
+          "tcpPositionErrorM": 0.007786709312494089,
+          "tcpOrientationErrorRad": 0.1188990697522621,
+          "replayState": "MOVING"
+        },
+        {
+          "requestedTimeSec": 3,
+          "sampleTimeSec": 2.993,
+          "commanded": {
+            "shoulder_pan_joint": 0,
+            "shoulder_lift_joint": -1.5707963267948966,
+            "elbow_joint": -1.5707963267948966,
+            "wrist_1_joint": -1.5707963267948966,
+            "wrist_2_joint": 1.5707963267948966,
+            "wrist_3_joint": 0
+          },
+          "actual": {
+            "shoulder_pan_joint": 0.004675486958217099,
+            "shoulder_lift_joint": -1.570834958728775,
+            "elbow_joint": -1.614593339994444,
+            "wrist_1_joint": -1.558114278453988,
+            "wrist_2_joint": 1.5757700743686804,
+            "wrist_3_joint": 0.1724955711458315
+          },
+          "trackingError": {
+            "shoulder_pan_joint": 0.004675486958217099,
+            "shoulder_lift_joint": -0.00003863193387854125,
+            "elbow_joint": -0.04379701319954754,
+            "wrist_1_joint": 0.01268204834090847,
+            "wrist_2_joint": 0.004973747573783882,
+            "wrist_3_joint": 0.1724955711458315
+          },
+          "maxJointError": {
+            "joint": "wrist_3_joint",
+            "rad": 0.1724955711458315
+          },
+          "jointVelocity": {
+            "shoulder_pan_joint": -0.020698795053546666,
+            "shoulder_lift_joint": -0.0022965724568704657,
+            "elbow_joint": -0.03250179033378725,
+            "wrist_1_joint": 0.05628055086998148,
+            "wrist_2_joint": 0.032964498807783474,
+            "wrist_3_joint": -0.014985434240181263
+          },
+          "maxJointVelocity": {
+            "joint": "wrist_1_joint",
+            "radPerSec": 0.05628055086998148
+          },
+          "tcpPositionErrorM": 0.02042280108540204,
+          "tcpOrientationErrorRad": 0.17082894994503411,
+          "replayState": "MOVING"
+        },
+        {
+          "requestedTimeSec": 6,
+          "sampleTimeSec": 5.992,
+          "commanded": {
+            "shoulder_pan_joint": 0,
+            "shoulder_lift_joint": -1.5707963267948966,
+            "elbow_joint": -1.5707963267948966,
+            "wrist_1_joint": -1.5707963267948966,
+            "wrist_2_joint": 1.5707963267948966,
+            "wrist_3_joint": 0
+          },
+          "actual": {
+            "shoulder_pan_joint": 0.006521449540823542,
+            "shoulder_lift_joint": -1.5708292806013415,
+            "elbow_joint": -1.6401967150642351,
+            "wrist_1_joint": -1.5596043454025899,
+            "wrist_2_joint": 1.57646288235471,
+            "wrist_3_joint": 0.18725556589404346
+          },
+          "trackingError": {
+            "shoulder_pan_joint": 0.006521449540823542,
+            "shoulder_lift_joint": -0.00003295380644496859,
+            "elbow_joint": -0.06940038826933859,
+            "wrist_1_joint": 0.011191981392306705,
+            "wrist_2_joint": 0.005666555559813435,
+            "wrist_3_joint": 0.18725556589404346
+          },
+          "maxJointError": {
+            "joint": "wrist_3_joint",
+            "rad": 0.18725556589404346
+          },
+          "jointVelocity": {
+            "shoulder_pan_joint": -0.005472395036626936,
+            "shoulder_lift_joint": -0.0019065244200007386,
+            "elbow_joint": -0.01869592688433067,
+            "wrist_1_joint": 0.025841398774720966,
+            "wrist_2_joint": 0.0011394562709271443,
+            "wrist_3_joint": -0.02000706095084601
+          },
+          "maxJointVelocity": {
+            "joint": "wrist_1_joint",
+            "radPerSec": 0.025841398774720966
+          },
+          "tcpPositionErrorM": 0.033188110611374506,
+          "tcpOrientationErrorRad": 0.19010338934876286,
+          "replayState": "MOVING"
+        },
+        {
+          "requestedTimeSec": 12,
+          "sampleTimeSec": 12.009,
+          "commanded": {
+            "shoulder_pan_joint": 0,
+            "shoulder_lift_joint": -1.5707963267948966,
+            "elbow_joint": -1.5707963267948966,
+            "wrist_1_joint": -1.5707963267948966,
+            "wrist_2_joint": 1.5707963267948966,
+            "wrist_3_joint": 0
+          },
+          "actual": {
+            "shoulder_pan_joint": 0.006930062248473381,
+            "shoulder_lift_joint": -1.5707997143608396,
+            "elbow_joint": -1.6704833831368613,
+            "wrist_1_joint": -1.5616209602902527,
+            "wrist_2_joint": 1.576583811622825,
+            "wrist_3_joint": 0.19430274348832496
+          },
+          "trackingError": {
+            "shoulder_pan_joint": 0.006930062248473381,
+            "shoulder_lift_joint": -0.0000033875659430915306,
+            "elbow_joint": -0.09968705634196473,
+            "wrist_1_joint": 0.0091753665046439,
+            "wrist_2_joint": 0.005787484827928457,
+            "wrist_3_joint": 0.19430274348832496
+          },
+          "maxJointError": {
+            "joint": "wrist_3_joint",
+            "rad": 0.19430274348832496
+          },
+          "jointVelocity": {
+            "shoulder_pan_joint": -0.0010194157026004022,
+            "shoulder_lift_joint": 0.004494536373597047,
+            "elbow_joint": -0.015253510911428486,
+            "wrist_1_joint": 0.03038639352505858,
+            "wrist_2_joint": 0.001125064053653306,
+            "wrist_3_joint": -0.001084049207215412
+          },
+          "maxJointVelocity": {
+            "joint": "wrist_1_joint",
+            "radPerSec": 0.03038639352505858
+          },
+          "tcpPositionErrorM": 0.04826000789552829,
+          "tcpOrientationErrorRad": 0.2083483707371476,
+          "replayState": "SETTLED"
+        }
+      ],
+      "peakJointError": {
+        "shoulder_pan_joint": {
+          "error": 0.013621924712360926,
+          "timeSec": 0.228
+        },
+        "shoulder_lift_joint": {
+          "error": 0.0006451082459373314,
+          "timeSec": 0.56
+        },
+        "elbow_joint": {
+          "error": 0.1008725102621173,
+          "timeSec": 12.243
+        },
+        "wrist_1_joint": {
+          "error": 0.019339419647589118,
+          "timeSec": 0.078
+        },
+        "wrist_2_joint": {
+          "error": 0.014758905904506792,
+          "timeSec": 0.279
+        },
+        "wrist_3_joint": {
+          "error": 0.19430458645474796,
+          "timeSec": 11.975
+        }
+      },
+      "maxJointVelocityBetween10And12Sec": {
+        "joint": "wrist_1_joint",
+        "radPerSec": 0.04615054536037527,
+        "timeSec": 10.44
+      },
+      "maxTcpPositionErrorM": 0.04880683566780592,
+      "maxTcpOrientationErrorRad": 0.20886222996930798,
+      "targetCrossingsAfter1s": {
+        "shoulder_pan_joint": 0,
+        "shoulder_lift_joint": 0,
+        "elbow_joint": 0,
+        "wrist_1_joint": 0,
+        "wrist_2_joint": 0,
+        "wrist_3_joint": 0
+      },
+      "overshoot": false,
+      "oscillation": false,
+      "nonFiniteCount": 0,
+      "pageErrors": [],
+      "legacyReplayStateAt12sBeforeSettlementFix": "SETTLED"
+    },
+    {
+      "name": "G2",
+      "stiffness": 900,
+      "damping": 60,
+      "elapsedMs": 12307,
+      "samplesRecorded": 737,
+      "robotColliders": 0,
+      "gravity": [0, -9.81, 0],
+      "timestepSec": 0.016666666666666666,
+      "timedSamples": [
+        {
+          "requestedTimeSec": 1,
+          "sampleTimeSec": 0.996,
+          "commanded": {
+            "shoulder_pan_joint": 0,
+            "shoulder_lift_joint": -1.5707963267948966,
+            "elbow_joint": -1.5707963267948966,
+            "wrist_1_joint": -1.5707963267948966,
+            "wrist_2_joint": 1.5707963267948966,
+            "wrist_3_joint": 0
+          },
+          "actual": {
+            "shoulder_pan_joint": 0.008531846851795087,
+            "shoulder_lift_joint": -1.570790853174176,
+            "elbow_joint": -1.587868716694646,
+            "wrist_1_joint": -1.5591054423141173,
+            "wrist_2_joint": 1.5750102317106116,
+            "wrist_3_joint": 0.12847351859780987
+          },
+          "trackingError": {
+            "shoulder_pan_joint": 0.008531846851795087,
+            "shoulder_lift_joint": 0.0000054736207204530984,
+            "elbow_joint": -0.01707238989974935,
+            "wrist_1_joint": 0.011690884480779262,
+            "wrist_2_joint": 0.00421390491571505,
+            "wrist_3_joint": 0.12847351859780987
+          },
+          "maxJointError": {
+            "joint": "wrist_3_joint",
+            "rad": 0.12847351859780987
+          },
+          "jointVelocity": {
+            "shoulder_pan_joint": 0.02998773357159286,
+            "shoulder_lift_joint": -0.001654066633208447,
+            "elbow_joint": -0.06671082604078103,
+            "wrist_1_joint": 0.2051782937693937,
+            "wrist_2_joint": 0.08253359952216308,
+            "wrist_3_joint": 0.2017535374554026
+          },
+          "maxJointVelocity": {
+            "joint": "wrist_1_joint",
+            "radPerSec": 0.2051782937693937
+          },
+          "tcpPositionErrorM": 0.008501576980607184,
+          "tcpOrientationErrorRad": 0.12014709530634363,
+          "replayState": "MOVING"
+        },
+        {
+          "requestedTimeSec": 3,
+          "sampleTimeSec": 3.008,
+          "commanded": {
+            "shoulder_pan_joint": 0,
+            "shoulder_lift_joint": -1.5707963267948966,
+            "elbow_joint": -1.5707963267948966,
+            "wrist_1_joint": -1.5707963267948966,
+            "wrist_2_joint": 1.5707963267948966,
+            "wrist_3_joint": 0
+          },
+          "actual": {
+            "shoulder_pan_joint": 0.006070123079283425,
+            "shoulder_lift_joint": -1.5708112298200019,
+            "elbow_joint": -1.6047645007534928,
+            "wrist_1_joint": -1.5616609773643992,
+            "wrist_2_joint": 1.5736167265337595,
+            "wrist_3_joint": 0.17453653286787502
+          },
+          "trackingError": {
+            "shoulder_pan_joint": 0.006070123079283425,
+            "shoulder_lift_joint": -0.000014903025105317269,
+            "elbow_joint": -0.03396817395859619,
+            "wrist_1_joint": 0.00913534943049732,
+            "wrist_2_joint": 0.0028203997388629443,
+            "wrist_3_joint": 0.17453653286787502
+          },
+          "maxJointError": {
+            "joint": "wrist_3_joint",
+            "rad": 0.17453653286787502
+          },
+          "jointVelocity": {
+            "shoulder_pan_joint": -0.02104517262885397,
+            "shoulder_lift_joint": -0.0023454880922817757,
+            "elbow_joint": -0.05108511432263346,
+            "wrist_1_joint": -0.14495906660661267,
+            "wrist_2_joint": -0.05727219246214792,
+            "wrist_3_joint": -0.3202199179915119
+          },
+          "maxJointVelocity": {
+            "joint": "wrist_3_joint",
+            "radPerSec": 0.3202199179915119
+          },
+          "tcpPositionErrorM": 0.016056227575034537,
+          "tcpOrientationErrorRad": 0.17034265908500937,
+          "replayState": "MOVING"
+        },
+        {
+          "requestedTimeSec": 6,
+          "sampleTimeSec": 5.999,
+          "commanded": {
+            "shoulder_pan_joint": 0,
+            "shoulder_lift_joint": -1.5707963267948966,
+            "elbow_joint": -1.5707963267948966,
+            "wrist_1_joint": -1.5707963267948966,
+            "wrist_2_joint": 1.5707963267948966,
+            "wrist_3_joint": 0
+          },
+          "actual": {
+            "shoulder_pan_joint": 0.006925689879134398,
+            "shoulder_lift_joint": -1.570847879618206,
+            "elbow_joint": -1.6217943000209147,
+            "wrist_1_joint": -1.5607755618414243,
+            "wrist_2_joint": 1.5762513750885248,
+            "wrist_3_joint": 0.18718806090668458
+          },
+          "trackingError": {
+            "shoulder_pan_joint": 0.006925689879134398,
+            "shoulder_lift_joint": -0.000051552823309375384,
+            "elbow_joint": -0.05099797322601818,
+            "wrist_1_joint": 0.010020764953472261,
+            "wrist_2_joint": 0.005455048293628195,
+            "wrist_3_joint": 0.18718806090668458
+          },
+          "maxJointError": {
+            "joint": "wrist_3_joint",
+            "rad": 0.18718806090668458
+          },
+          "jointVelocity": {
+            "shoulder_pan_joint": -0.004526522632695284,
+            "shoulder_lift_joint": -0.003589572251739606,
+            "elbow_joint": 0.010927855590759782,
+            "wrist_1_joint": -0.013624641242215664,
+            "wrist_2_joint": -0.00146059444724392,
+            "wrist_3_joint": -0.019666777728130864
+          },
+          "maxJointVelocity": {
+            "joint": "wrist_3_joint",
+            "radPerSec": 0.019666777728130864
+          },
+          "tcpPositionErrorM": 0.024339508925548294,
+          "tcpOrientationErrorRad": 0.18504955748479912,
+          "replayState": "MOVING"
+        },
+        {
+          "requestedTimeSec": 12,
+          "sampleTimeSec": 11.991,
+          "commanded": {
+            "shoulder_pan_joint": 0,
+            "shoulder_lift_joint": -1.5707963267948966,
+            "elbow_joint": -1.5707963267948966,
+            "wrist_1_joint": -1.5707963267948966,
+            "wrist_2_joint": 1.5707963267948966,
+            "wrist_3_joint": 0
+          },
+          "actual": {
+            "shoulder_pan_joint": 0.006951360546025823,
+            "shoulder_lift_joint": -1.5708736742318483,
+            "elbow_joint": -1.6351562821942456,
+            "wrist_1_joint": -1.5617700066957323,
+            "wrist_2_joint": 1.5766062472034899,
+            "wrist_3_joint": 0.19020610111941158
+          },
+          "trackingError": {
+            "shoulder_pan_joint": 0.006951360546025823,
+            "shoulder_lift_joint": -0.00007734743695175794,
+            "elbow_joint": -0.06435995539934902,
+            "wrist_1_joint": 0.009026320099164264,
+            "wrist_2_joint": 0.005809920408593294,
+            "wrist_3_joint": 0.19020610111941158
+          },
+          "maxJointError": {
+            "joint": "wrist_3_joint",
+            "rad": 0.19020610111941158
+          },
+          "jointVelocity": {
+            "shoulder_pan_joint": -0.00038443702508153814,
+            "shoulder_lift_joint": -0.004311499785661347,
+            "elbow_joint": 0.0029043981603932884,
+            "wrist_1_joint": -0.014048832044613812,
+            "wrist_2_joint": -0.001283949298428064,
+            "wrist_3_joint": 0.005484496064318813
+          },
+          "maxJointVelocity": {
+            "joint": "wrist_1_joint",
+            "radPerSec": 0.014048832044613812
+          },
+          "tcpPositionErrorM": 0.03097738367382606,
+          "tcpOrientationErrorRad": 0.1916682735437712,
+          "replayState": "SETTLED"
+        }
+      ],
+      "peakJointError": {
+        "shoulder_pan_joint": {
+          "error": 0.014555087867389828,
+          "timeSec": 0.246
+        },
+        "shoulder_lift_joint": {
+          "error": 0.0007626374414426706,
+          "timeSec": 0.675
+        },
+        "elbow_joint": {
+          "error": 0.06480904731747805,
+          "timeSec": 12.26
+        },
+        "wrist_1_joint": {
+          "error": 0.017978413092476275,
+          "timeSec": 0.083
+        },
+        "wrist_2_joint": {
+          "error": 0.015095481607788841,
+          "timeSec": 0.184
+        },
+        "wrist_3_joint": {
+          "error": 0.19020610111941158,
+          "timeSec": 11.991
+        }
+      },
+      "maxJointVelocityBetween10And12Sec": {
+        "joint": "wrist_1_joint",
+        "radPerSec": 0.022874372949842545,
+        "timeSec": 11.325
+      },
+      "maxTcpPositionErrorM": 0.031171421009991228,
+      "maxTcpOrientationErrorRad": 0.1916682735437712,
+      "targetCrossingsAfter1s": {
+        "shoulder_pan_joint": 0,
+        "shoulder_lift_joint": 0,
+        "elbow_joint": 0,
+        "wrist_1_joint": 0,
+        "wrist_2_joint": 0,
+        "wrist_3_joint": 0
+      },
+      "overshoot": false,
+      "oscillation": false,
+      "nonFiniteCount": 0,
+      "pageErrors": [],
+      "legacyReplayStateAt12sBeforeSettlementFix": "SETTLED"
+    },
+    {
+      "name": "G3",
+      "stiffness": 1600,
+      "damping": 80,
+      "elapsedMs": 12305,
+      "samplesRecorded": 737,
+      "robotColliders": 0,
+      "gravity": [0, -9.81, 0],
+      "timestepSec": 0.016666666666666666,
+      "timedSamples": [
+        {
+          "requestedTimeSec": 1,
+          "sampleTimeSec": 0.997,
+          "commanded": {
+            "shoulder_pan_joint": 0,
+            "shoulder_lift_joint": -1.5707963267948966,
+            "elbow_joint": -1.5707963267948966,
+            "wrist_1_joint": -1.5707963267948966,
+            "wrist_2_joint": 1.5707963267948966,
+            "wrist_3_joint": 0
+          },
+          "actual": {
+            "shoulder_pan_joint": 0.006521230881558652,
+            "shoulder_lift_joint": -1.5708312610718107,
+            "elbow_joint": -1.586874803665587,
+            "wrist_1_joint": -1.5568563920384808,
+            "wrist_2_joint": 1.5782287154048174,
+            "wrist_3_joint": 0.12671449110670802
+          },
+          "trackingError": {
+            "shoulder_pan_joint": 0.006521230881558652,
+            "shoulder_lift_joint": -0.000034934276914144746,
+            "elbow_joint": -0.016078476870690528,
+            "wrist_1_joint": 0.01393993475641575,
+            "wrist_2_joint": 0.0074323886099207925,
+            "wrist_3_joint": 0.12671449110670802
+          },
+          "maxJointError": {
+            "joint": "wrist_3_joint",
+            "rad": 0.12671449110670802
+          },
+          "jointVelocity": {
+            "shoulder_pan_joint": 0.0312828388786405,
+            "shoulder_lift_joint": -0.001407972239029299,
+            "elbow_joint": 0.07495853017436438,
+            "wrist_1_joint": -0.0465847872564106,
+            "wrist_2_joint": 0.0908966791798414,
+            "wrist_3_joint": 0.18598429287156465
+          },
+          "maxJointVelocity": {
+            "joint": "wrist_3_joint",
+            "radPerSec": 0.18598429287156465
+          },
+          "tcpPositionErrorM": 0.007558784598137533,
+          "tcpOrientationErrorRad": 0.12045021208529956,
+          "replayState": "MOVING"
+        },
+        {
+          "requestedTimeSec": 3,
+          "sampleTimeSec": 2.994,
+          "commanded": {
+            "shoulder_pan_joint": 0,
+            "shoulder_lift_joint": -1.5707963267948966,
+            "elbow_joint": -1.5707963267948966,
+            "wrist_1_joint": -1.5707963267948966,
+            "wrist_2_joint": 1.5707963267948966,
+            "wrist_3_joint": 0
+          },
+          "actual": {
+            "shoulder_pan_joint": 0.005590893693464308,
+            "shoulder_lift_joint": -1.5708652700923436,
+            "elbow_joint": -1.5999483758788824,
+            "wrist_1_joint": -1.5597853294985846,
+            "wrist_2_joint": 1.5756723456887742,
+            "wrist_3_joint": 0.1763383590397611
+          },
+          "trackingError": {
+            "shoulder_pan_joint": 0.005590893693464308,
+            "shoulder_lift_joint": -0.00006894329744699945,
+            "elbow_joint": -0.02915204908398583,
+            "wrist_1_joint": 0.011010997296311942,
+            "wrist_2_joint": 0.004876018893877676,
+            "wrist_3_joint": 0.1763383590397611
+          },
+          "maxJointError": {
+            "joint": "wrist_3_joint",
+            "rad": 0.1763383590397611
+          },
+          "jointVelocity": {
+            "shoulder_pan_joint": 0.0008291361845204943,
+            "shoulder_lift_joint": -0.003559869008584751,
+            "elbow_joint": 0.00019215706150741335,
+            "wrist_1_joint": -0.01151349407844759,
+            "wrist_2_joint": -0.027736374289317006,
+            "wrist_3_joint": -0.032301799807763605
+          },
+          "maxJointVelocity": {
+            "joint": "wrist_3_joint",
+            "radPerSec": 0.032301799807763605
+          },
+          "tcpPositionErrorM": 0.013573602195286529,
+          "tcpOrientationErrorRad": 0.17182657817941266,
+          "replayState": "MOVING"
+        },
+        {
+          "requestedTimeSec": 6,
+          "sampleTimeSec": 6.017,
+          "commanded": {
+            "shoulder_pan_joint": 0,
+            "shoulder_lift_joint": -1.5707963267948966,
+            "elbow_joint": -1.5707963267948966,
+            "wrist_1_joint": -1.5707963267948966,
+            "wrist_2_joint": 1.5707963267948966,
+            "wrist_3_joint": 0
+          },
+          "actual": {
+            "shoulder_pan_joint": 0.006849917315936695,
+            "shoulder_lift_joint": -1.5708690906783833,
+            "elbow_joint": -1.6085595349092408,
+            "wrist_1_joint": -1.5611940490914984,
+            "wrist_2_joint": 1.5761948834037656,
+            "wrist_3_joint": 0.18628635546107777
+          },
+          "trackingError": {
+            "shoulder_pan_joint": 0.006849917315936695,
+            "shoulder_lift_joint": -0.00007276388348675944,
+            "elbow_joint": -0.03776320811434419,
+            "wrist_1_joint": 0.009602277703398165,
+            "wrist_2_joint": 0.0053985566088690096,
+            "wrist_3_joint": 0.18628635546107777
+          },
+          "maxJointError": {
+            "joint": "wrist_3_joint",
+            "rad": 0.18628635546107777
+          },
+          "jointVelocity": {
+            "shoulder_pan_joint": -0.005539910489273747,
+            "shoulder_lift_joint": -0.0053134268821086695,
+            "elbow_joint": 0.005678376987922834,
+            "wrist_1_joint": -0.00670256286965249,
+            "wrist_2_joint": -0.004203746483121786,
+            "wrist_3_joint": -0.023779771714957914
+          },
+          "maxJointVelocity": {
+            "joint": "wrist_3_joint",
+            "radPerSec": 0.023779771714957914
+          },
+          "tcpPositionErrorM": 0.017974711701011215,
+          "tcpOrientationErrorRad": 0.18179342946126853,
+          "replayState": "MOVING"
+        },
+        {
+          "requestedTimeSec": 12,
+          "sampleTimeSec": 11.993,
+          "commanded": {
+            "shoulder_pan_joint": 0,
+            "shoulder_lift_joint": -1.5707963267948966,
+            "elbow_joint": -1.5707963267948966,
+            "wrist_1_joint": -1.5707963267948966,
+            "wrist_2_joint": 1.5707963267948966,
+            "wrist_3_joint": 0
+          },
+          "actual": {
+            "shoulder_pan_joint": 0.006971473141654644,
+            "shoulder_lift_joint": -1.5708793926946094,
+            "elbow_joint": -1.612591436352834,
+            "wrist_1_joint": -1.5616682573562823,
+            "wrist_2_joint": 1.5765839343841317,
+            "wrist_3_joint": 0.18725831136533985
+          },
+          "trackingError": {
+            "shoulder_pan_joint": 0.006971473141654644,
+            "shoulder_lift_joint": -0.00008306589971285305,
+            "elbow_joint": -0.041795109557937415,
+            "wrist_1_joint": 0.009128069438614217,
+            "wrist_2_joint": 0.005787607589235133,
+            "wrist_3_joint": 0.18725831136533985
+          },
+          "maxJointError": {
+            "joint": "wrist_3_joint",
+            "rad": 0.18725831136533985
+          },
+          "jointVelocity": {
+            "shoulder_pan_joint": -0.0007677167511858165,
+            "shoulder_lift_joint": -0.005788769091517502,
+            "elbow_joint": 0.00898841070264916,
+            "wrist_1_joint": -0.009433403200999679,
+            "wrist_2_joint": -0.0018017384425155405,
+            "wrist_3_joint": -0.00005964273528102893
+          },
+          "maxJointVelocity": {
+            "joint": "wrist_1_joint",
+            "radPerSec": 0.009433403200999679
+          },
+          "tcpPositionErrorM": 0.019986682688968367,
+          "tcpOrientationErrorRad": 0.1834136902214089,
+          "replayState": "SETTLED"
+        }
+      ],
+      "peakJointError": {
+        "shoulder_pan_joint": {
+          "error": 0.01390886068191498,
+          "timeSec": 0.227
+        },
+        "shoulder_lift_joint": {
+          "error": 0.0005025074737587953,
+          "timeSec": 0.582
+        },
+        "elbow_joint": {
+          "error": 0.0418875876119269,
+          "timeSec": 12.146
+        },
+        "wrist_1_joint": {
+          "error": 0.018245728911436165,
+          "timeSec": 0.094
+        },
+        "wrist_2_joint": {
+          "error": 0.015000873423878014,
+          "timeSec": 0.284
+        },
+        "wrist_3_joint": {
+          "error": 0.18970900411866515,
+          "timeSec": 3.277
+        }
+      },
+      "maxJointVelocityBetween10And12Sec": {
+        "joint": "wrist_3_joint",
+        "radPerSec": 0.02262093871460147,
+        "timeSec": 10.332
+      },
+      "maxTcpPositionErrorM": 0.020028919038961354,
+      "maxTcpOrientationErrorRad": 0.18397305006470102,
+      "targetCrossingsAfter1s": {
+        "shoulder_pan_joint": 0,
+        "shoulder_lift_joint": 0,
+        "elbow_joint": 0,
+        "wrist_1_joint": 0,
+        "wrist_2_joint": 2,
+        "wrist_3_joint": 0
+      },
+      "overshoot": true,
+      "oscillation": true,
+      "nonFiniteCount": 0,
+      "pageErrors": [],
+      "legacyReplayStateAt12sBeforeSettlementFix": "SETTLED"
+    },
+    {
+      "name": "G4",
+      "stiffness": 2500,
+      "damping": 100,
+      "elapsedMs": 12322,
+      "samplesRecorded": 739,
+      "robotColliders": 0,
+      "gravity": [0, -9.81, 0],
+      "timestepSec": 0.016666666666666666,
+      "timedSamples": [
+        {
+          "requestedTimeSec": 1,
+          "sampleTimeSec": 1.005,
+          "commanded": {
+            "shoulder_pan_joint": 0,
+            "shoulder_lift_joint": -1.5707963267948966,
+            "elbow_joint": -1.5707963267948966,
+            "wrist_1_joint": -1.5707963267948966,
+            "wrist_2_joint": 1.5707963267948966,
+            "wrist_3_joint": 0
+          },
+          "actual": {
+            "shoulder_pan_joint": 0.00818489902343962,
+            "shoulder_lift_joint": -1.5708184864719483,
+            "elbow_joint": -1.585501776049661,
+            "wrist_1_joint": -1.5577922528985801,
+            "wrist_2_joint": 1.5773573510217238,
+            "wrist_3_joint": 0.12586275382325468
+          },
+          "trackingError": {
+            "shoulder_pan_joint": 0.00818489902343962,
+            "shoulder_lift_joint": -0.000022159677051769577,
+            "elbow_joint": -0.014705449254764469,
+            "wrist_1_joint": 0.013004073896316415,
+            "wrist_2_joint": 0.00656102422682725,
+            "wrist_3_joint": 0.12586275382325468
+          },
+          "maxJointError": {
+            "joint": "wrist_3_joint",
+            "rad": 0.12586275382325468
+          },
+          "jointVelocity": {
+            "shoulder_pan_joint": 0.023950572766640258,
+            "shoulder_lift_joint": -0.00470408149789198,
+            "elbow_joint": 0.029714342852797518,
+            "wrist_1_joint": 0.013448096321636432,
+            "wrist_2_joint": 0.09078805385400993,
+            "wrist_3_joint": 0.1569979729551034
+          },
+          "maxJointVelocity": {
+            "joint": "wrist_3_joint",
+            "radPerSec": 0.1569979729551034
+          },
+          "tcpPositionErrorM": 0.007499505888485756,
+          "tcpOrientationErrorRad": 0.11787863552734792,
+          "replayState": "MOVING"
+        },
+        {
+          "requestedTimeSec": 3,
+          "sampleTimeSec": 2.983,
+          "commanded": {
+            "shoulder_pan_joint": 0,
+            "shoulder_lift_joint": -1.5707963267948966,
+            "elbow_joint": -1.5707963267948966,
+            "wrist_1_joint": -1.5707963267948966,
+            "wrist_2_joint": 1.5707963267948966,
+            "wrist_3_joint": 0
+          },
+          "actual": {
+            "shoulder_pan_joint": 0.004858495173413528,
+            "shoulder_lift_joint": -1.570890118691381,
+            "elbow_joint": -1.594861852737908,
+            "wrist_1_joint": -1.5601908493255652,
+            "wrist_2_joint": 1.575801685989077,
+            "wrist_3_joint": 0.17270331486353005
+          },
+          "trackingError": {
+            "shoulder_pan_joint": 0.004858495173413528,
+            "shoulder_lift_joint": -0.00009379189648450748,
+            "elbow_joint": -0.024065525943011368,
+            "wrist_1_joint": 0.010605477469331381,
+            "wrist_2_joint": 0.0050053591941805475,
+            "wrist_3_joint": 0.17270331486353005
+          },
+          "maxJointError": {
+            "joint": "wrist_3_joint",
+            "rad": 0.17270331486353005
+          },
+          "jointVelocity": {
+            "shoulder_pan_joint": -0.026575507795722538,
+            "shoulder_lift_joint": -0.007175035465044286,
+            "elbow_joint": 0.003654273902445571,
+            "wrist_1_joint": 0.010789691549005278,
+            "wrist_2_joint": 0.035612295968662916,
+            "wrist_3_joint": -0.032107646615011726
+          },
+          "maxJointVelocity": {
+            "joint": "wrist_2_joint",
+            "radPerSec": 0.035612295968662916
+          },
+          "tcpPositionErrorM": 0.01112228274759689,
+          "tcpOrientationErrorRad": 0.16849789285867872,
+          "replayState": "MOVING"
+        },
+        {
+          "requestedTimeSec": 6,
+          "sampleTimeSec": 6.002,
+          "commanded": {
+            "shoulder_pan_joint": 0,
+            "shoulder_lift_joint": -1.5707963267948966,
+            "elbow_joint": -1.5707963267948966,
+            "wrist_1_joint": -1.5707963267948966,
+            "wrist_2_joint": 1.5707963267948966,
+            "wrist_3_joint": 0
+          },
+          "actual": {
+            "shoulder_pan_joint": 0.00650797191284663,
+            "shoulder_lift_joint": -1.5708806317006077,
+            "elbow_joint": -1.5983825208991458,
+            "wrist_1_joint": -1.5614005867226541,
+            "wrist_2_joint": 1.5763532261230018,
+            "wrist_3_joint": 0.1836058042804153
+          },
+          "trackingError": {
+            "shoulder_pan_joint": 0.00650797191284663,
+            "shoulder_lift_joint": -0.00008430490571109672,
+            "elbow_joint": -0.02758619410424923,
+            "wrist_1_joint": 0.00939574007224242,
+            "wrist_2_joint": 0.005556899328105214,
+            "wrist_3_joint": 0.1836058042804153
+          },
+          "maxJointError": {
+            "joint": "wrist_3_joint",
+            "rad": 0.1836058042804153
+          },
+          "jointVelocity": {
+            "shoulder_pan_joint": -0.0027272590764176844,
+            "shoulder_lift_joint": -0.00684335775107439,
+            "elbow_joint": 0.00745340695700566,
+            "wrist_1_joint": -0.006842449284083631,
+            "wrist_2_joint": -0.003951226808061322,
+            "wrist_3_joint": -0.011000711533857616
+          },
+          "maxJointVelocity": {
+            "joint": "wrist_3_joint",
+            "radPerSec": 0.011000711533857616
+          },
+          "tcpPositionErrorM": 0.013110847666998295,
+          "tcpOrientationErrorRad": 0.17817271874265525,
+          "replayState": "MOVING"
+        },
+        {
+          "requestedTimeSec": 12,
+          "sampleTimeSec": 11.999,
+          "commanded": {
+            "shoulder_pan_joint": 0,
+            "shoulder_lift_joint": -1.5707963267948966,
+            "elbow_joint": -1.5707963267948966,
+            "wrist_1_joint": -1.5707963267948966,
+            "wrist_2_joint": 1.5707963267948966,
+            "wrist_3_joint": 0
+          },
+          "actual": {
+            "shoulder_pan_joint": 0.006967264473769159,
+            "shoulder_lift_joint": -1.5708795695028914,
+            "elbow_joint": -1.5995091438883149,
+            "wrist_1_joint": -1.5615917643076407,
+            "wrist_2_joint": 1.5765540037605643,
+            "wrist_3_joint": 0.18530483546455154
+          },
+          "trackingError": {
+            "shoulder_pan_joint": 0.006967264473769159,
+            "shoulder_lift_joint": -0.00008324270799486833,
+            "elbow_joint": -0.02871281709341833,
+            "wrist_1_joint": 0.009204562487255874,
+            "wrist_2_joint": 0.005757676965667757,
+            "wrist_3_joint": 0.18530483546455154
+          },
+          "maxJointError": {
+            "joint": "wrist_3_joint",
+            "rad": 0.18530483546455154
+          },
+          "jointVelocity": {
+            "shoulder_pan_joint": -0.0002354539976695621,
+            "shoulder_lift_joint": -0.00698024915151372,
+            "elbow_joint": 0.01078223617115223,
+            "wrist_1_joint": -0.009816043804540013,
+            "wrist_2_joint": -0.0030110490868609664,
+            "wrist_3_joint": -0.0036844450296117173
+          },
+          "maxJointVelocity": {
+            "joint": "elbow_joint",
+            "radPerSec": 0.01078223617115223
+          },
+          "tcpPositionErrorM": 0.013722775578319513,
+          "tcpOrientationErrorRad": 0.17955577629788141,
+          "replayState": "SETTLED"
+        }
+      ],
+      "peakJointError": {
+        "shoulder_pan_joint": {
+          "error": 0.01436633957205919,
+          "timeSec": 0.2
+        },
+        "shoulder_lift_joint": {
+          "error": 0.0007127372086455086,
+          "timeSec": 0.609
+        },
+        "elbow_joint": {
+          "error": 0.028762911698857696,
+          "timeSec": 12.083
+        },
+        "wrist_1_joint": {
+          "error": 0.017664789689130433,
+          "timeSec": 0.073
+        },
+        "wrist_2_joint": {
+          "error": 0.01448017959314618,
+          "timeSec": 0.176
+        },
+        "wrist_3_joint": {
+          "error": 0.18923825777918318,
+          "timeSec": 4.103
+        }
+      },
+      "maxJointVelocityBetween10And12Sec": {
+        "joint": "wrist_3_joint",
+        "radPerSec": 0.018878068333874946,
+        "timeSec": 10.083
+      },
+      "maxTcpPositionErrorM": 0.013742645667846866,
+      "maxTcpOrientationErrorRad": 0.18198954368919093,
+      "targetCrossingsAfter1s": {
+        "shoulder_pan_joint": 0,
+        "shoulder_lift_joint": 0,
+        "elbow_joint": 0,
+        "wrist_1_joint": 0,
+        "wrist_2_joint": 4,
+        "wrist_3_joint": 0
+      },
+      "overshoot": true,
+      "oscillation": true,
+      "nonFiniteCount": 0,
+      "pageErrors": [],
+      "legacyReplayStateAt12sBeforeSettlementFix": "SETTLED"
+    }
+  ]
+}

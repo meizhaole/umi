@@ -3,6 +3,20 @@ import phase2bReportUrl from '../../reports/phase2b1-umi-episode0-frames0-399.js
 
 export const DATASET_REPLAY_REPORT_URL = phase2bReportUrl;
 export const DATASET_REPLAY_FRAME_COUNT = 400;
+export const DATASET_REPLAY_MAX_VELOCITY_RAD_PER_SEC = 0.01;
+export const DATASET_REPLAY_MAX_TRACKING_ERROR_RAD = 0.005;
+
+export type DatasetReplaySettlement = 'SETTLED' | 'TRACKING_ERROR' | null;
+
+export const classifyDatasetReplaySettlement = (
+  maxJointVelocityRadPerSec: number,
+  maxJointTrackingErrorRad: number,
+): DatasetReplaySettlement => {
+  if (maxJointVelocityRadPerSec > DATASET_REPLAY_MAX_VELOCITY_RAD_PER_SEC) return null;
+  return maxJointTrackingErrorRad < DATASET_REPLAY_MAX_TRACKING_ERROR_RAD
+    ? 'SETTLED'
+    : 'TRACKING_ERROR';
+};
 
 export interface DatasetReplayFrame {
   frame_index: number;

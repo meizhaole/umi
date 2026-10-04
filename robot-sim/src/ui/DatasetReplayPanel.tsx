@@ -1,6 +1,6 @@
 import type { JointValues, Pose } from '../core/types';
 
-export type DatasetReplayState = 'IDLE' | 'MOVING' | 'SETTLED' | 'ERROR';
+export type DatasetReplayState = 'IDLE' | 'MOVING' | 'SETTLED' | 'TRACKING_ERROR' | 'ERROR';
 
 interface DatasetReplayPanelProps {
   active: boolean;
@@ -177,7 +177,8 @@ export const DatasetReplayPanel = ({
 
     {error ? <p className="dataset-replay-error">{error}</p> : null}
     <p className="dataset-replay-note">
-      只用 Phase 2B-1 预计算位姿与关节解；逐帧等待 Rapier 实际状态。
+      SETTLED 要求关节速度 ≤ 0.01 rad/s 且最大跟踪误差 &lt; 0.005 rad；低速但误差超限时显示
+      TRACKING_ERROR。
     </p>
   </section>
 );
