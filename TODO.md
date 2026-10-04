@@ -30,7 +30,9 @@
 - [x] 审计 UMI 在线坐标、旋转、时间与抓放链路并记录
 - [x] 对官方 UMI episode 0 前 100 帧执行 UR5 TCP 连续 IK dry-run 并记录结果
 - [x] 将官方 UMI episode 0 的 UR5 TCP 连续 IK dry-run 扩展到 400 帧并记录统计
-- [ ] 完成 UMI episode 0 UR5 Rapier motor 回放；frame 0 已发现关节跟踪漂移，暂停排查
+- [x] 隔离 UR5 TCP 调试标记与辅助线，腕部相机仅渲染仿真层
+- [x] 对 UR5 frame 0 执行重力与碰撞 A/B/C 诊断
+- [ ] 完成 UMI episode 0 UR5 Rapier motor 回放；已确认重力触发关节跟踪漂移，待处理与复测
 - [ ] 将本机训练 checkpoint 接入 Gazebo 回放启动参数
 - [ ] 接通 Gazebo 相机与 UMI 推理观测
 - [ ] 将实时 UMI 策略接入 ReBot RS 实机控制链路

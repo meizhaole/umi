@@ -10,7 +10,9 @@ import type { ControlMode, JointCommand, JointValues, RobotDescription } from '.
 import { PhysicsWorld } from '../sim/PhysicsWorld';
 import { OfficialCupArrangementScene, type CupBodyRef } from '../sim/tasks/CupArrangementScene';
 import { RobotBody } from '../sim/RobotBody';
+import { publishDebugEvent } from '../app/debugBus';
 import { URDFViewer } from './URDFViewer';
+import { DEBUG_LAYER, setDebugLayer } from './sceneLayers';
 import type { SimCameraFrame } from '../sim/sensors/WristCameraCapture';
 import type { Pose } from '../core/types';
 
@@ -50,11 +52,11 @@ const DatasetPoseMarkers = ({ targetPose, actualPose }: DatasetPoseMarkersProps)
   const targetPosition = targetPose
     ? new Vector3(...targetPose.position).applyQuaternion(ROBOT_TO_SCENE).toArray()
     : null;
-  const marker = (pose: Pose | null, color: string, radius: number) => {
+  const marker = (pose: Pose | null, name: string, color: string, radius: number) => {
     if (!pose) return null;
     const position = new Vector3(...pose.position).applyQuaternion(ROBOT_TO_SCENE);
     return (
-      <mesh position={position.toArray()}>
+      <mesh ref={setDebugLayer} name={name} position={position.toArray()}>
         <sphereGeometry args={[radius, 20, 16]} />
         <meshBasicMaterial color={color} depthTest={false} toneMapped={false} />
       </mesh>
@@ -64,13 +66,18 @@ const DatasetPoseMarkers = ({ targetPose, actualPose }: DatasetPoseMarkersProps)
   return (
     <group renderOrder={10}>
       {targetPosition ? (
-        <mesh position={targetPosition} renderOrder={10}>
+        <mesh
+          ref={setDebugLayer}
+          name="dataset-target-marker-ring"
+          position={targetPosition}
+          renderOrder={10}
+        >
           <torusGeometry args={[0.035, 0.0025, 8, 32]} />
           <meshBasicMaterial color="#63e6d0" depthTest={false} toneMapped={false} />
         </mesh>
       ) : null}
-      {marker(targetPose, '#63e6d0', 0.025)}
-      {marker(actualPose, '#ffb45e', 0.015)}
+      {marker(targetPose, 'dataset-target-marker', '#63e6d0', 0.025)}
+      {marker(actualPose, 'dataset-actual-marker', '#ffb45e', 0.015)}
     </group>
   );
 };
@@ -223,14 +230,27 @@ export const SceneManager = ({
       camera={{ position: [2.15, 1.55, 2.35], fov: 39, near: 0.01, far: 100 }}
       dpr={[1, 1.5]}
       gl={{ antialias: true, alpha: true }}
+      onCreated={({ camera }) => {
+        camera.layers.enable(DEBUG_LAYER);
+        publishDebugEvent('scene:main_camera_layers', {
+          mask: camera.layers.mask,
+          simulationLayer: 0,
+          debugLayer: DEBUG_LAYER,
+        });
+      }}
     >
       <color attach="background" args={[SIMULATION_CONFIG.background]} />
       <ambientLight intensity={0.68} />
       <directionalLight intensity={2.8} position={[2.8, 4.5, 3.6]} shadow-mapSize={[2048, 2048]} />
       <pointLight color="#59a6ff" intensity={13} position={[-2.4, 1.1, 1.4]} />
       <pointLight color="#5ce1c5" intensity={8} position={[1.5, 0.2, -2]} />
-      <gridHelper args={[3.5, 35, '#315056', '#1d2c35']} position={[0, -0.012, 0]} />
-      <axesHelper args={[0.3]} />
+      <gridHelper
+        ref={setDebugLayer}
+        name="scene-debug-grid"
+        args={[3.5, 35, '#315056', '#1d2c35']}
+        position={[0, -0.012, 0]}
+      />
+      <axesHelper ref={setDebugLayer} name="scene-debug-axes" args={[0.3]} />
       <ActionPlayback
         jointValues={jointValues}
         onComplete={onPlaybackComplete}

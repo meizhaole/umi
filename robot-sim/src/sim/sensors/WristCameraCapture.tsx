@@ -4,6 +4,8 @@ import { PerspectiveCamera, SRGBColorSpace, WebGLRenderTarget } from 'three';
 import type { URDFRobot } from 'urdf-loader';
 import { Vector3 } from 'three';
 import type { JointValues, Pose, RobotDescription } from '../../core/types';
+import { publishDebugEvent } from '../../app/debugBus';
+import { SIMULATION_LAYER } from '../../viz/sceneLayers';
 import { CAMERA_IMAGE_SIZE } from './CameraSensor';
 import type { CupBodyRef } from '../tasks/CupArrangementScene';
 
@@ -62,6 +64,7 @@ export const WristCameraCapture = ({
     const sensorCamera = new PerspectiveCamera(60, 1, 0.01, 5);
     sensorCamera.position.set(...CAMERA_MOUNT_POSITION);
     sensorCamera.rotation.set(...CAMERA_MOUNT_ROTATION);
+    sensorCamera.layers.set(SIMULATION_LAYER);
     sensorCamera.updateProjectionMatrix();
     return sensorCamera;
   }, []);
@@ -71,6 +74,7 @@ export const WristCameraCapture = ({
   const rgb = useMemo(() => new Uint8Array(IMAGE_SIZE * IMAGE_SIZE * 3), []);
   const cupTarget = useMemo(() => new Vector3(), []);
   const cadence = useMemo(() => ({ lastCapture: 0 }), []);
+  const layerAudit = useMemo(() => ({ signature: '' }), []);
 
   useEffect(() => {
     const link = robot.links[description.tipLink] ?? robot.links.end_link;
@@ -89,6 +93,24 @@ export const WristCameraCapture = ({
     }
     cadence.lastCapture = clock.elapsedTime * 1000;
     scene.updateMatrixWorld(true);
+    const debugObjects: { name: string; type: string; visibleToWristCamera: boolean }[] = [];
+    scene.traverse((object) => {
+      if (object.userData.robotSimLayer !== 'debug') return;
+      debugObjects.push({
+        name: object.name || '(unnamed)',
+        type: object.type,
+        visibleToWristCamera: camera.layers.test(object.layers),
+      });
+    });
+    const layerAuditSignature = JSON.stringify(debugObjects);
+    if (layerAudit.signature !== layerAuditSignature) {
+      publishDebugEvent('camera:wrist_debug_layer_audit', {
+        cameraMask: camera.layers.mask,
+        simulationLayer: SIMULATION_LAYER,
+        debugObjects,
+      });
+      layerAudit.signature = layerAuditSignature;
+    }
     const cupPosition = cupBodyRef.current?.translation();
     if (inferenceActive && cupPosition) {
       cupTarget.set(cupPosition.x, cupPosition.y + 0.039, cupPosition.z);
