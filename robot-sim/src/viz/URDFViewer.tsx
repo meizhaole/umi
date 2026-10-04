@@ -52,13 +52,10 @@ export const URDFViewer = ({
     };
     const loader = new URDFLoader(manager);
     loader.packages = packageMappings;
-    loader.parseCollision = true;
+    loader.parseCollision = false;
     try {
       const loadedRobot = loader.parse(urdfXml);
       loadedRobot.rotation.set(-Math.PI / 2, 0, 0);
-      Object.values(loadedRobot.colliders).forEach((collider) => {
-        collider.visible = false;
-      });
       setRobot(loadedRobot);
     } catch (error) {
       if (active) onError(error instanceof Error ? error.message : String(error));

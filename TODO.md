@@ -9,6 +9,7 @@
 - [x] 在 robot-sim README 中补充前后端启动命令
 - [x] 在 robot-sim 中实现 RS、DM 双型号浏览器仿真首版
 - [x] 在 robot-sim 中新增官方 UR5 型号并验证 FK、TCP 与数值 IK
+- [x] 修复 robot-sim UR5 visual/collision 重叠并检查腕部相机视线
 - [x] 接入官方 UMI 权重与仿真腕部相机在线推理
 - [x] 在 robot-sim 前端实时显示腕部相机画面
 - [x] 记录 UMI 在线推理输入与动作结果
