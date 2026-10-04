@@ -5,6 +5,8 @@ export const DATASET_REPLAY_REPORT_URL = phase2bReportUrl;
 export const DATASET_REPLAY_FRAME_COUNT = 400;
 export const DATASET_REPLAY_MAX_VELOCITY_RAD_PER_SEC = 0.01;
 export const DATASET_REPLAY_MAX_TRACKING_ERROR_RAD = 0.005;
+export type DatasetReplayExecutionMode = 'KINEMATIC_REPLAY' | 'PHYSICS_MOTOR';
+export const DEFAULT_DATASET_REPLAY_EXECUTION_MODE: DatasetReplayExecutionMode = 'KINEMATIC_REPLAY';
 
 export type DatasetReplaySettlement = 'SETTLED' | 'TRACKING_ERROR' | null;
 

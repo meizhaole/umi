@@ -35,6 +35,7 @@ interface SceneManagerProps {
   datasetReplayTargetPose?: Pose | null;
   datasetReplayActualPose?: Pose | null;
   onJointState: (values: JointValues) => void;
+  onJointBodyAngles: (values: Record<string, number | null>) => void;
   onPhysicsReady: (ready: boolean) => void;
   onPlaybackStep: (values: JointValues, isFinal: boolean) => void;
   onPlaybackComplete: (token: number) => void;
@@ -199,6 +200,7 @@ export const SceneManager = ({
   datasetReplayTargetPose = null,
   datasetReplayActualPose = null,
   onJointState,
+  onJointBodyAngles,
   onWrist3DebugState,
   onPhysicsReady,
   onPlaybackStep,
@@ -332,6 +334,7 @@ export const SceneManager = ({
           jointValues={jointValues}
           mode={mode}
           onJointState={onJointState}
+          onJointBodyAngles={onJointBodyAngles}
           onWrist3DebugState={onWrist3DebugState}
           onWrist3ExperimentComplete={onWrist3ExperimentComplete}
           onReady={handlePhysicsReady}

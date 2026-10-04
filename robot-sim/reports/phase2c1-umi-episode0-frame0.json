@@ -1,0 +1,261 @@
+{
+  "execution_mode": "KINEMATIC_REPLAY",
+  "replay_state": "SETTLED",
+  "source": "/reports/phase2b1-umi-episode0-frames0-399.jsonl",
+  "frame": {
+    "frame_index": 0,
+    "aligned_target_position": [
+      -0.48689999998312006,
+      0.10915000005087597,
+      0.4318589999776128
+    ],
+    "aligned_target_quaternion": [
+      0.7071067811140326,
+      0.7071067812590625,
+      8.46377965922425e-17,
+      1.4503001691207186e-10
+    ],
+    "ik_solution_joints": {
+      "shoulder_pan_joint": 0,
+      "shoulder_lift_joint": -1.5707963267948966,
+      "elbow_joint": -1.5707963267948966,
+      "wrist_1_joint": -1.5707963267948966,
+      "wrist_2_joint": 1.5707963267948966,
+      "wrist_3_joint": 0
+    },
+    "ik_success": true
+  },
+  "record": {
+    "frame_index": 0,
+    "execution_mode": "KINEMATIC_REPLAY",
+    "replay_state": "SETTLED",
+    "error_reason": null,
+    "target_tcp_pose": {
+      "position": [
+        -0.48689999998312006,
+        0.10915000005087597,
+        0.4318589999776128
+      ],
+      "orientation": [
+        0.7071067811140326,
+        0.7071067812590625,
+        8.46377965922425e-17,
+        1.4503001691207186e-10
+      ]
+    },
+    "commanded_joint_positions": {
+      "shoulder_pan_joint": 0,
+      "shoulder_lift_joint": -1.5707963267948966,
+      "elbow_joint": -1.5707963267948966,
+      "wrist_1_joint": -1.5707963267948966,
+      "wrist_2_joint": 1.5707963267948966,
+      "wrist_3_joint": 0
+    },
+    "actual_joint_positions": {
+      "shoulder_pan_joint": 0,
+      "shoulder_lift_joint": -1.5707963267948966,
+      "elbow_joint": -1.5707963267948966,
+      "wrist_1_joint": -1.5707963267948966,
+      "wrist_2_joint": 1.5707963267948966,
+      "wrist_3_joint": 7.938217090265181e-17
+    },
+    "q_body": {
+      "shoulder_pan_joint": 0,
+      "shoulder_lift_joint": -1.5707963267948966,
+      "elbow_joint": -1.5707963267948966,
+      "wrist_1_joint": -1.5707963267948966,
+      "wrist_2_joint": 1.5707963267948966,
+      "wrist_3_joint": 3.9691088169635086e-17
+    },
+    "joint_tracking_error": {
+      "shoulder_pan_joint": 0,
+      "shoulder_lift_joint": 0,
+      "elbow_joint": 0,
+      "wrist_1_joint": 0,
+      "wrist_2_joint": 0,
+      "wrist_3_joint": 7.938217090265181e-17
+    },
+    "max_joint_tracking_error_rad": 7.938217090265181e-17,
+    "max_joint_tracking_error_joint": "wrist_3_joint",
+    "max_joint_velocity_rad_per_sec": 0,
+    "max_joint_velocity_joint": "shoulder_pan_joint",
+    "actual_tcp_pose": {
+      "position": [
+        -0.48689999998312,
+        0.10915000005087597,
+        0.43185899997761285
+      ],
+      "orientation": [
+        -0.7071067811140326,
+        -0.7071067812590625,
+        -1.3877787807958367e-16,
+        -1.4503007128574552e-10
+      ]
+    },
+    "tcp_position_tracking_error_m": 7.850462293418876e-17,
+    "tcp_orientation_tracking_error_rad": 0,
+    "expected_joint_delta_norm": 7.938217090265181e-17,
+    "actual_joint_motion_norm": 0,
+    "max_joint_change_per_sample_rad": 0,
+    "duration_ms": 1043.2999999970198,
+    "physics_ready": true,
+    "actual_joint_samples": [
+      {
+        "elapsed_ms": 316.70000000298023,
+        "actual_joint_positions": {
+          "shoulder_pan_joint": 0,
+          "shoulder_lift_joint": -1.5707963267948966,
+          "elbow_joint": -1.5707963267948966,
+          "wrist_1_joint": -1.5707963267948966,
+          "wrist_2_joint": 1.5707963267948966,
+          "wrist_3_joint": 7.938217090265181e-17
+        },
+        "q_body": {
+          "shoulder_pan_joint": 0,
+          "shoulder_lift_joint": -1.5707963267948966,
+          "elbow_joint": -1.5707963267948966,
+          "wrist_1_joint": -1.5707963267948966,
+          "wrist_2_joint": 1.5707963267948966,
+          "wrist_3_joint": 3.9691088169635086e-17
+        },
+        "joint_velocity_rad_per_sec": {
+          "shoulder_pan_joint": 0,
+          "shoulder_lift_joint": 0,
+          "elbow_joint": 0,
+          "wrist_1_joint": 0,
+          "wrist_2_joint": 0,
+          "wrist_3_joint": 0
+        },
+        "max_joint_velocity_rad_per_sec": 0,
+        "joint_tracking_error": {
+          "shoulder_pan_joint": 0,
+          "shoulder_lift_joint": 0,
+          "elbow_joint": 0,
+          "wrist_1_joint": 0,
+          "wrist_2_joint": 0,
+          "wrist_3_joint": 7.938217090265181e-17
+        },
+        "max_joint_tracking_error_rad": 7.938217090265181e-17,
+        "actual_tcp_pose": {
+          "position": [
+            -0.48689999998312,
+            0.10915000005087597,
+            0.43185899997761285
+          ],
+          "orientation": [
+            -0.7071067811140326,
+            -0.7071067812590625,
+            -1.3877787807958367e-16,
+            -1.4503007128574552e-10
+          ]
+        },
+        "tcp_position_tracking_error_m": 7.850462293418876e-17,
+        "tcp_orientation_tracking_error_rad": 0
+      },
+      {
+        "elapsed_ms": 697.6000000014901,
+        "actual_joint_positions": {
+          "shoulder_pan_joint": 0,
+          "shoulder_lift_joint": -1.5707963267948966,
+          "elbow_joint": -1.5707963267948966,
+          "wrist_1_joint": -1.5707963267948966,
+          "wrist_2_joint": 1.5707963267948966,
+          "wrist_3_joint": 7.938217090265181e-17
+        },
+        "q_body": {
+          "shoulder_pan_joint": 0,
+          "shoulder_lift_joint": -1.5707963267948966,
+          "elbow_joint": -1.5707963267948966,
+          "wrist_1_joint": -1.5707963267948966,
+          "wrist_2_joint": 1.5707963267948966,
+          "wrist_3_joint": 3.9691088169635086e-17
+        },
+        "joint_velocity_rad_per_sec": {
+          "shoulder_pan_joint": 0,
+          "shoulder_lift_joint": 0,
+          "elbow_joint": 0,
+          "wrist_1_joint": 0,
+          "wrist_2_joint": 0,
+          "wrist_3_joint": 0
+        },
+        "max_joint_velocity_rad_per_sec": 0,
+        "joint_tracking_error": {
+          "shoulder_pan_joint": 0,
+          "shoulder_lift_joint": 0,
+          "elbow_joint": 0,
+          "wrist_1_joint": 0,
+          "wrist_2_joint": 0,
+          "wrist_3_joint": 7.938217090265181e-17
+        },
+        "max_joint_tracking_error_rad": 7.938217090265181e-17,
+        "actual_tcp_pose": {
+          "position": [
+            -0.48689999998312,
+            0.10915000005087597,
+            0.43185899997761285
+          ],
+          "orientation": [
+            -0.7071067811140326,
+            -0.7071067812590625,
+            -1.3877787807958367e-16,
+            -1.4503007128574552e-10
+          ]
+        },
+        "tcp_position_tracking_error_m": 7.850462293418876e-17,
+        "tcp_orientation_tracking_error_rad": 0
+      },
+      {
+        "elapsed_ms": 1042.5,
+        "actual_joint_positions": {
+          "shoulder_pan_joint": 0,
+          "shoulder_lift_joint": -1.5707963267948966,
+          "elbow_joint": -1.5707963267948966,
+          "wrist_1_joint": -1.5707963267948966,
+          "wrist_2_joint": 1.5707963267948966,
+          "wrist_3_joint": 7.938217090265181e-17
+        },
+        "q_body": {
+          "shoulder_pan_joint": 0,
+          "shoulder_lift_joint": -1.5707963267948966,
+          "elbow_joint": -1.5707963267948966,
+          "wrist_1_joint": -1.5707963267948966,
+          "wrist_2_joint": 1.5707963267948966,
+          "wrist_3_joint": 3.9691088169635086e-17
+        },
+        "joint_velocity_rad_per_sec": {
+          "shoulder_pan_joint": 0,
+          "shoulder_lift_joint": 0,
+          "elbow_joint": 0,
+          "wrist_1_joint": 0,
+          "wrist_2_joint": 0,
+          "wrist_3_joint": 0
+        },
+        "max_joint_velocity_rad_per_sec": 0,
+        "joint_tracking_error": {
+          "shoulder_pan_joint": 0,
+          "shoulder_lift_joint": 0,
+          "elbow_joint": 0,
+          "wrist_1_joint": 0,
+          "wrist_2_joint": 0,
+          "wrist_3_joint": 7.938217090265181e-17
+        },
+        "max_joint_tracking_error_rad": 7.938217090265181e-17,
+        "actual_tcp_pose": {
+          "position": [
+            -0.48689999998312,
+            0.10915000005087597,
+            0.43185899997761285
+          ],
+          "orientation": [
+            -0.7071067811140326,
+            -0.7071067812590625,
+            -1.3877787807958367e-16,
+            -1.4503007128574552e-10
+          ]
+        },
+        "tcp_position_tracking_error_m": 7.850462293418876e-17,
+        "tcp_orientation_tracking_error_rad": 0
+      }
+    ]
+  }
+}

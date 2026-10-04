@@ -35,10 +35,12 @@ import type { SimCameraFrame } from '../sim/sensors/WristCameraCapture';
 import { CAMERA_IMAGE_SIZE } from '../sim/sensors/CameraSensor';
 import {
   DATASET_REPLAY_REPORT_URL,
+  DEFAULT_DATASET_REPLAY_EXECUTION_MODE,
   classifyDatasetReplaySettlement,
   DATASET_REPLAY_MAX_TRACKING_ERROR_RAD,
   DATASET_REPLAY_MAX_VELOCITY_RAD_PER_SEC,
   type DatasetReplayFrame,
+  type DatasetReplayExecutionMode,
   type DatasetReplayReport,
   parseDatasetReplayReport,
 } from './datasetReplay';
@@ -66,14 +68,18 @@ const REPLAY_NO_MOTION_THRESHOLD_RAD = 0.0001;
 const REPLAY_STEP_TIMEOUT_MS = 15000;
 const WRIST3_AB_TARGET = 0.101814692820414;
 const WRIST3_AB_STEPS = Math.round(2 / SIMULATION_CONFIG.fixedTimeStep);
+const DATASET_REPLAY_EXECUTION_MODE: DatasetReplayExecutionMode =
+  DEFAULT_DATASET_REPLAY_EXECUTION_MODE;
 
 interface DatasetReplayStepRecord {
   frame_index: number;
+  execution_mode: DatasetReplayExecutionMode;
   replay_state: 'SETTLED' | 'TRACKING_ERROR' | 'ERROR';
   error_reason: string | null;
   target_tcp_pose: Pose;
   commanded_joint_positions: JointValues;
   actual_joint_positions: JointValues;
+  q_body: Record<string, number | null>;
   joint_tracking_error: JointValues;
   max_joint_tracking_error_rad: number;
   max_joint_tracking_error_joint: string;
@@ -93,6 +99,7 @@ interface DatasetReplayStepRecord {
 interface DatasetReplayStepSample {
   elapsed_ms: number;
   actual_joint_positions: JointValues;
+  q_body: Record<string, number | null>;
   joint_velocity_rad_per_sec: JointValues;
   max_joint_velocity_rad_per_sec: number;
   joint_tracking_error: JointValues;
@@ -105,6 +112,7 @@ interface DatasetReplayStepSample {
 interface DatasetReplayDebugSnapshot {
   source: string;
   episode_index: 0;
+  execution_mode: DatasetReplayExecutionMode;
   current_frame: number | null;
   replay_state: DatasetReplayState;
   precomputed_key_frames: DatasetReplayFrame[];
@@ -138,6 +146,7 @@ export const App = () => {
   const [loadedRobot, setLoadedRobot] = useState<LoadedRobot | null>(null);
   const [loadError, setLoadError] = useState('');
   const [jointValues, setJointValues] = useState<JointValues>({});
+  const [jointBodyAngles, setJointBodyAngles] = useState<Record<string, number | null>>({});
   const [mode, setMode] = useState<ControlMode>('position');
   const [commands, setCommands] = useState<Record<string, JointCommand>>({});
   const [isRunning, setIsRunning] = useState(true);
@@ -225,6 +234,7 @@ export const App = () => {
     setJointDeltaNorm(null);
     setIkMessage('');
     setJointValues({});
+    setJointBodyAngles({});
     setCommands({});
     setPhysicsReady(false);
     setWrist3PhysicsDebugState(null);
@@ -525,6 +535,7 @@ export const App = () => {
     window.__ROBOT_SIM_DATASET_REPLAY__ = {
       source: DATASET_REPLAY_REPORT_URL,
       episode_index: 0,
+      execution_mode: DATASET_REPLAY_EXECUTION_MODE,
       current_frame: frameIndex,
       replay_state: replayState,
       precomputed_key_frames: [0, 65, 99, 218, 399].flatMap((index) => {
@@ -543,6 +554,7 @@ export const App = () => {
       window.__ROBOT_SIM_DATASET_REPLAY__ = {
         source: DATASET_REPLAY_REPORT_URL,
         episode_index: 0,
+        execution_mode: DATASET_REPLAY_EXECUTION_MODE,
         current_frame: record.frame_index,
         replay_state: record.replay_state,
         precomputed_key_frames: [0, 65, 99, 218, 399].flatMap((index) => {
@@ -555,25 +567,28 @@ export const App = () => {
     publishDebugEvent('dataset_replay:step', record);
   };
 
-  const commandDatasetReplayFrame = (
-    report: DatasetReplayReport,
-    frameIndex: number,
-    resetToInitial = false,
-  ) => {
+  const commandDatasetReplayFrame = (report: DatasetReplayReport, frameIndex: number) => {
     if (!loadedRobot || modelId !== 'UR5' || !physicsReady || inference.isLocked) return;
     const frame = report.frames[frameIndex];
     if (!frame) return;
+    if (loadedRobot.controller.getMode() !== 'position') {
+      setDatasetReplayState('ERROR');
+      setDatasetReplayError('请先将关节控制模式切换为 position，再加载 Dataset Replay。');
+      return;
+    }
     const jointNames = loadedRobot.model.getControllableJoints().map((joint) => joint.name);
-    const commandValues = resetToInitial ? report.initial_joints : frame.ik_solution_joints;
+    const commandValues = frame.ik_solution_joints;
     const baselineJoints = Object.fromEntries(
       jointNames.map((name) => [name, jointValues[name] ?? 0]),
     );
 
-    loadedRobot.controller.setMode('position');
     jointNames.forEach((jointName) => {
       const target = commandValues[jointName];
       if (target === undefined) throw new Error(`Phase 2B-1 缺少 ${jointName} 的关节解`);
-      loadedRobot.controller.setCommand(jointName, target);
+      const appliedValue = commandJoint(jointName, target);
+      if (appliedValue === null || Math.abs(appliedValue - target) > 1e-12) {
+        throw new Error(`Phase 2C-1 ${jointName} 未能应用 Phase 2B-1 IK 解`);
+      }
     });
     const nextCommands = loadedRobot.controller.getCommands();
     const resolvedCommandValues = Object.fromEntries(
@@ -584,7 +599,6 @@ export const App = () => {
     );
     const startedAtMs = performance.now();
 
-    setMode('position');
     setCommands(nextCommands);
     setIsRunning(true);
     setDatasetReplayFrameIndex(frameIndex);
@@ -611,11 +625,9 @@ export const App = () => {
       wrist3Experiment.controllerTarget =
         loadedRobot.controller.getCommand('wrist_3_joint')?.value ?? null;
       wrist3Experiment.controllerWrites.push(
-        'JointController.setMode(position)',
         ...jointNames.map((name) => `JointController.setCommand(${name})`),
       );
       wrist3Experiment.reactStateWrites.push(
-        'App.mode',
         'App.commands',
         'App.isRunning',
         'App.datasetReplayFrameIndex',
@@ -636,9 +648,10 @@ export const App = () => {
         orientation: frame.aligned_target_quaternion,
       },
       commanded_joint_positions: resolvedCommandValues,
-      reset_to_initial: resetToInitial,
+      execution_mode: DATASET_REPLAY_EXECUTION_MODE,
       physics_ready: physicsReady,
-      position_execution: 'joint_motors',
+      position_execution:
+        DATASET_REPLAY_EXECUTION_MODE === 'KINEMATIC_REPLAY' ? 'kinematic_fk' : 'joint_motors',
     });
   };
 
@@ -722,7 +735,7 @@ export const App = () => {
       datasetReplayLogRef.current = [];
       setDatasetReplayLog([]);
       writeDatasetReplaySnapshot(0, 'IDLE', report.frames);
-      commandDatasetReplayFrame(report, 0, true);
+      commandDatasetReplayFrame(report, 0);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setDatasetReplayError(message);
@@ -735,8 +748,6 @@ export const App = () => {
 
   const exitDatasetReplay = () => {
     if (!loadedRobot || datasetReplayState === 'MOVING') return;
-    loadedRobot.controller.setMode('position');
-    setMode('position');
     setCommands({});
     setDatasetReplayEnabled(false);
     setDatasetReplayFrameIndex(null);
@@ -769,6 +780,9 @@ export const App = () => {
     const actualJoints = Object.fromEntries(
       jointNames.map((name) => [name, actualValues[name] ?? 0]),
     );
+    const qBody = Object.fromEntries(
+      jointNames.map((name) => [name, jointBodyAngles[name] ?? null]),
+    );
     const trackingErrors = Object.fromEntries(
       jointNames.map((name) => [name, actualJoints[name] - commandedJoints[name]]),
     );
@@ -784,11 +798,13 @@ export const App = () => {
     );
     const record: DatasetReplayStepRecord = {
       frame_index: datasetReplayFrameIndex,
+      execution_mode: DATASET_REPLAY_EXECUTION_MODE,
       replay_state: resultState,
       error_reason: errorReason,
       target_tcp_pose: datasetReplayTargetPose,
       commanded_joint_positions: commandedJoints,
       actual_joint_positions: actualJoints,
+      q_body: qBody,
       joint_tracking_error: trackingErrors,
       max_joint_tracking_error_rad: motionState.maximum_joint_tracking_error_rad,
       max_joint_tracking_error_joint: motionState.maximum_joint_tracking_error_joint,
@@ -924,6 +940,7 @@ export const App = () => {
       motionState.samples.push({
         elapsed_ms: elapsedMs,
         actual_joint_positions: actualJoints,
+        q_body: Object.fromEntries(jointNames.map((name) => [name, jointBodyAngles[name] ?? null])),
         joint_velocity_rad_per_sec: jointVelocities,
         max_joint_velocity_rad_per_sec: maximumVelocity,
         joint_tracking_error: trackingErrors,
@@ -991,6 +1008,7 @@ export const App = () => {
     datasetReplayReport,
     datasetReplayState,
     isRunning,
+    jointBodyAngles,
     jointValues,
     loadedRobot,
     physicsReady,
@@ -1154,12 +1172,14 @@ export const App = () => {
                 !experimentRecording,
               )}
               currentFrame={datasetReplayFrameIndex}
+              executionMode={DATASET_REPLAY_EXECUTION_MODE}
               error={datasetReplayError}
               isLoading={datasetReplayLoading}
               jointNames={datasetReplayJointNames}
               logCount={datasetReplayLog.length}
               commandedJoints={datasetReplayCommandedJoints}
               actualJoints={jointValues}
+              bodyJointAngles={jointBodyAngles}
               jointTrackingErrors={datasetReplayJointTrackingErrors}
               targetPose={datasetReplayTargetPose}
               actualPose={datasetReplayActualPose}
@@ -1181,7 +1201,7 @@ export const App = () => {
                 }
               }}
               onReset={() => {
-                if (datasetReplayReport) commandDatasetReplayFrame(datasetReplayReport, 0, true);
+                if (datasetReplayReport) commandDatasetReplayFrame(datasetReplayReport, 0);
               }}
               onExit={exitDatasetReplay}
             />
@@ -1310,12 +1330,19 @@ export const App = () => {
                 jointValues={jointValues}
                 modelId={modelId}
                 onJointState={updatePhysicsState}
+                onJointBodyAngles={setJointBodyAngles}
                 onWrist3DebugState={setWrist3PhysicsDebugState}
                 onWrist3ExperimentComplete={handleWrist3ExperimentComplete}
                 onPhysicsReady={setPhysicsReady}
                 playback={inference.playback}
                 inferenceActive={inference.isLocked}
-                positionExecutionOverride={datasetReplayEnabled ? 'joint_motors' : undefined}
+                positionExecutionOverride={
+                  datasetReplayEnabled
+                    ? DATASET_REPLAY_EXECUTION_MODE === 'KINEMATIC_REPLAY'
+                      ? 'kinematic_fk'
+                      : 'joint_motors'
+                    : undefined
+                }
                 datasetReplayActive={datasetReplayEnabled}
                 datasetReplayTargetPose={datasetReplayTargetPose}
                 datasetReplayActualPose={datasetReplayActualPose}

@@ -32,6 +32,7 @@ interface RobotBodyProps {
   commands: Record<string, JointCommand>;
   mode: ControlMode;
   onJointState: (values: JointValues) => void;
+  onJointBodyAngles: (values: Record<string, number | null>) => void;
   onWrist3DebugState: (state: Wrist3PhysicsDebugState | null) => void;
   onWrist3ExperimentComplete: (trace: Wrist3ExperimentTrace) => void;
   onReady: (ready: boolean) => void;
@@ -845,6 +846,7 @@ export const RobotBody = ({
   commands,
   mode,
   onJointState,
+  onJointBodyAngles,
   onWrist3DebugState,
   onWrist3ExperimentComplete,
   onReady,
@@ -1391,6 +1393,14 @@ export const RobotBody = ({
     if (now - lastStatePublish.current < 100) return;
     lastStatePublish.current = now;
     const measured = readJointState(joints.current);
+    onJointBodyAngles(
+      Object.fromEntries(
+        joints.current.map((entry) => [
+          entry.description.name,
+          getRapierJointFrameMotion(entry)?.q_body ?? null,
+        ]),
+      ),
+    );
     const wrist3 = joints.current.find((entry) => entry.description.name === 'wrist_3_joint');
     onWrist3DebugState(wrist3 ? getWrist3PhysicsDebugState(wrist3, measured) : null);
     if (diagnostics && typeof window !== 'undefined') {

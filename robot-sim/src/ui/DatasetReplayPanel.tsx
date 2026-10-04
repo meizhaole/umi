@@ -1,4 +1,5 @@
 import type { JointValues, Pose } from '../core/types';
+import type { DatasetReplayExecutionMode } from '../app/datasetReplay';
 
 export type DatasetReplayState = 'IDLE' | 'MOVING' | 'SETTLED' | 'TRACKING_ERROR' | 'ERROR';
 
@@ -6,12 +7,14 @@ interface DatasetReplayPanelProps {
   active: boolean;
   canControl: boolean;
   currentFrame: number | null;
+  executionMode: DatasetReplayExecutionMode;
   error: string;
   isLoading: boolean;
   jointNames: string[];
   logCount: number;
   commandedJoints: JointValues;
   actualJoints: JointValues;
+  bodyJointAngles: Record<string, number | null>;
   jointTrackingErrors: JointValues;
   targetPose: Pose | null;
   actualPose: Pose | null;
@@ -39,16 +42,23 @@ const formatPose = (pose: Pose | null): string =>
 const formatJoints = (jointNames: string[], values: JointValues): string =>
   jointNames.map((name) => `${name}: ${(values[name] ?? 0).toFixed(4)}`).join(' · ');
 
+const formatBodyJointAngles = (
+  jointNames: string[],
+  values: Record<string, number | null>,
+): string => jointNames.map((name) => `${name}: ${values[name]?.toFixed(4) ?? '—'}`).join(' · ');
+
 export const DatasetReplayPanel = ({
   active,
   canControl,
   currentFrame,
+  executionMode,
   error,
   isLoading,
   jointNames,
   logCount,
   commandedJoints,
   actualJoints,
+  bodyJointAngles,
   jointTrackingErrors,
   targetPose,
   actualPose,
@@ -78,6 +88,9 @@ export const DatasetReplayPanel = ({
     <div className="dataset-replay-meta">
       <span>Episode: 0</span>
       <span>Frame: {currentFrame === null ? '—' : `${currentFrame} / 399`}</span>
+      <span>
+        Execution Mode: {executionMode === 'KINEMATIC_REPLAY' ? 'KINEMATIC' : 'PHYSICS / MOTOR'}
+      </span>
       <span>Physics: {physicsReady ? 'READY' : 'NOT READY'}</span>
       <span>记录: {logCount} 步</span>
     </div>
@@ -144,6 +157,10 @@ export const DatasetReplayPanel = ({
           <div>
             <b>Actual joints (rad)</b>
             <span>{formatJoints(jointNames, actualJoints)}</span>
+          </div>
+          <div>
+            <b>q_body (rad)</b>
+            <span>{formatBodyJointAngles(jointNames, bodyJointAngles)}</span>
           </div>
           <div>
             <b>Joint tracking error (actual − command, rad)</b>
