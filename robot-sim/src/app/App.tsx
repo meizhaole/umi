@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Quaternion, Vector3 } from 'three';
 import { JointController } from '../core/JointController';
 import { Kinematics } from '../core/Kinematics';
 import { RobotModel } from '../core/RobotModel';
@@ -32,6 +33,13 @@ import { quaternionToRotationVector } from '../utils/math';
 import type { InferenceObservation } from './inferenceProtocol';
 import type { SimCameraFrame } from '../sim/sensors/WristCameraCapture';
 import { CAMERA_IMAGE_SIZE } from '../sim/sensors/CameraSensor';
+import {
+  DATASET_REPLAY_REPORT_URL,
+  type DatasetReplayFrame,
+  type DatasetReplayReport,
+  parseDatasetReplayReport,
+} from './datasetReplay';
+import { DatasetReplayPanel, type DatasetReplayState } from '../ui/DatasetReplayPanel';
 
 interface LoadedRobot {
   description: RobotDescription;
@@ -46,6 +54,68 @@ const DEFAULT_TARGET: Pose = {
   orientation: [0, 0, 0, 1],
 };
 const CAMERA_PREVIEW_INTERVAL_MS = 100;
+const REPLAY_STABLE_SAMPLE_DELTA_RAD = 0.001;
+const REPLAY_STABLE_SAMPLE_COUNT = 3;
+const REPLAY_NO_MOTION_TIMEOUT_MS = 1500;
+const REPLAY_NO_MOTION_THRESHOLD_RAD = 0.0001;
+const REPLAY_STEP_TIMEOUT_MS = 15000;
+
+interface DatasetReplayStepRecord {
+  frame_index: number;
+  replay_state: 'SETTLED' | 'ERROR';
+  error_reason: string | null;
+  target_tcp_pose: Pose;
+  commanded_joint_positions: JointValues;
+  actual_joint_positions: JointValues;
+  joint_tracking_error: JointValues;
+  max_joint_tracking_error_rad: number;
+  max_joint_tracking_error_joint: string;
+  actual_tcp_pose: Pose;
+  tcp_position_tracking_error_m: number;
+  tcp_orientation_tracking_error_rad: number;
+  expected_joint_delta_norm: number;
+  actual_joint_motion_norm: number;
+  max_joint_change_per_sample_rad: number;
+  duration_ms: number;
+  physics_ready: boolean;
+  actual_joint_samples: DatasetReplayStepSample[];
+}
+
+interface DatasetReplayStepSample {
+  elapsed_ms: number;
+  actual_joint_positions: JointValues;
+  joint_tracking_error: JointValues;
+  max_joint_tracking_error_rad: number;
+  actual_tcp_pose: Pose;
+  tcp_position_tracking_error_m: number;
+  tcp_orientation_tracking_error_rad: number;
+}
+
+interface DatasetReplayDebugSnapshot {
+  source: string;
+  episode_index: 0;
+  current_frame: number | null;
+  replay_state: DatasetReplayState;
+  precomputed_key_frames: DatasetReplayFrame[];
+  records: DatasetReplayStepRecord[];
+}
+
+interface DatasetReplayMotionState {
+  frame_index: number | null;
+  started_at_ms: number;
+  baseline_joints: JointValues;
+  previous_actual_joints: JointValues;
+  expected_joint_delta_norm: number;
+  stable_sample_count: number;
+  maximum_sample_delta_rad: number;
+  samples: DatasetReplayStepSample[];
+}
+
+declare global {
+  interface Window {
+    __ROBOT_SIM_DATASET_REPLAY__?: DatasetReplayDebugSnapshot;
+  }
+}
 
 export const App = () => {
   const [modelId, setModelId] = useState<RobotModelId>(DEFAULT_ROBOT_MODEL_ID);
@@ -61,6 +131,24 @@ export const App = () => {
   const [jointDeltaNorm, setJointDeltaNorm] = useState<number | null>(null);
   const [ikMessage, setIkMessage] = useState('');
   const [physicsReady, setPhysicsReady] = useState(false);
+  const [datasetReplayReport, setDatasetReplayReport] = useState<DatasetReplayReport | null>(null);
+  const [datasetReplayEnabled, setDatasetReplayEnabled] = useState(false);
+  const [datasetReplayLoading, setDatasetReplayLoading] = useState(false);
+  const [datasetReplayFrameIndex, setDatasetReplayFrameIndex] = useState<number | null>(null);
+  const [datasetReplayState, setDatasetReplayState] = useState<DatasetReplayState>('IDLE');
+  const [datasetReplayError, setDatasetReplayError] = useState('');
+  const [datasetReplayLog, setDatasetReplayLog] = useState<DatasetReplayStepRecord[]>([]);
+  const datasetReplayLogRef = useRef<DatasetReplayStepRecord[]>([]);
+  const datasetReplayMotionRef = useRef<DatasetReplayMotionState>({
+    frame_index: null,
+    started_at_ms: 0,
+    baseline_joints: {},
+    previous_actual_joints: {},
+    expected_joint_delta_norm: 0,
+    stable_sample_count: 0,
+    maximum_sample_delta_rad: 0,
+    samples: [],
+  });
   const [cameraPreviewReady, setCameraPreviewReady] = useState(false);
   const cameraFramesRef = useRef<SimCameraFrame[]>([]);
   const cameraPreviewCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -82,6 +170,15 @@ export const App = () => {
     setJointValues({});
     setCommands({});
     setPhysicsReady(false);
+    setDatasetReplayReport(null);
+    setDatasetReplayEnabled(false);
+    setDatasetReplayLoading(false);
+    setDatasetReplayFrameIndex(null);
+    setDatasetReplayState('IDLE');
+    setDatasetReplayError('');
+    datasetReplayLogRef.current = [];
+    setDatasetReplayLog([]);
+    datasetReplayMotionRef.current.frame_index = null;
     setCameraPreviewReady(false);
     cameraPreviewReadyRef.current = false;
     cameraPreviewImageDataRef.current = null;
@@ -134,6 +231,83 @@ export const App = () => {
   const tool0Pose = loadedRobot?.description.links.some((link) => link.name === 'tool0')
     ? loadedRobot.model.getLinkPose('tool0')
     : null;
+  const datasetReplayFrame = useMemo(
+    () =>
+      datasetReplayFrameIndex === null
+        ? null
+        : (datasetReplayReport?.frames[datasetReplayFrameIndex] ?? null),
+    [datasetReplayFrameIndex, datasetReplayReport],
+  );
+  const datasetReplayTargetPose = useMemo<Pose | null>(
+    () =>
+      datasetReplayFrame
+        ? {
+            position: datasetReplayFrame.aligned_target_position,
+            orientation: datasetReplayFrame.aligned_target_quaternion,
+          }
+        : null,
+    [datasetReplayFrame],
+  );
+  const datasetReplayActualPose = useMemo(
+    () =>
+      loadedRobot && datasetReplayEnabled
+        ? loadedRobot.kinematics.forwardKinematics(jointValues, loadedRobot.description.tipLink)
+        : null,
+    [datasetReplayEnabled, jointValues, loadedRobot],
+  );
+  const datasetReplayJointNames = useMemo(
+    () => loadedRobot?.model.getControllableJoints().map((joint) => joint.name) ?? [],
+    [loadedRobot],
+  );
+  const datasetReplayCommandedJoints = useMemo(
+    () =>
+      Object.fromEntries(
+        datasetReplayJointNames.map((name) => [
+          name,
+          commands[name]?.mode === 'position'
+            ? commands[name].value
+            : (datasetReplayFrame?.ik_solution_joints[name] ?? 0),
+        ]),
+      ),
+    [commands, datasetReplayFrame, datasetReplayJointNames],
+  );
+  const datasetReplayJointTrackingErrors = useMemo(
+    () =>
+      Object.fromEntries(
+        datasetReplayJointNames.map((name) => [
+          name,
+          (jointValues[name] ?? 0) - (datasetReplayCommandedJoints[name] ?? 0),
+        ]),
+      ),
+    [datasetReplayCommandedJoints, datasetReplayJointNames, jointValues],
+  );
+  const datasetReplayMaxJointTrackingEntry = useMemo(
+    () =>
+      Object.entries(datasetReplayJointTrackingErrors).reduce<[string, number] | null>(
+        (maximum, entry) =>
+          !maximum || Math.abs(entry[1]) > Math.abs(maximum[1]) ? entry : maximum,
+        null,
+      ),
+    [datasetReplayJointTrackingErrors],
+  );
+  const datasetReplayTcpPositionTrackingError = useMemo(
+    () =>
+      datasetReplayActualPose && datasetReplayTargetPose
+        ? new Vector3(...datasetReplayActualPose.position).distanceTo(
+            new Vector3(...datasetReplayTargetPose.position),
+          )
+        : null,
+    [datasetReplayActualPose, datasetReplayTargetPose],
+  );
+  const datasetReplayTcpOrientationTrackingError = useMemo(
+    () =>
+      datasetReplayActualPose && datasetReplayTargetPose
+        ? new Quaternion(...datasetReplayActualPose.orientation).angleTo(
+            new Quaternion(...datasetReplayTargetPose.orientation),
+          )
+        : null,
+    [datasetReplayActualPose, datasetReplayTargetPose],
+  );
   const handleCameraFrame = useCallback((frame: SimCameraFrame) => {
     cameraFramesRef.current = [...cameraFramesRef.current.slice(-1), frame];
 
@@ -220,6 +394,363 @@ export const App = () => {
     loadedRobot.model.setJointValues(values);
     setJointValues(loadedRobot.model.getJointValues());
   };
+
+  const writeDatasetReplaySnapshot = (
+    frameIndex: number | null,
+    replayState: DatasetReplayState,
+    frames = datasetReplayReport?.frames ?? [],
+  ) => {
+    if (typeof window === 'undefined') return;
+    window.__ROBOT_SIM_DATASET_REPLAY__ = {
+      source: DATASET_REPLAY_REPORT_URL,
+      episode_index: 0,
+      current_frame: frameIndex,
+      replay_state: replayState,
+      precomputed_key_frames: [0, 65, 99, 218, 399].flatMap((index) => {
+        const frame = frames[index];
+        return frame ? [frame] : [];
+      }),
+      records: datasetReplayLogRef.current,
+    };
+  };
+
+  const appendDatasetReplayRecord = (record: DatasetReplayStepRecord) => {
+    const nextRecords = [...datasetReplayLogRef.current, record];
+    datasetReplayLogRef.current = nextRecords;
+    setDatasetReplayLog(nextRecords);
+    if (typeof window !== 'undefined') {
+      window.__ROBOT_SIM_DATASET_REPLAY__ = {
+        source: DATASET_REPLAY_REPORT_URL,
+        episode_index: 0,
+        current_frame: record.frame_index,
+        replay_state: record.replay_state,
+        precomputed_key_frames: [0, 65, 99, 218, 399].flatMap((index) => {
+          const frame = datasetReplayReport?.frames[index];
+          return frame ? [frame] : [];
+        }),
+        records: nextRecords,
+      };
+    }
+    publishDebugEvent('dataset_replay:step', record);
+  };
+
+  const commandDatasetReplayFrame = (
+    report: DatasetReplayReport,
+    frameIndex: number,
+    resetToInitial = false,
+  ) => {
+    if (!loadedRobot || modelId !== 'UR5' || !physicsReady || inference.isLocked) return;
+    const frame = report.frames[frameIndex];
+    if (!frame) return;
+    const jointNames = loadedRobot.model.getControllableJoints().map((joint) => joint.name);
+    const commandValues = resetToInitial ? report.initial_joints : frame.ik_solution_joints;
+    const baselineJoints = Object.fromEntries(
+      jointNames.map((name) => [name, jointValues[name] ?? 0]),
+    );
+
+    loadedRobot.controller.setMode('position');
+    jointNames.forEach((jointName) => {
+      const target = commandValues[jointName];
+      if (target === undefined) throw new Error(`Phase 2B-1 缺少 ${jointName} 的关节解`);
+      loadedRobot.controller.setCommand(jointName, target);
+    });
+    const nextCommands = loadedRobot.controller.getCommands();
+    const resolvedCommandValues = Object.fromEntries(
+      jointNames.map((name) => [name, nextCommands[name]?.value ?? commandValues[name]]),
+    );
+    const expectedJointDeltaNorm = Math.hypot(
+      ...jointNames.map((name) => resolvedCommandValues[name] - baselineJoints[name]),
+    );
+
+    setMode('position');
+    setCommands(nextCommands);
+    setIsRunning(true);
+    setDatasetReplayFrameIndex(frameIndex);
+    setDatasetReplayState('MOVING');
+    setDatasetReplayError('');
+    datasetReplayMotionRef.current = {
+      frame_index: frameIndex,
+      started_at_ms: performance.now(),
+      baseline_joints: baselineJoints,
+      previous_actual_joints: baselineJoints,
+      expected_joint_delta_norm: expectedJointDeltaNorm,
+      stable_sample_count: 0,
+      maximum_sample_delta_rad: 0,
+      samples: [],
+    };
+    writeDatasetReplaySnapshot(frameIndex, 'MOVING', report.frames);
+    publishDebugEvent('dataset_replay:command', {
+      episode_index: 0,
+      frame_index: frameIndex,
+      target_tcp_pose: {
+        position: frame.aligned_target_position,
+        orientation: frame.aligned_target_quaternion,
+      },
+      commanded_joint_positions: resolvedCommandValues,
+      reset_to_initial: resetToInitial,
+      physics_ready: physicsReady,
+      position_execution: 'joint_motors',
+    });
+  };
+
+  const loadDatasetReplay = async () => {
+    if (!loadedRobot || modelId !== 'UR5' || !physicsReady || inference.isLocked) return;
+    setDatasetReplayLoading(true);
+    setDatasetReplayError('');
+    try {
+      const response = await fetch(DATASET_REPLAY_REPORT_URL);
+      if (!response.ok) throw new Error(`Phase 2B-1 报告加载失败：HTTP ${response.status}`);
+      const report = parseDatasetReplayReport(await response.text());
+      const jointNames = loadedRobot.model.getControllableJoints().map((joint) => joint.name);
+      if (jointNames.length !== 6 || jointNames.some((name) => !(name in report.initial_joints))) {
+        throw new Error('当前 UR5 关节名称与 Phase 2B-1 报告不匹配');
+      }
+      setDatasetReplayReport(report);
+      setDatasetReplayEnabled(true);
+      setDatasetReplayState('IDLE');
+      datasetReplayLogRef.current = [];
+      setDatasetReplayLog([]);
+      writeDatasetReplaySnapshot(0, 'IDLE', report.frames);
+      commandDatasetReplayFrame(report, 0, true);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setDatasetReplayError(message);
+      setDatasetReplayState('ERROR');
+      publishDebugEvent('dataset_replay:error', { message });
+    } finally {
+      setDatasetReplayLoading(false);
+    }
+  };
+
+  const exitDatasetReplay = () => {
+    if (!loadedRobot || datasetReplayState === 'MOVING') return;
+    loadedRobot.controller.setMode('position');
+    setMode('position');
+    setCommands({});
+    setDatasetReplayEnabled(false);
+    setDatasetReplayFrameIndex(null);
+    setDatasetReplayState('IDLE');
+    setDatasetReplayError('');
+    publishDebugEvent('dataset_replay:exit', {
+      completed_steps: datasetReplayLogRef.current.length,
+    });
+  };
+
+  const writeDatasetReplayStepResult = (
+    resultState: 'SETTLED' | 'ERROR',
+    errorReason: string | null,
+    actualValues: JointValues,
+    maxJointChangePerSample: number,
+  ) => {
+    if (!loadedRobot || datasetReplayFrameIndex === null || !datasetReplayTargetPose) return;
+    const frame = datasetReplayFrame;
+    if (!frame) return;
+    const jointNames = loadedRobot.model.getControllableJoints().map((joint) => joint.name);
+    const activeCommands = loadedRobot.controller.getCommands();
+    const commandedJoints = Object.fromEntries(
+      jointNames.map((name) => [
+        name,
+        activeCommands[name]?.mode === 'position'
+          ? activeCommands[name].value
+          : frame.ik_solution_joints[name],
+      ]),
+    );
+    const actualJoints = Object.fromEntries(
+      jointNames.map((name) => [name, actualValues[name] ?? 0]),
+    );
+    const trackingErrors = Object.fromEntries(
+      jointNames.map((name) => [name, actualJoints[name] - commandedJoints[name]]),
+    );
+    const maximumJointEntry = Object.entries(trackingErrors).reduce<[string, number]>(
+      (maximum, entry) =>
+        Math.abs(entry[1]) > Math.abs(maximum[1]) ? [entry[0], entry[1]] : maximum,
+      [jointNames[0], trackingErrors[jointNames[0]]],
+    );
+    const actualTcpPose = loadedRobot.kinematics.forwardKinematics(
+      actualValues,
+      loadedRobot.description.tipLink,
+    );
+    const motionState = datasetReplayMotionRef.current;
+    const actualJointMotionNorm = Math.hypot(
+      ...jointNames.map(
+        (name) => actualJoints[name] - (motionState.baseline_joints[name] ?? actualJoints[name]),
+      ),
+    );
+    const record: DatasetReplayStepRecord = {
+      frame_index: datasetReplayFrameIndex,
+      replay_state: resultState,
+      error_reason: errorReason,
+      target_tcp_pose: datasetReplayTargetPose,
+      commanded_joint_positions: commandedJoints,
+      actual_joint_positions: actualJoints,
+      joint_tracking_error: trackingErrors,
+      max_joint_tracking_error_rad: Math.abs(maximumJointEntry[1]),
+      max_joint_tracking_error_joint: maximumJointEntry[0],
+      actual_tcp_pose: actualTcpPose,
+      tcp_position_tracking_error_m: new Vector3(...actualTcpPose.position).distanceTo(
+        new Vector3(...datasetReplayTargetPose.position),
+      ),
+      tcp_orientation_tracking_error_rad: new Quaternion(...actualTcpPose.orientation).angleTo(
+        new Quaternion(...datasetReplayTargetPose.orientation),
+      ),
+      expected_joint_delta_norm: motionState.expected_joint_delta_norm,
+      actual_joint_motion_norm: actualJointMotionNorm,
+      max_joint_change_per_sample_rad: maxJointChangePerSample,
+      duration_ms: performance.now() - motionState.started_at_ms,
+      physics_ready: physicsReady,
+      actual_joint_samples: [...motionState.samples],
+    };
+    appendDatasetReplayRecord(record);
+    setDatasetReplayState(resultState);
+    if (errorReason) setDatasetReplayError(errorReason);
+    writeDatasetReplaySnapshot(datasetReplayFrameIndex, resultState);
+  };
+
+  const finishDatasetReplayStepRef = useRef(writeDatasetReplayStepResult);
+  finishDatasetReplayStepRef.current = writeDatasetReplayStepResult;
+
+  useEffect(() => {
+    if (
+      !datasetReplayEnabled ||
+      datasetReplayState !== 'MOVING' ||
+      datasetReplayFrameIndex === null ||
+      !datasetReplayReport ||
+      !loadedRobot
+    ) {
+      return;
+    }
+
+    const motionState = datasetReplayMotionRef.current;
+    if (motionState.frame_index !== datasetReplayFrameIndex) return;
+    const jointNames = loadedRobot.model.getControllableJoints().map((joint) => joint.name);
+    const actualJoints = Object.fromEntries(
+      jointNames.map((name) => [name, jointValues[name] ?? Number.NaN]),
+    );
+    if (Object.values(actualJoints).some((value) => !Number.isFinite(value))) {
+      finishDatasetReplayStepRef.current(
+        'ERROR',
+        'actual_joint_state_invalid: Rapier 未提供全部六个有限关节状态',
+        actualJoints,
+        Number.NaN,
+      );
+      return;
+    }
+
+    if (!physicsReady) {
+      finishDatasetReplayStepRef.current(
+        'ERROR',
+        'physics_not_ready: Rapier physics 未就绪',
+        actualJoints,
+        Number.NaN,
+      );
+      return;
+    }
+
+    const maximumSampleDelta = Math.max(
+      ...jointNames.map((name) =>
+        Math.abs(
+          actualJoints[name] - (motionState.previous_actual_joints[name] ?? actualJoints[name]),
+        ),
+      ),
+    );
+    motionState.maximum_sample_delta_rad = Math.max(
+      motionState.maximum_sample_delta_rad,
+      maximumSampleDelta,
+    );
+    motionState.stable_sample_count =
+      maximumSampleDelta <= REPLAY_STABLE_SAMPLE_DELTA_RAD
+        ? motionState.stable_sample_count + 1
+        : 0;
+    motionState.previous_actual_joints = actualJoints;
+
+    const elapsedMs = performance.now() - motionState.started_at_ms;
+    const actualMotionNorm = Math.hypot(
+      ...jointNames.map(
+        (name) => actualJoints[name] - (motionState.baseline_joints[name] ?? actualJoints[name]),
+      ),
+    );
+    const frame = datasetReplayReport.frames[datasetReplayFrameIndex];
+    const activeCommands = loadedRobot.controller.getCommands();
+    const commandedJoints = Object.fromEntries(
+      jointNames.map((name) => [
+        name,
+        activeCommands[name]?.mode === 'position'
+          ? activeCommands[name].value
+          : frame.ik_solution_joints[name],
+      ]),
+    );
+    const trackingErrors = Object.fromEntries(
+      jointNames.map((name) => [name, actualJoints[name] - commandedJoints[name]]),
+    );
+    const maximumTrackingError = Math.max(...Object.values(trackingErrors).map(Math.abs));
+    const actualTcpPose = loadedRobot.kinematics.forwardKinematics(
+      actualJoints,
+      loadedRobot.description.tipLink,
+    );
+    const targetTcpPose: Pose = {
+      position: frame.aligned_target_position,
+      orientation: frame.aligned_target_quaternion,
+    };
+    motionState.samples.push({
+      elapsed_ms: elapsedMs,
+      actual_joint_positions: actualJoints,
+      joint_tracking_error: trackingErrors,
+      max_joint_tracking_error_rad: maximumTrackingError,
+      actual_tcp_pose: actualTcpPose,
+      tcp_position_tracking_error_m: new Vector3(...actualTcpPose.position).distanceTo(
+        new Vector3(...targetTcpPose.position),
+      ),
+      tcp_orientation_tracking_error_rad: new Quaternion(...actualTcpPose.orientation).angleTo(
+        new Quaternion(...targetTcpPose.orientation),
+      ),
+    });
+
+    if (elapsedMs >= REPLAY_STEP_TIMEOUT_MS) {
+      finishDatasetReplayStepRef.current(
+        'ERROR',
+        `step_timeout: ${REPLAY_STEP_TIMEOUT_MS / 1000} 秒内实际关节状态未稳定`,
+        actualJoints,
+        motionState.maximum_sample_delta_rad,
+      );
+      return;
+    }
+
+    if (
+      motionState.expected_joint_delta_norm > REPLAY_STABLE_SAMPLE_DELTA_RAD &&
+      elapsedMs >= REPLAY_NO_MOTION_TIMEOUT_MS &&
+      actualMotionNorm < REPLAY_NO_MOTION_THRESHOLD_RAD
+    ) {
+      finishDatasetReplayStepRef.current(
+        'ERROR',
+        'no_joint_motion: commanded joints changed, but Rapier actual joints did not move',
+        actualJoints,
+        motionState.maximum_sample_delta_rad,
+      );
+      return;
+    }
+
+    if (
+      motionState.stable_sample_count >= REPLAY_STABLE_SAMPLE_COUNT &&
+      (motionState.expected_joint_delta_norm <= REPLAY_STABLE_SAMPLE_DELTA_RAD ||
+        actualMotionNorm >= REPLAY_NO_MOTION_THRESHOLD_RAD)
+    ) {
+      finishDatasetReplayStepRef.current(
+        'SETTLED',
+        null,
+        actualJoints,
+        motionState.maximum_sample_delta_rad,
+      );
+      return;
+    }
+  }, [
+    datasetReplayEnabled,
+    datasetReplayFrameIndex,
+    datasetReplayReport,
+    datasetReplayState,
+    jointValues,
+    loadedRobot,
+    physicsReady,
+  ]);
 
   const solveIk = () => {
     if (!loadedRobot || inference.isLocked) return;
@@ -311,7 +842,7 @@ export const App = () => {
             <button
               className={model.id === modelId ? 'model-tab active' : 'model-tab'}
               key={model.id}
-              disabled={inference.isLocked}
+              disabled={inference.isLocked || datasetReplayState === 'MOVING'}
               onClick={() => setModelId(model.id)}
               type="button"
             >
@@ -349,6 +880,7 @@ export const App = () => {
           <InferencePanel
             canStep={
               Boolean(loadedRobot && physicsReady && !loadError) &&
+              !datasetReplayEnabled &&
               (!inference.isLocked || inference.status === 'waiting')
             }
             error={inference.error}
@@ -362,6 +894,50 @@ export const App = () => {
             progress={inference.progress}
             status={inference.status}
           />
+
+          {currentModel.type === 'ur5' ? (
+            <DatasetReplayPanel
+              active={datasetReplayEnabled}
+              canControl={Boolean(
+                loadedRobot &&
+                modelId === 'UR5' &&
+                physicsReady &&
+                !loadError &&
+                !inference.isLocked,
+              )}
+              currentFrame={datasetReplayFrameIndex}
+              error={datasetReplayError}
+              isLoading={datasetReplayLoading}
+              jointNames={datasetReplayJointNames}
+              logCount={datasetReplayLog.length}
+              commandedJoints={datasetReplayCommandedJoints}
+              actualJoints={jointValues}
+              jointTrackingErrors={datasetReplayJointTrackingErrors}
+              targetPose={datasetReplayTargetPose}
+              actualPose={datasetReplayActualPose}
+              maxJointTrackingError={datasetReplayMaxJointTrackingEntry?.[1] ?? null}
+              maxJointTrackingErrorName={datasetReplayMaxJointTrackingEntry?.[0] ?? null}
+              tcpPositionTrackingError={datasetReplayTcpPositionTrackingError}
+              tcpOrientationTrackingError={datasetReplayTcpOrientationTrackingError}
+              physicsReady={physicsReady}
+              replayState={datasetReplayState}
+              onLoad={loadDatasetReplay}
+              onPrevious={() => {
+                if (datasetReplayReport && datasetReplayFrameIndex !== null) {
+                  commandDatasetReplayFrame(datasetReplayReport, datasetReplayFrameIndex - 1);
+                }
+              }}
+              onNext={() => {
+                if (datasetReplayReport && datasetReplayFrameIndex !== null) {
+                  commandDatasetReplayFrame(datasetReplayReport, datasetReplayFrameIndex + 1);
+                }
+              }}
+              onReset={() => {
+                if (datasetReplayReport) commandDatasetReplayFrame(datasetReplayReport, 0, true);
+              }}
+              onExit={exitDatasetReplay}
+            />
+          ) : null}
 
           {loadError ? (
             <section className="panel error-panel">
@@ -384,11 +960,11 @@ export const App = () => {
             mode={mode}
             onCommand={commandJoint}
             onModeChange={setControlMode}
-            disabled={inference.isLocked}
+            disabled={inference.isLocked || datasetReplayEnabled}
           />
 
           <TaskPanel
-            disabled={inference.isLocked}
+            disabled={inference.isLocked || datasetReplayEnabled}
             ikMessage={ikMessage}
             ikResult={ikResult}
             onSolveIk={solveIk}
@@ -417,7 +993,7 @@ export const App = () => {
               <button
                 className="icon-button"
                 title={isRunning ? '暂停仿真' : '运行仿真'}
-                disabled={inference.isLocked}
+                disabled={inference.isLocked || datasetReplayState === 'MOVING'}
                 onClick={() => setIsRunning(!isRunning)}
                 type="button"
               >
@@ -425,7 +1001,7 @@ export const App = () => {
               </button>
               <button
                 className="icon-button"
-                disabled={inference.isLocked}
+                disabled={inference.isLocked || datasetReplayEnabled}
                 title="重置关节"
                 onClick={() => {
                   if (!loadedRobot) return;
@@ -487,6 +1063,10 @@ export const App = () => {
                 onPhysicsReady={setPhysicsReady}
                 playback={inference.playback}
                 inferenceActive={inference.isLocked}
+                positionExecutionOverride={datasetReplayEnabled ? 'joint_motors' : undefined}
+                datasetReplayActive={datasetReplayEnabled}
+                datasetReplayTargetPose={datasetReplayTargetPose}
+                datasetReplayActualPose={datasetReplayActualPose}
                 onPlaybackStep={applyReplayStep}
                 onPlaybackComplete={inference.completePlayback}
                 cameraEnabled={Boolean(loadedRobot)}

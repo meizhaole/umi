@@ -1,7 +1,7 @@
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import type { RapierRigidBody } from '@react-three/rapier';
-import { Vector3 } from 'three';
+import { Quaternion, Vector3 } from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { Physics } from '@react-three/rapier';
 import { SIMULATION_CONFIG, findRobotConfig, type RobotModelId } from '../app/config';
@@ -24,6 +24,10 @@ interface SceneManagerProps {
   isRunning: boolean;
   playback: PlaybackChunk | null;
   inferenceActive: boolean;
+  positionExecutionOverride?: 'joint_motors' | 'kinematic_fk';
+  datasetReplayActive?: boolean;
+  datasetReplayTargetPose?: Pose | null;
+  datasetReplayActualPose?: Pose | null;
   onJointState: (values: JointValues) => void;
   onPhysicsReady: (ready: boolean) => void;
   onPlaybackStep: (values: JointValues, isFinal: boolean) => void;
@@ -35,6 +39,41 @@ interface SceneManagerProps {
 
 const PLAYBACK_ACTION_SECONDS = 0.5;
 const MAX_PLAYBACK_DELTA_SECONDS = 0.05;
+const ROBOT_TO_SCENE = new Quaternion().setFromAxisAngle(new Vector3(1, 0, 0), -Math.PI / 2);
+
+interface DatasetPoseMarkersProps {
+  targetPose: Pose | null;
+  actualPose: Pose | null;
+}
+
+const DatasetPoseMarkers = ({ targetPose, actualPose }: DatasetPoseMarkersProps) => {
+  const targetPosition = targetPose
+    ? new Vector3(...targetPose.position).applyQuaternion(ROBOT_TO_SCENE).toArray()
+    : null;
+  const marker = (pose: Pose | null, color: string, radius: number) => {
+    if (!pose) return null;
+    const position = new Vector3(...pose.position).applyQuaternion(ROBOT_TO_SCENE);
+    return (
+      <mesh position={position.toArray()}>
+        <sphereGeometry args={[radius, 20, 16]} />
+        <meshBasicMaterial color={color} depthTest={false} toneMapped={false} />
+      </mesh>
+    );
+  };
+
+  return (
+    <group renderOrder={10}>
+      {targetPosition ? (
+        <mesh position={targetPosition} renderOrder={10}>
+          <torusGeometry args={[0.035, 0.0025, 8, 32]} />
+          <meshBasicMaterial color="#63e6d0" depthTest={false} toneMapped={false} />
+        </mesh>
+      ) : null}
+      {marker(targetPose, '#63e6d0', 0.025)}
+      {marker(actualPose, '#ffb45e', 0.015)}
+    </group>
+  );
+};
 
 interface ActionPlaybackProps {
   playback: PlaybackChunk | null;
@@ -141,6 +180,10 @@ export const SceneManager = ({
   isRunning,
   playback,
   inferenceActive,
+  positionExecutionOverride,
+  datasetReplayActive = false,
+  datasetReplayTargetPose = null,
+  datasetReplayActualPose = null,
   onJointState,
   onPhysicsReady,
   onPlaybackStep,
@@ -209,7 +252,7 @@ export const SceneManager = ({
           commands={commands}
           description={description}
           packageMappings={model.packageMappings}
-          positionExecution={model.positionExecution}
+          positionExecution={positionExecutionOverride ?? model.positionExecution}
           jointValues={jointValues}
           mode={mode}
           onJointState={onJointState}
@@ -231,6 +274,12 @@ export const SceneManager = ({
           urdfXml={urdfXml}
         />
       </Suspense>
+      {datasetReplayActive ? (
+        <DatasetPoseMarkers
+          targetPose={datasetReplayTargetPose}
+          actualPose={datasetReplayActualPose}
+        />
+      ) : null}
       <CameraControls
         cupBodyRef={cupBodyRef}
         inferenceActive={inferenceActive}
