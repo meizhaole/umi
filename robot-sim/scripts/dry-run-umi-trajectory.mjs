@@ -10,9 +10,15 @@ import { Matrix4, Quaternion, Vector3 } from 'three';
 const SCRIPT_DIRECTORY = dirname(fileURLToPath(import.meta.url));
 const PROJECT_DIRECTORY = resolve(SCRIPT_DIRECTORY, '..');
 const DATASET_READER = resolve(SCRIPT_DIRECTORY, 'test_umi_trajectory_dataset.py');
-const REPORT_PATH = resolve(PROJECT_DIRECTORY, 'reports/phase2a-umi-episode0-frames0-99.jsonl');
+const BASELINE_REPORT_PATH = resolve(
+  PROJECT_DIRECTORY,
+  'reports/phase2a-umi-episode0-frames0-99.jsonl',
+);
+const REPORT_PATH = resolve(PROJECT_DIRECTORY, 'reports/phase2b1-umi-episode0-frames0-399.jsonl');
 const CONSISTENCY_TOLERANCE = 1e-9;
 const JOINT_LIMIT_TOLERANCE = 1e-9;
+const REGRESSION_TOLERANCE = 1e-9;
+const REGRESSION_FRAME_INDICES = [0, 65, 99];
 
 const matrixFromRows = (rows) => new Matrix4().set(...rows.flat());
 
@@ -130,6 +136,172 @@ const getLimitViolations = (jointValues, jointLimits) =>
     })
     .map(([name, limit]) => ({ joint: name, value: jointValues[name], ...limit }));
 
+const getJointLimitMargins = (jointValues, jointLimits) =>
+  Object.fromEntries(
+    Object.entries(jointLimits).map(([name, limit]) => {
+      const value = jointValues[name];
+      const lowerMargin = limit.lower === null ? null : value - limit.lower;
+      const upperMargin = limit.upper === null ? null : limit.upper - value;
+      const availableMargins = [lowerMargin, upperMargin].filter(Number.isFinite);
+      const minimumMargin = availableMargins.length ? Math.min(...availableMargins) : null;
+      return [
+        name,
+        {
+          lower_margin_rad: lowerMargin,
+          upper_margin_rad: upperMargin,
+          minimum_margin_rad: minimumMargin,
+          nearest_limit:
+            minimumMargin === null
+              ? null
+              : lowerMargin === null || upperMargin < lowerMargin
+                ? 'upper'
+                : 'lower',
+        },
+      ];
+    }),
+  );
+
+const getVectorBounds = (vectors) => {
+  const minimum = [Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY];
+  const maximum = [Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY];
+  vectors.forEach((vector) => {
+    vector.forEach((value, axis) => {
+      minimum[axis] = Math.min(minimum[axis], value);
+      maximum[axis] = Math.max(maximum[axis], value);
+    });
+  });
+  return {
+    min_m: minimum,
+    max_m: maximum,
+    size_m: maximum.map((value, axis) => value - minimum[axis]),
+  };
+};
+
+const getMaximumFrame = (frames, field, valueSelector = (frame) => frame[field]) => {
+  const finiteFrames = frames.filter((frame) => Number.isFinite(valueSelector(frame)));
+  if (finiteFrames.length === 0) return null;
+  return finiteFrames.reduce((maximum, frame) =>
+    valueSelector(frame) > valueSelector(maximum) ? frame : maximum,
+  );
+};
+
+const getFiniteMean = (values) => {
+  const finiteValues = values.filter(Number.isFinite);
+  return finiteValues.length
+    ? finiteValues.reduce((sum, value) => sum + value, 0) / finiteValues.length
+    : null;
+};
+
+const getJointStatistics = (frames, jointNames, jointLimits) => {
+  const statistics = {};
+  jointNames.forEach((name) => {
+    const jointFrames = frames.filter((frame) => Number.isFinite(frame.ik_solution_joints[name]));
+    if (jointFrames.length === 0) {
+      statistics[name] = {
+        min_angle_rad: null,
+        min_angle_frame: null,
+        max_angle_rad: null,
+        max_angle_frame: null,
+        minimum_limit_margin_rad: null,
+        minimum_limit_margin_frame: null,
+        nearest_limit: null,
+      };
+      return;
+    }
+
+    const minimumAngleFrame = jointFrames.reduce((minimum, frame) =>
+      frame.ik_solution_joints[name] < minimum.ik_solution_joints[name] ? frame : minimum,
+    );
+    const maximumAngleFrame = jointFrames.reduce((maximum, frame) =>
+      frame.ik_solution_joints[name] > maximum.ik_solution_joints[name] ? frame : maximum,
+    );
+    const minimumMarginFrame = jointFrames.reduce((minimum, frame) =>
+      frame.joint_limit_margins[name].minimum_margin_rad <
+      minimum.joint_limit_margins[name].minimum_margin_rad
+        ? frame
+        : minimum,
+    );
+
+    statistics[name] = {
+      min_angle_rad: minimumAngleFrame.ik_solution_joints[name],
+      min_angle_frame: minimumAngleFrame.frame_index,
+      max_angle_rad: maximumAngleFrame.ik_solution_joints[name],
+      max_angle_frame: maximumAngleFrame.frame_index,
+      lower_limit_rad: jointLimits[name].lower,
+      upper_limit_rad: jointLimits[name].upper,
+      minimum_limit_margin_rad: minimumMarginFrame.joint_limit_margins[name].minimum_margin_rad,
+      minimum_limit_margin_frame: minimumMarginFrame.frame_index,
+      nearest_limit: minimumMarginFrame.joint_limit_margins[name].nearest_limit,
+    };
+  });
+  return statistics;
+};
+
+const getMedian = (values) => {
+  const sorted = [...values].sort((left, right) => left - right);
+  if (sorted.length === 0) return 0;
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0 ? (sorted[middle - 1] + sorted[middle]) / 2 : sorted[middle];
+};
+
+const readBaselineFrames = async () => {
+  const lines = (await readFile(BASELINE_REPORT_PATH, 'utf8')).trim().split('\n');
+  return new Map(
+    lines
+      .map((line) => JSON.parse(line))
+      .filter((record) => record.record_type === 'frame')
+      .map((frame) => [frame.frame_index, frame]),
+  );
+};
+
+const compareRegressionFrame = (frame, baseline) => {
+  const numericDifferences = [];
+  const addDifference = (value, reference) => {
+    numericDifferences.push(Math.abs(value - reference));
+  };
+  const compareJointMap = (values, reference) => {
+    Object.keys(reference).forEach((name) => addDifference(values[name], reference[name]));
+  };
+  const compareVector = (values, reference) =>
+    values.forEach((value, index) => addDifference(value, reference[index]));
+
+  compareVector(frame.dataset_position, baseline.dataset_position);
+  compareVector(frame.dataset_rotation_vector, baseline.dataset_rotation_vector);
+  compareVector(frame.aligned_target_position, baseline.aligned_target_position);
+  compareJointMap(frame.ik_seed_joints, baseline.ik_seed_joints);
+  compareJointMap(frame.ik_solution_joints, baseline.ik_solution_joints);
+  compareJointMap(frame.joint_deltas, baseline.joint_deltas);
+  addDifference(frame.position_residual_m, baseline.position_residual_m);
+  addDifference(frame.orientation_residual_rad, baseline.orientation_residual_rad);
+  addDifference(frame.joint_delta_norm, baseline.joint_delta_norm);
+
+  const quaternion = new Quaternion(...frame.aligned_target_quaternion).normalize();
+  const baselineQuaternion = new Quaternion(...baseline.aligned_target_quaternion).normalize();
+  const orientationDifferenceRad = quaternion.angleTo(baselineQuaternion);
+  const maximumNumericDifference = Math.max(...numericDifferences);
+  const stateMatches =
+    frame.ik_success === baseline.ik_success &&
+    frame.ik_termination_reason === baseline.ik_termination_reason &&
+    frame.ik_iterations === baseline.ik_iterations &&
+    JSON.stringify(frame.joint_limit_violations) ===
+      JSON.stringify(baseline.joint_limit_violations) &&
+    JSON.stringify(frame.blocked_joints) === JSON.stringify(baseline.blocked_joints) &&
+    JSON.stringify(frame.non_finite_fields) === JSON.stringify(baseline.non_finite_fields);
+
+  return {
+    frame_index: frame.frame_index,
+    compared: true,
+    passed:
+      maximumNumericDifference <= REGRESSION_TOLERANCE &&
+      orientationDifferenceRad <= REGRESSION_TOLERANCE &&
+      stateMatches,
+    tolerance: REGRESSION_TOLERANCE,
+    maximum_numeric_difference: maximumNumericDifference,
+    aligned_target_orientation_difference_rad: orientationDifferenceRad,
+    state_matches: stateMatches,
+  };
+};
+
 const getTranslationReachBound = (description) => {
   const jointsByChild = new Map(description.joints.map((joint) => [joint.child, joint]));
   let link = description.tipLink;
@@ -181,7 +353,7 @@ const makeDiagnosticSeeds = (seed, initialJoints, limits) => {
   });
 };
 
-const summarizeFailure = (result, targetPose, reachBound, diagnosticResults) => {
+const summarizeFailure = (result, targetPose, reachBound, diagnosticResults, context) => {
   const targetRadius = Math.hypot(...targetPose.position);
   const possibleCauses = [];
   const evidence = [];
@@ -189,16 +361,33 @@ const summarizeFailure = (result, targetPose, reachBound, diagnosticResults) => 
     possibleCauses.push('A: target 超出由 URDF joint origins 得到的保守最大半径上界');
     evidence.push({ target_radius_m: targetRadius, maximum_radius_bound_m: reachBound });
   }
-  if (result.terminationReason === 'joint_limits_blocked' || result.blockedJoints.length > 0) {
-    possibleCauses.push('B: 求解过程中关节限位阻挡了可用步长');
+  if (context.transform_consistency_passed === false) {
+    possibleCauses.push('F: dataset 到 aligned target 的 SE(3) 一致性检查失败');
+    evidence.push({ transform_consistency: context.transform_consistency });
+  }
+  if (context.incoming_step_is_large) {
+    possibleCauses.push('E: 当前帧相对上一帧的 TCP 位移或转角属于大步长');
+    evidence.push({
+      incoming_step: context.incoming_step,
+      large_step_thresholds: context.large_step_thresholds,
+    });
+  }
+  if (context.joint_limit_violations.length > 0 || result.blockedJoints.length > 0) {
+    possibleCauses.push('D: 输出关节超限或求解步长被关节限位阻挡');
     evidence.push({ blocked_joints: result.blockedJoints });
+    if (context.joint_limit_violations.length > 0) {
+      evidence.push({ joint_limit_violations: context.joint_limit_violations });
+    }
   }
   if (result.terminationReason === 'linear_solve_failed') {
-    possibleCauses.push('C/D: 线性求解失败；可能涉及奇异构型或数值病态');
-  } else if (result.terminationReason === 'max_iterations') {
-    possibleCauses.push('D: 达到现有最大迭代数仍未满足默认残差容差');
+    possibleCauses.push('C: 线性求解失败，可能涉及奇异构型或数值病态，现有日志不能单独确认奇异性');
+  }
+  if (result.terminationReason === 'max_iterations') {
+    possibleCauses.push('B: 达到现有最大迭代数仍未满足默认残差容差');
   } else if (result.terminationReason === 'no_joint_motion') {
-    possibleCauses.push('B/C/D: 当前 Seed 没有可执行的关节步长，但残差仍未收敛');
+    possibleCauses.push(
+      'B: 当前 Seed 没有可执行的关节步长，但残差仍未收敛；需结合限位与数值状态判断',
+    );
   }
   if (diagnosticResults.some((item) => item.ik_success)) {
     possibleCauses.push('Seed 敏感：诊断性 alternate seed 找到解，正式连续 Seed 结果仍保留为失败');
@@ -299,7 +488,7 @@ const run = async () => {
       frame.transform ? matrixFromRows(frame.transform) : null,
     );
     const report = {
-      phase: '2A',
+      phase: '2B-1',
       dataset_path: dataset.dataset_path,
       dataset_type: dataset.dataset_type,
       episode_index: dataset.episode_index,
@@ -321,6 +510,10 @@ const run = async () => {
         max_angular_step_rad: 0.15,
         max_linear_step_m: 0.01,
       },
+      seed_policy:
+        'frame 0 uses UR5 initial joints; each later frame uses the previous formal solution',
+      alignment_policy:
+        'Compute T_align = S_0 × inverse(D_0) once; apply Target_i = T_align × D_i to every frame',
       alignment: null,
       continuity_tolerance: {
         position_delta_norm_m: CONSISTENCY_TOLERANCE,
@@ -368,6 +561,37 @@ const run = async () => {
     const maxRelativeTransformError = Math.max(
       ...continuityChecks.map((check) => check.relative_transform_max_error),
     );
+    const maximumDatasetPositionStep = getMaximumFrame(
+      continuityChecks,
+      'dataset_position_delta_norm_m',
+    );
+    const maximumDatasetRotationStep = getMaximumFrame(
+      continuityChecks,
+      'dataset_rotation_delta_rad',
+    );
+    const maximumAlignedPositionStep = getMaximumFrame(
+      continuityChecks,
+      'aligned_position_delta_norm_m',
+    );
+    const maximumAlignedRotationStep = getMaximumFrame(
+      continuityChecks,
+      'aligned_rotation_delta_rad',
+    );
+    const medianPositionStep = getMedian(
+      continuityChecks.map((check) => check.dataset_position_delta_norm_m),
+    );
+    const medianRotationStep = getMedian(
+      continuityChecks.map((check) => check.dataset_rotation_delta_rad),
+    );
+    const largeStepThresholds = {
+      translation_m: Math.max(0.02, medianPositionStep * 3),
+      rotation_rad: Math.max(0.15, medianRotationStep * 3),
+      method:
+        'diagnostic only: max(20 mm or 3× episode median translation, 0.15 rad or 3× median rotation)',
+    };
+    const alignedTcpWorkspace = getVectorBounds(
+      targetMatrices.map((matrix) => matrixPosition(matrix).toArray()),
+    );
     const continuityPass =
       targetZeroPositionError <= CONSISTENCY_TOLERANCE &&
       targetZeroOrientationError <= CONSISTENCY_TOLERANCE &&
@@ -398,7 +622,33 @@ const run = async () => {
       max_position_delta_norm_error_m: maxPositionDeltaError,
       max_rotation_delta_error_rad: maxRotationDeltaError,
       max_relative_transform_component_error: maxRelativeTransformError,
+      max_dataset_position_delta_norm_m: maximumDatasetPositionStep
+        ? maximumDatasetPositionStep.dataset_position_delta_norm_m
+        : null,
+      max_dataset_position_delta_to_frame: maximumDatasetPositionStep
+        ? maximumDatasetPositionStep.to_frame
+        : null,
+      max_dataset_rotation_delta_rad: maximumDatasetRotationStep
+        ? maximumDatasetRotationStep.dataset_rotation_delta_rad
+        : null,
+      max_dataset_rotation_delta_to_frame: maximumDatasetRotationStep
+        ? maximumDatasetRotationStep.to_frame
+        : null,
+      max_aligned_position_delta_norm_m: maximumAlignedPositionStep
+        ? maximumAlignedPositionStep.aligned_position_delta_norm_m
+        : null,
+      max_aligned_position_delta_to_frame: maximumAlignedPositionStep
+        ? maximumAlignedPositionStep.to_frame
+        : null,
+      max_aligned_rotation_delta_rad: maximumAlignedRotationStep
+        ? maximumAlignedRotationStep.aligned_rotation_delta_rad
+        : null,
+      max_aligned_rotation_delta_to_frame: maximumAlignedRotationStep
+        ? maximumAlignedRotationStep.to_frame
+        : null,
     };
+    report.aligned_tcp_target_workspace_m = alignedTcpWorkspace;
+    report.failure_diagnostic_thresholds = largeStepThresholds;
 
     if (!continuityPass) {
       report.status = 'stopped_transform_consistency_failure';
@@ -442,6 +692,7 @@ const run = async () => {
         deltaEntries[0],
       );
       const violations = getLimitViolations(solution, jointLimits);
+      const limitMargins = getJointLimitMargins(solution, jointLimits);
       const nonFiniteFields = [];
       if (hasNonFinite(frame)) nonFiniteFields.push('dataset_frame');
       if (hasNonFinite(targetPose)) nonFiniteFields.push('aligned_target_pose');
@@ -458,6 +709,7 @@ const run = async () => {
         ik_seed_joints: getJointValues(seed, jointNames),
         ik_solution_joints: solution,
         ik_success: result.converged,
+        formal_frame_success: result.converged && nonFiniteFields.length === 0,
         ik_termination_reason: result.terminationReason,
         ik_iterations: result.iterations,
         position_residual_m: result.residual.position,
@@ -469,6 +721,7 @@ const run = async () => {
           value: maxSingleJointEntry[1],
         },
         joint_limit_violations: violations,
+        joint_limit_margins: limitMargins,
         blocked_joints: result.blockedJoints,
         non_finite_fields: nonFiniteFields,
       };
@@ -483,57 +736,135 @@ const run = async () => {
           result,
           record,
           iterationTrace,
+          incomingContinuityCheck: index > 0 ? continuityChecks[index - 1] : null,
         };
         break;
       }
       seed = solution;
     }
 
-    const successfulFrames = report.frames.filter((frame) => frame.ik_success);
+    const successfulFrames = report.frames.filter((frame) => frame.formal_frame_success);
     const positionResiduals = report.frames.map((frame) => frame.position_residual_m);
     const orientationResiduals = report.frames.map((frame) => frame.orientation_residual_rad);
     const jointDeltaNorms = report.frames.map((frame) => frame.joint_delta_norm);
-    const maximumJump = report.frames.reduce(
-      (maximum, frame) => (frame.joint_delta_norm > maximum.joint_delta_norm ? frame : maximum),
-      report.frames[0],
+    const maximumPositionResidualFrame = getMaximumFrame(report.frames, 'position_residual_m');
+    const maximumOrientationResidualFrame = getMaximumFrame(
+      report.frames,
+      'orientation_residual_rad',
     );
-    const maximumSingleJointStepFrame = report.frames.reduce(
-      (maximum, frame) =>
-        Math.abs(frame.max_single_joint_delta.value) >
-        Math.abs(maximum.max_single_joint_delta.value)
-          ? frame
-          : maximum,
-      report.frames[0],
+    const maximumJointDeltaFrame = getMaximumFrame(report.frames, 'joint_delta_norm');
+    const maximumSingleJointStepFrame = getMaximumFrame(
+      report.frames,
+      'max_single_joint_delta.value',
+      (frame) => Math.abs(frame.max_single_joint_delta.value),
     );
+    const closestJointLimit = report.frames
+      .flatMap((frame) =>
+        jointNames.map((name) => ({
+          frame_index: frame.frame_index,
+          joint: name,
+          ...frame.joint_limit_margins[name],
+        })),
+      )
+      .filter((item) => Number.isFinite(item.minimum_margin_rad))
+      .reduce(
+        (closest, item) =>
+          !closest || item.minimum_margin_rad < closest.minimum_margin_rad ? item : closest,
+        null,
+      );
+    const perJointStatistics = getJointStatistics(report.frames, jointNames, jointLimits);
+    const baselineFrames = await readBaselineFrames();
+    const regressionComparison = REGRESSION_FRAME_INDICES.map((frameIndex) => {
+      const frame = report.frames.find((item) => item.frame_index === frameIndex);
+      const baseline = baselineFrames.get(frameIndex);
+      if (!baseline) {
+        return {
+          frame_index: frameIndex,
+          compared: false,
+          passed: false,
+          reason: 'Phase 2A baseline frame is missing',
+        };
+      }
+      if (!frame) {
+        return {
+          frame_index: frameIndex,
+          compared: false,
+          passed: false,
+          reason: 'formal sequential run stopped before this frame',
+        };
+      }
+      return compareRegressionFrame(frame, baseline);
+    });
+    const regressionComplete = regressionComparison.every((item) => item.compared);
+    const regressionPassed =
+      regressionComplete && regressionComparison.every((item) => item.passed);
     report.summary = {
       tested_frames: report.frames.length,
       ik_success_count: successfulFrames.length,
       ik_failure_count: report.frames.length - successfulFrames.length,
-      mean_position_residual_m: positionResiduals.length
-        ? positionResiduals.reduce((sum, value) => sum + value, 0) / positionResiduals.length
+      mean_position_residual_m: getFiniteMean(positionResiduals),
+      max_position_residual_m: maximumPositionResidualFrame?.position_residual_m ?? null,
+      max_position_residual_frame: maximumPositionResidualFrame?.frame_index ?? null,
+      mean_orientation_residual_rad: getFiniteMean(orientationResiduals),
+      max_orientation_residual_rad:
+        maximumOrientationResidualFrame?.orientation_residual_rad ?? null,
+      max_orientation_residual_frame: maximumOrientationResidualFrame?.frame_index ?? null,
+      mean_joint_delta_norm: getFiniteMean(jointDeltaNorms),
+      max_joint_delta_norm: maximumJointDeltaFrame?.joint_delta_norm ?? null,
+      max_joint_delta_norm_frame: maximumJointDeltaFrame?.frame_index ?? null,
+      max_single_joint_step: maximumSingleJointStepFrame
+        ? {
+            ...maximumSingleJointStepFrame.max_single_joint_delta,
+            magnitude_rad: Math.abs(maximumSingleJointStepFrame.max_single_joint_delta.value),
+            frame_index: maximumSingleJointStepFrame.frame_index,
+          }
         : null,
-      max_position_residual_m: positionResiduals.length ? Math.max(...positionResiduals) : null,
-      mean_orientation_residual_rad: orientationResiduals.length
-        ? orientationResiduals.reduce((sum, value) => sum + value, 0) / orientationResiduals.length
-        : null,
-      max_orientation_residual_rad: orientationResiduals.length
-        ? Math.max(...orientationResiduals)
-        : null,
-      mean_joint_delta_norm: jointDeltaNorms.length
-        ? jointDeltaNorms.reduce((sum, value) => sum + value, 0) / jointDeltaNorms.length
-        : null,
-      max_joint_delta_norm: jointDeltaNorms.length ? Math.max(...jointDeltaNorms) : null,
-      max_single_joint_step: maximumSingleJointStepFrame.max_single_joint_delta,
-      max_single_joint_step_frame: maximumSingleJointStepFrame.frame_index,
+      max_single_joint_step_frame: maximumSingleJointStepFrame?.frame_index ?? null,
       joint_limit_violation_count: report.frames.filter(
         (frame) => frame.joint_limit_violations.length > 0,
       ).length,
+      joint_limit_violation_joint_count: report.frames.reduce(
+        (count, frame) => count + frame.joint_limit_violations.length,
+        0,
+      ),
       nan_inf_count: report.frames.filter((frame) => frame.non_finite_fields.length > 0).length,
       first_failure_frame: failureRecord?.frame.frame_index ?? null,
-      max_joint_jump_frame: maximumJump?.frame_index ?? null,
+      max_joint_jump_frame: maximumJointDeltaFrame?.frame_index ?? null,
+      tcp_target_position_min_m: alignedTcpWorkspace.min_m,
+      tcp_target_position_max_m: alignedTcpWorkspace.max_m,
+      tcp_workspace_bounding_box_m: alignedTcpWorkspace,
+      per_joint_statistics: perJointStatistics,
+      closest_joint_limit: closestJointLimit,
+      trajectory_transform_consistency: report.continuity_summary,
+      regression_comparison: {
+        baseline_report: BASELINE_REPORT_PATH,
+        frame_indices: REGRESSION_FRAME_INDICES,
+        tolerance: REGRESSION_TOLERANCE,
+        complete: regressionComplete,
+        passed: regressionComplete ? regressionPassed : null,
+        frames: regressionComparison,
+      },
     };
 
     if (failureRecord) {
+      const incomingStep = failureRecord.incomingContinuityCheck
+        ? {
+            dataset_translation_m:
+              failureRecord.incomingContinuityCheck.dataset_position_delta_norm_m,
+            dataset_rotation_rad: failureRecord.incomingContinuityCheck.dataset_rotation_delta_rad,
+            aligned_translation_m:
+              failureRecord.incomingContinuityCheck.aligned_position_delta_norm_m,
+            aligned_rotation_rad: failureRecord.incomingContinuityCheck.aligned_rotation_delta_rad,
+            transform_position_delta_error_m:
+              failureRecord.incomingContinuityCheck.position_delta_norm_error_m,
+            transform_rotation_delta_error_rad:
+              failureRecord.incomingContinuityCheck.rotation_delta_error_rad,
+          }
+        : null;
+      const incomingStepIsLarge =
+        incomingStep !== null &&
+        (incomingStep.dataset_translation_m > largeStepThresholds.translation_m ||
+          incomingStep.dataset_rotation_rad > largeStepThresholds.rotation_rad);
       const diagnosticResults = makeDiagnosticSeeds(
         failureRecord.seed,
         initialJoints,
@@ -557,32 +888,73 @@ const run = async () => {
       });
       report.failure_diagnostic = {
         frame_index: failureRecord.frame.frame_index,
+        formal_sequential_result: 'failure; this frame does not advance the formal seed',
         dataset_pose: {
           position: failureRecord.frame.position,
           rotation_vector: failureRecord.frame.rotation_vector,
         },
+        previous_dataset_pose:
+          failureRecord.index > 0
+            ? {
+                position: dataset.frames[failureRecord.index - 1].position,
+                rotation_vector: dataset.frames[failureRecord.index - 1].rotation_vector,
+              }
+            : null,
         aligned_target_pose: failureRecord.targetPose,
         previous_target_pose:
           failureRecord.index > 0 ? matrixToPose(targetMatrices[failureRecord.index - 1]) : null,
+        incoming_step: incomingStep,
+        incoming_step_is_large: incomingStepIsLarge,
+        incoming_step_thresholds: largeStepThresholds,
         seed_joints: getJointValues(failureRecord.seed, jointNames),
         solution_joints: getJointValues(failureRecord.result.jointValues, jointNames),
+        joint_delta: failureRecord.record.joint_deltas,
+        joint_delta_norm: failureRecord.record.joint_delta_norm,
+        max_single_joint_delta: failureRecord.record.max_single_joint_delta,
         position_residual_m: failureRecord.result.residual.position,
         orientation_residual_rad: failureRecord.result.residual.orientation,
         termination_reason: failureRecord.result.terminationReason,
         blocked_joints: failureRecord.result.blockedJoints,
+        joint_limit_violations: failureRecord.record.joint_limit_violations,
+        seed_joint_limit_margins: getJointLimitMargins(failureRecord.seed, jointLimits),
+        solution_joint_limit_margins: failureRecord.record.joint_limit_margins,
+        non_finite_fields: failureRecord.record.non_finite_fields,
         joint_limits: jointLimits,
         solver_trace: failureRecord.iterationTrace,
+        diagnostic_multi_seed_policy:
+          'diagnostic only; results never replace the formal sequential result',
         diagnostic_multi_seed: diagnosticResults,
         cause_assessment: summarizeFailure(
           failureRecord.result,
           failureRecord.targetPose,
           reachBound,
           diagnosticResults,
+          {
+            transform_consistency_passed: report.continuity_summary.passed,
+            transform_consistency: report.continuity_summary,
+            incoming_step: incomingStep,
+            incoming_step_is_large: incomingStepIsLarge,
+            large_step_thresholds: largeStepThresholds,
+            joint_limit_violations: failureRecord.record.joint_limit_violations,
+          },
         ),
       };
       report.status = 'stopped_ik_failure';
     } else {
       report.status = 'complete';
+    }
+
+    if (
+      !failureRecord &&
+      report.summary.regression_comparison.complete &&
+      !report.summary.regression_comparison.passed
+    ) {
+      report.status = 'stopped_regression_mismatch';
+      report.failure_diagnostic = {
+        possible_cause:
+          '同一输入在 Phase 2A 与 Phase 2B-1 得到不同数值结果；需先调查 deterministic/state 差异',
+        regression_comparison: report.summary.regression_comparison,
+      };
     }
 
     await writeReport(report);

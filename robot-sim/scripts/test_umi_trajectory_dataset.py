@@ -1,4 +1,4 @@
-# 只读导出官方 UMI episode 0 的前 100 帧 TCP pose。
+# 只读导出官方 UMI episode 0 的前 400 帧 TCP pose。
 import json
 import math
 import sys
@@ -15,7 +15,7 @@ DATASET_PATH = (
     / "data"
     / "cup_in_the_wild.zarr.zip"
 )
-FRAME_COUNT = 100
+FRAME_COUNT = 400
 
 
 def json_number(value):
@@ -33,7 +33,7 @@ def main():
         root = zarr.open_group(store=store, mode="r")
         episode_ends = np.asarray(root["meta/episode_ends"])
         if episode_ends.size == 0 or int(episode_ends[0]) < FRAME_COUNT:
-            raise ValueError("episode 0 少于 100 帧")
+            raise ValueError("episode 0 少于 400 帧")
 
         data = root["data"]
         positions = np.asarray(data["robot0_eef_pos"][:FRAME_COUNT])
