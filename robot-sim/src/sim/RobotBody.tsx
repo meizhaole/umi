@@ -33,6 +33,7 @@ interface RobotBodyProps {
   mode: ControlMode;
   onJointState: (values: JointValues) => void;
   onWrist3DebugState: (state: Wrist3PhysicsDebugState | null) => void;
+  onWrist3ExperimentComplete: (trace: Wrist3ExperimentTrace) => void;
   onReady: (ready: boolean) => void;
 }
 
@@ -71,6 +72,44 @@ export interface Wrist3PhysicsDebugState {
   jointHandle: number;
   parentBodyHandle: number;
   childBodyHandle: number;
+}
+
+export type Wrist3ExperimentSource = 'MANUAL' | 'REPLAY';
+
+export interface Wrist3ExperimentRecord {
+  controlSource: Wrist3ExperimentSource;
+  physicsStep: number;
+  uiTarget: number | null;
+  jointValuesStateTarget: number | null;
+  jointControllerTarget: number | null;
+  motorCalls: Array<{
+    absoluteCommand: number;
+    target: number;
+    stiffness: number;
+    damping: number;
+  }>;
+  rigidBodyStateCalls: Array<{
+    linkName: 'wrist_2_link' | 'wrist_3_link';
+    api: 'setBodyType' | 'setNextKinematicTranslation' | 'setNextKinematicRotation';
+    value: unknown;
+  }>;
+  qReadback: number | null;
+  qBody: number | null;
+}
+
+export interface Wrist3ExperimentTrace {
+  controlSource: Wrist3ExperimentSource;
+  target: number;
+  stepsToRecord: number;
+  active: boolean;
+  completed: boolean;
+  controllerTarget: number | null;
+  controllerWrites: string[];
+  reactStateWrites: string[];
+  modelWrites: string[];
+  refWrites: string[];
+  currentStep: Wrist3ExperimentRecord | null;
+  records: Wrist3ExperimentRecord[];
 }
 
 interface BodyFrame {
@@ -137,6 +176,8 @@ declare global {
       samples: Phase2B23Sample[];
     };
     __ROBOT_SIM_PHASE2B24__?: Phase2B24Trace;
+    __ROBOT_SIM_WRIST3_AB__?: Wrist3ExperimentTrace;
+    __ROBOT_SIM_WRIST3_AB_HISTORY__?: Wrist3ExperimentTrace[];
   }
 }
 
@@ -183,6 +224,22 @@ const recordPhase2B24MotorWrite = (
   }
 };
 
+const recordWrist3RigidBodyStateCall = (
+  linkName: string,
+  api: Wrist3ExperimentRecord['rigidBodyStateCalls'][number]['api'],
+  value: unknown,
+): void => {
+  if (
+    typeof window === 'undefined' ||
+    (linkName !== 'wrist_2_link' && linkName !== 'wrist_3_link')
+  ) {
+    return;
+  }
+  const experiment = window.__ROBOT_SIM_WRIST3_AB__;
+  if (!experiment?.active || !experiment.currentStep) return;
+  experiment.currentStep.rigidBodyStateCalls.push({ linkName, api, value });
+};
+
 const writePositionMotor = (
   joint: JointMotor,
   jointName: string,
@@ -217,6 +274,15 @@ const writePositionMotor = (
     },
     initialPosition,
   );
+  if (jointName === 'wrist_3_joint' && typeof window !== 'undefined') {
+    const experiment = window.__ROBOT_SIM_WRIST3_AB__;
+    experiment?.currentStep?.motorCalls.push({
+      absoluteCommand,
+      target: relativeTarget,
+      stiffness,
+      damping,
+    });
+  }
   onBeforeSet?.(relativeTarget);
   joint.configureMotorPosition(relativeTarget, stiffness, damping);
 };
@@ -508,7 +574,17 @@ const setKinematicBodies = (
     if (!pose) return;
     const converted = worldPose(pose);
     converted.rotation.multiply(frame.robotToBodyRotation);
+    recordWrist3RigidBodyStateCall(
+      link.name,
+      'setNextKinematicTranslation',
+      vectorObject(converted.position),
+    );
     frame.body.setNextKinematicTranslation(vectorObject(converted.position));
+    recordWrist3RigidBodyStateCall(
+      link.name,
+      'setNextKinematicRotation',
+      rotationObject(converted.rotation),
+    );
     frame.body.setNextKinematicRotation(rotationObject(converted.rotation));
     const joint = jointsByChild.get(link.name);
     if (joint?.mimic) return;
@@ -525,13 +601,16 @@ const setRobotPositionControl = (
     if (!frame.isDynamicLink) return;
     if (lockedLinkNames.has(linkName)) {
       if (!frame.body.isKinematic()) {
+        recordWrist3RigidBodyStateCall(linkName, 'setBodyType', 'KinematicPositionBased');
         frame.body.setBodyType(rapier.RigidBodyType.KinematicPositionBased, true);
       }
       return;
     }
     if (enabled && frame.body.isDynamic()) {
+      recordWrist3RigidBodyStateCall(linkName, 'setBodyType', 'KinematicPositionBased');
       frame.body.setBodyType(rapier.RigidBodyType.KinematicPositionBased, true);
     } else if (!enabled && !frame.body.isDynamic()) {
+      recordWrist3RigidBodyStateCall(linkName, 'setBodyType', 'Dynamic');
       frame.body.setBodyType(rapier.RigidBodyType.Dynamic, true);
     }
   });
@@ -679,37 +758,30 @@ const getWrist3PhysicsDebugState = (
   let anchorErrorM: number | null = null;
 
   if (bodyMotion) {
-    const parentBodyRotation = new Quaternion().fromArray(
-      bodyMotion.parent_body_world_quaternion,
-    );
-    const childBodyRotation = new Quaternion().fromArray(
-      bodyMotion.child_body_world_quaternion,
-    );
+    const parentBodyRotation = new Quaternion().fromArray(bodyMotion.parent_body_world_quaternion);
+    const childBodyRotation = new Quaternion().fromArray(bodyMotion.child_body_world_quaternion);
     const parentJointFrame = parentBodyRotation
       .clone()
       .multiply(new Quaternion().fromArray(bodyMotion.frameX1));
     const childJointFrame = childBodyRotation
       .clone()
       .multiply(new Quaternion().fromArray(bodyMotion.frameX2));
-    const parentWorldAxis = new Vector3(1, 0, 0)
-      .applyQuaternion(parentJointFrame)
-      .normalize();
-    const childWorldAxis = new Vector3(1, 0, 0)
-      .applyQuaternion(childJointFrame)
-      .normalize();
-    swingErrorRad = Math.acos(
-      Math.max(-1, Math.min(1, parentWorldAxis.dot(childWorldAxis))),
-    );
+    const parentWorldAxis = new Vector3(1, 0, 0).applyQuaternion(parentJointFrame).normalize();
+    const childWorldAxis = new Vector3(1, 0, 0).applyQuaternion(childJointFrame).normalize();
+    swingErrorRad = Math.acos(Math.max(-1, Math.min(1, parentWorldAxis.dot(childWorldAxis))));
 
     if (parentAnchor && childAnchor) {
       const parentPosition = entry.parent.translation();
       const childPosition = entry.child.translation();
-      const parentAnchorWorld = new Vector3(parentPosition.x, parentPosition.y, parentPosition.z)
-        .add(
-          new Vector3(parentAnchor.x, parentAnchor.y, parentAnchor.z).applyQuaternion(
-            parentBodyRotation,
-          ),
-        );
+      const parentAnchorWorld = new Vector3(
+        parentPosition.x,
+        parentPosition.y,
+        parentPosition.z,
+      ).add(
+        new Vector3(parentAnchor.x, parentAnchor.y, parentAnchor.z).applyQuaternion(
+          parentBodyRotation,
+        ),
+      );
       const childAnchorWorld = new Vector3(childPosition.x, childPosition.y, childPosition.z).add(
         new Vector3(childAnchor.x, childAnchor.y, childAnchor.z).applyQuaternion(childBodyRotation),
       );
@@ -721,11 +793,7 @@ const getWrist3PhysicsDebugState = (
   return {
     readback: measured.wrist_3_joint ?? null,
     bodyAngle: bodyMotion?.q_body ?? null,
-    childAngularVelocity: [
-      childAngularVelocity.x,
-      childAngularVelocity.y,
-      childAngularVelocity.z,
-    ],
+    childAngularVelocity: [childAngularVelocity.x, childAngularVelocity.y, childAngularVelocity.z],
     swingErrorRad,
     anchorErrorM,
     jointHandle: entry.joint.handle,
@@ -778,6 +846,7 @@ export const RobotBody = ({
   mode,
   onJointState,
   onWrist3DebugState,
+  onWrist3ExperimentComplete,
   onReady,
 }: RobotBodyProps) => {
   const { world, rapier } = useRapier();
@@ -1163,6 +1232,32 @@ export const RobotBody = ({
     const values = latestValues.current;
     const activeMode = latestMode.current;
     const activeCommands = latestCommands.current;
+    if (typeof window !== 'undefined') {
+      const experiment = window.__ROBOT_SIM_WRIST3_AB__;
+      const expectedExecution =
+        experiment?.controlSource === 'MANUAL' ? 'kinematic_fk' : 'joint_motors';
+      if (
+        experiment?.active &&
+        experiment.records.length < experiment.stepsToRecord &&
+        positionExecution === expectedExecution &&
+        activeCommands.wrist_3_joint?.mode === 'position' &&
+        activeCommands.wrist_3_joint.value === experiment.target
+      ) {
+        experiment.currentStep = {
+          controlSource: experiment.controlSource,
+          physicsStep: experiment.records.length + 1,
+          uiTarget: activeCommands.wrist_3_joint.value,
+          jointValuesStateTarget: values.wrist_3_joint ?? null,
+          jointControllerTarget: experiment.controllerTarget,
+          motorCalls: [],
+          rigidBodyStateCalls: [],
+          qReadback: null,
+          qBody: null,
+        };
+      } else if (experiment?.active) {
+        experiment.currentStep = null;
+      }
+    }
     const positionControl = activeMode === 'position' && positionExecution === 'kinematic_fk';
     setRobotPositionControl(rapier, bodies.current, positionControl, lockedLinkNames);
     const commandSignature = JSON.stringify({ mode: activeMode, commands: activeCommands });
@@ -1261,6 +1356,23 @@ export const RobotBody = ({
   useBeforePhysicsStep(applyCommands);
   useAfterPhysicsStep(() => {
     const now = performance.now();
+    if (typeof window !== 'undefined') {
+      const experiment = window.__ROBOT_SIM_WRIST3_AB__;
+      const sample = experiment?.currentStep;
+      if (experiment?.active && sample) {
+        const measured = readJointState(joints.current);
+        const wrist3 = joints.current.find((entry) => entry.description.name === 'wrist_3_joint');
+        sample.qReadback = measured.wrist_3_joint ?? null;
+        sample.qBody = wrist3 ? (getRapierJointFrameMotion(wrist3)?.q_body ?? null) : null;
+        experiment.records.push(sample);
+        experiment.currentStep = null;
+        if (experiment.records.length >= experiment.stepsToRecord) {
+          experiment.active = false;
+          experiment.completed = true;
+          onWrist3ExperimentComplete(experiment);
+        }
+      }
+    }
     const phase2b24Trace =
       diagnostics?.traceMotorWrites && typeof window !== 'undefined'
         ? window.__ROBOT_SIM_PHASE2B24__

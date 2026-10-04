@@ -44,7 +44,7 @@ import {
 } from './datasetReplay';
 import { DatasetReplayPanel, type DatasetReplayState } from '../ui/DatasetReplayPanel';
 import { Wrist3PhysicsDebugPanel } from '../ui/Wrist3PhysicsDebugPanel';
-import type { Wrist3PhysicsDebugState } from '../sim/RobotBody';
+import type { Wrist3ExperimentTrace, Wrist3PhysicsDebugState } from '../sim/RobotBody';
 
 interface LoadedRobot {
   description: RobotDescription;
@@ -64,6 +64,8 @@ const REPLAY_STABLE_SAMPLE_COUNT = 3;
 const REPLAY_NO_MOTION_TIMEOUT_MS = 1500;
 const REPLAY_NO_MOTION_THRESHOLD_RAD = 0.0001;
 const REPLAY_STEP_TIMEOUT_MS = 15000;
+const WRIST3_AB_TARGET = 0.101814692820414;
+const WRIST3_AB_STEPS = Math.round(2 / SIMULATION_CONFIG.fixedTimeStep);
 
 interface DatasetReplayStepRecord {
   frame_index: number;
@@ -147,6 +149,10 @@ export const App = () => {
   const [physicsReady, setPhysicsReady] = useState(false);
   const [wrist3PhysicsDebugState, setWrist3PhysicsDebugState] =
     useState<Wrist3PhysicsDebugState | null>(null);
+  const [wrist3ExperimentStatus, setWrist3ExperimentStatus] = useState('READY');
+  const [wrist3ExperimentResults, setWrist3ExperimentResults] = useState<
+    Partial<Record<'MANUAL' | 'REPLAY', { qBody: number | null; steps: number }>>
+  >({});
   const [datasetReplayReport, setDatasetReplayReport] = useState<DatasetReplayReport | null>(null);
   const [datasetReplayEnabled, setDatasetReplayEnabled] = useState(false);
   const [datasetReplayLoading, setDatasetReplayLoading] = useState(false);
@@ -188,6 +194,27 @@ export const App = () => {
         ? commands.wrist_3_joint.value
         : (jointValues.wrist_3_joint ?? null)
       : null;
+  const wrist3AtZero =
+    Math.abs(wrist3PhysicsDebugState?.readback ?? Number.POSITIVE_INFINITY) < 0.005 &&
+    Math.abs(wrist3PhysicsDebugState?.bodyAngle ?? Number.POSITIVE_INFINITY) < 0.005 &&
+    Math.hypot(
+      ...(wrist3PhysicsDebugState?.childAngularVelocity ?? [Infinity, Infinity, Infinity]),
+    ) < 0.01;
+
+  useEffect(() => {
+    if (wrist3ExperimentStatus === 'RESETTING' && wrist3AtZero) {
+      setWrist3ExperimentStatus('READY AT ZERO');
+    }
+  }, [wrist3AtZero, wrist3ExperimentStatus]);
+
+  const handleWrist3ExperimentComplete = useCallback((trace: Wrist3ExperimentTrace) => {
+    const finalSample = trace.records[trace.records.length - 1];
+    setWrist3ExperimentResults((current) => ({
+      ...current,
+      [trace.controlSource]: { qBody: finalSample?.qBody ?? null, steps: trace.records.length },
+    }));
+    setWrist3ExperimentStatus(`${trace.controlSource} COMPLETE`);
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -402,21 +429,75 @@ export const App = () => {
     publishDebugEvent('control:mode', { mode: nextMode });
   };
 
-  const commandJoint = (jointName: string, value: number) => {
-    if (!loadedRobot || inference.isLocked) return;
+  const commandJoint = (jointName: string, value: number): number | null => {
+    if (!loadedRobot || inference.isLocked) return null;
     try {
       const command = loadedRobot.controller.setCommand(jointName, value);
       setCommands(loadedRobot.controller.getCommands());
+      const experiment = typeof window === 'undefined' ? undefined : window.__ROBOT_SIM_WRIST3_AB__;
+      if (
+        experiment?.active &&
+        experiment.controlSource === 'MANUAL' &&
+        jointName === 'wrist_3_joint'
+      ) {
+        experiment.controllerTarget = loadedRobot.controller.getCommand(jointName)?.value ?? null;
+        experiment.controllerWrites.push('JointController.setCommand(wrist_3_joint)');
+        experiment.reactStateWrites.push('App.commands');
+      }
       if (command.mode === 'position') {
         loadedRobot.model.setJointValue(jointName, command.value);
         const nextValues = loadedRobot.model.getJointValues();
         setJointValues(nextValues);
+        if (
+          experiment?.active &&
+          experiment.controlSource === 'MANUAL' &&
+          jointName === 'wrist_3_joint'
+        ) {
+          experiment.modelWrites.push('RobotModel.setJointValue(wrist_3_joint)');
+          experiment.reactStateWrites.push('App.jointValues');
+        }
         publishDebugEvent('joint:command', { joint: jointName, ...command });
       } else {
         publishDebugEvent('joint:command', { joint: jointName, ...command });
       }
+      return command.value;
     } catch (error) {
       setIkMessage(error instanceof Error ? error.message : String(error));
+      return null;
+    }
+  };
+
+  const startWrist3Experiment = (controlSource: 'MANUAL' | 'REPLAY'): Wrist3ExperimentTrace => {
+    const trace: Wrist3ExperimentTrace = {
+      controlSource,
+      target: WRIST3_AB_TARGET,
+      stepsToRecord: WRIST3_AB_STEPS,
+      active: true,
+      completed: false,
+      controllerTarget: null,
+      controllerWrites: [],
+      reactStateWrites: [],
+      modelWrites: [],
+      refWrites: [],
+      currentStep: null,
+      records: [],
+    };
+    if (typeof window !== 'undefined') {
+      window.__ROBOT_SIM_WRIST3_AB__ = trace;
+      window.__ROBOT_SIM_WRIST3_AB_HISTORY__ ??= [];
+      window.__ROBOT_SIM_WRIST3_AB_HISTORY__.push(trace);
+    }
+    setWrist3ExperimentStatus(`RECORDING ${controlSource}`);
+    return trace;
+  };
+
+  const handleManualWrist3Test = () => {
+    if (!loadedRobot || !canManualWrist3Test) return;
+    const trace = startWrist3Experiment('MANUAL');
+    const appliedTarget = commandJoint('wrist_3_joint', WRIST3_AB_TARGET);
+    if (appliedTarget !== WRIST3_AB_TARGET) {
+      trace.active = false;
+      setWrist3ExperimentStatus('MANUAL COMMAND FAILED');
     }
   };
 
@@ -424,6 +505,15 @@ export const App = () => {
     if (!loadedRobot) return;
     loadedRobot.model.setJointValues(values);
     setJointValues(loadedRobot.model.getJointValues());
+    const experiment = typeof window === 'undefined' ? undefined : window.__ROBOT_SIM_WRIST3_AB__;
+    if (experiment?.active) {
+      if (!experiment.modelWrites.includes('RobotModel.setJointValues (physics readback)')) {
+        experiment.modelWrites.push('RobotModel.setJointValues (physics readback)');
+      }
+      if (!experiment.reactStateWrites.includes('App.jointValues (physics readback)')) {
+        experiment.reactStateWrites.push('App.jointValues (physics readback)');
+      }
+    }
   };
 
   const writeDatasetReplaySnapshot = (
@@ -515,6 +605,28 @@ export const App = () => {
       maximum_joint_tracking_error_joint: '',
       samples: [],
     };
+    const wrist3Experiment =
+      typeof window === 'undefined' ? undefined : window.__ROBOT_SIM_WRIST3_AB__;
+    if (wrist3Experiment?.active && wrist3Experiment.controlSource === 'REPLAY') {
+      wrist3Experiment.controllerTarget =
+        loadedRobot.controller.getCommand('wrist_3_joint')?.value ?? null;
+      wrist3Experiment.controllerWrites.push(
+        'JointController.setMode(position)',
+        ...jointNames.map((name) => `JointController.setCommand(${name})`),
+      );
+      wrist3Experiment.reactStateWrites.push(
+        'App.mode',
+        'App.commands',
+        'App.isRunning',
+        'App.datasetReplayFrameIndex',
+        'App.datasetReplayState',
+        'App.datasetReplayError',
+      );
+      wrist3Experiment.refWrites.push(
+        'datasetReplayMotionRef.current',
+        'window.__ROBOT_SIM_DATASET_REPLAY__',
+      );
+    }
     writeDatasetReplaySnapshot(frameIndex, 'MOVING', report.frames);
     publishDebugEvent('dataset_replay:command', {
       episode_index: 0,
@@ -528,6 +640,68 @@ export const App = () => {
       physics_ready: physicsReady,
       position_execution: 'joint_motors',
     });
+  };
+
+  const experimentRecording = wrist3ExperimentStatus.startsWith('RECORDING');
+  const canManualWrist3Test = Boolean(
+    loadedRobot &&
+    modelId === 'UR5' &&
+    physicsReady &&
+    isRunning &&
+    mode === 'position' &&
+    !datasetReplayEnabled &&
+    !inference.isLocked &&
+    !experimentRecording &&
+    wrist3AtZero,
+  );
+  const canReplayWrist3Test = Boolean(
+    loadedRobot &&
+    modelId === 'UR5' &&
+    physicsReady &&
+    isRunning &&
+    datasetReplayReport &&
+    (!datasetReplayEnabled || datasetReplayState === 'IDLE' || datasetReplayState === 'SETTLED') &&
+    !inference.isLocked &&
+    !experimentRecording &&
+    wrist3AtZero,
+  );
+  const canResetWrist3 = Boolean(
+    loadedRobot &&
+    physicsReady &&
+    isRunning &&
+    mode === 'position' &&
+    !inference.isLocked &&
+    !experimentRecording &&
+    (!datasetReplayEnabled || (datasetReplayState !== 'MOVING' && Boolean(datasetReplayReport))),
+  );
+
+  const handleWrist3Reset = () => {
+    if (!canResetWrist3) return;
+    setWrist3ExperimentStatus('RESETTING');
+    if (datasetReplayEnabled) exitDatasetReplay();
+    commandJoint('wrist_3_joint', 0);
+  };
+
+  const handleReplayWrist3Test = () => {
+    if (!datasetReplayReport || !canReplayWrist3Test) return;
+    const frames = datasetReplayReport.frames.map((frame, index) =>
+      index === 0
+        ? {
+            ...frame,
+            ik_solution_joints: {
+              ...frame.ik_solution_joints,
+              wrist_3_joint: WRIST3_AB_TARGET,
+            },
+          }
+        : frame,
+    );
+    const testReport: DatasetReplayReport = { ...datasetReplayReport, frames };
+    const trace = startWrist3Experiment('REPLAY');
+    if (!datasetReplayEnabled) {
+      setDatasetReplayEnabled(true);
+      trace.reactStateWrites.push('App.datasetReplayEnabled');
+    }
+    commandDatasetReplayFrame(testReport, 0);
   };
 
   const loadDatasetReplay = async () => {
@@ -912,7 +1086,9 @@ export const App = () => {
             <button
               className={model.id === modelId ? 'model-tab active' : 'model-tab'}
               key={model.id}
-              disabled={inference.isLocked || datasetReplayState === 'MOVING'}
+              disabled={
+                inference.isLocked || datasetReplayState === 'MOVING' || experimentRecording
+              }
               onClick={() => setModelId(model.id)}
               type="button"
             >
@@ -951,6 +1127,7 @@ export const App = () => {
             canStep={
               Boolean(loadedRobot && physicsReady && !loadError) &&
               !datasetReplayEnabled &&
+              !experimentRecording &&
               (!inference.isLocked || inference.status === 'waiting')
             }
             error={inference.error}
@@ -973,7 +1150,8 @@ export const App = () => {
                 modelId === 'UR5' &&
                 physicsReady &&
                 !loadError &&
-                !inference.isLocked,
+                !inference.isLocked &&
+                !experimentRecording,
               )}
               currentFrame={datasetReplayFrameIndex}
               error={datasetReplayError}
@@ -1030,11 +1208,11 @@ export const App = () => {
             mode={mode}
             onCommand={commandJoint}
             onModeChange={setControlMode}
-            disabled={inference.isLocked || datasetReplayEnabled}
+            disabled={inference.isLocked || datasetReplayEnabled || experimentRecording}
           />
 
           <TaskPanel
-            disabled={inference.isLocked || datasetReplayEnabled}
+            disabled={inference.isLocked || datasetReplayEnabled || experimentRecording}
             ikMessage={ikMessage}
             ikResult={ikResult}
             onSolveIk={solveIk}
@@ -1063,7 +1241,9 @@ export const App = () => {
               <button
                 className="icon-button"
                 title={isRunning ? '暂停仿真' : '运行仿真'}
-                disabled={inference.isLocked || datasetReplayState === 'MOVING'}
+                disabled={
+                  inference.isLocked || datasetReplayState === 'MOVING' || experimentRecording
+                }
                 onClick={() => setIsRunning(!isRunning)}
                 type="button"
               >
@@ -1071,7 +1251,7 @@ export const App = () => {
               </button>
               <button
                 className="icon-button"
-                disabled={inference.isLocked || datasetReplayEnabled}
+                disabled={inference.isLocked || datasetReplayEnabled || experimentRecording}
                 title="重置关节"
                 onClick={() => {
                   if (!loadedRobot) return;
@@ -1131,6 +1311,7 @@ export const App = () => {
                 modelId={modelId}
                 onJointState={updatePhysicsState}
                 onWrist3DebugState={setWrist3PhysicsDebugState}
+                onWrist3ExperimentComplete={handleWrist3ExperimentComplete}
                 onPhysicsReady={setPhysicsReady}
                 playback={inference.playback}
                 inferenceActive={inference.isLocked}
@@ -1188,6 +1369,14 @@ export const App = () => {
         <Wrist3PhysicsDebugPanel
           commandValue={wrist3CommandValue}
           state={wrist3PhysicsDebugState}
+          canReset={canResetWrist3}
+          canManualTest={canManualWrist3Test}
+          canReplayTest={canReplayWrist3Test}
+          experimentStatus={wrist3ExperimentStatus}
+          experimentResults={wrist3ExperimentResults}
+          onReset={handleWrist3Reset}
+          onManualTest={handleManualWrist3Test}
+          onReplayTest={handleReplayWrist3Test}
         />
       ) : null}
     </main>

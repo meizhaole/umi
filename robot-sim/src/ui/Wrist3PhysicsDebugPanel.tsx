@@ -3,6 +3,14 @@ import type { Wrist3PhysicsDebugState } from '../sim/RobotBody';
 interface Wrist3PhysicsDebugPanelProps {
   commandValue: number | null;
   state: Wrist3PhysicsDebugState | null;
+  canReset: boolean;
+  canManualTest: boolean;
+  canReplayTest: boolean;
+  experimentStatus: string;
+  experimentResults: Partial<Record<'MANUAL' | 'REPLAY', { qBody: number | null; steps: number }>>;
+  onReset: () => void;
+  onManualTest: () => void;
+  onReplayTest: () => void;
 }
 
 const formatNumber = (value: number | null, digits = 6): string =>
@@ -14,6 +22,14 @@ const formatVector = (values: [number, number, number] | undefined): string =>
 export const Wrist3PhysicsDebugPanel = ({
   commandValue,
   state,
+  canReset,
+  canManualTest,
+  canReplayTest,
+  experimentStatus,
+  experimentResults,
+  onReset,
+  onManualTest,
+  onReplayTest,
 }: Wrist3PhysicsDebugPanelProps) => {
   const bodyAngle = state?.bodyAngle ?? null;
   const error = commandValue !== null && bodyAngle !== null ? commandValue - bodyAngle : null;
@@ -89,6 +105,49 @@ export const Wrist3PhysicsDebugPanel = ({
             <output>{handle.value ?? '—'}</output>
           </div>
         ))}
+      </div>
+
+      <div className="wrist3-ab-controls">
+        <div className="wrist3-ab-status">
+          <b>A/B EXPERIMENT</b>
+          <span>{experimentStatus}</span>
+        </div>
+        {(['MANUAL', 'REPLAY'] as const).map((source) => {
+          const result = experimentResults[source];
+          return result ? (
+            <div className="wrist3-ab-result" key={source}>
+              {source} FINAL q_body ({result.steps} steps)
+              <output>{formatNumber(result.qBody)} rad</output>
+            </div>
+          ) : null;
+        })}
+        <button
+          className="wrist3-reset-button"
+          disabled={!canReset}
+          onClick={onReset}
+          type="button"
+        >
+          RESET WRIST 3
+        </button>
+        <button
+          className="wrist3-manual-test-button"
+          disabled={!canManualTest}
+          onClick={onManualTest}
+          type="button"
+        >
+          MANUAL TEST +0.1018147
+        </button>
+        <button
+          className="wrist3-replay-test-button"
+          disabled={!canReplayTest}
+          onClick={onReplayTest}
+          type="button"
+        >
+          REPLAY TEST +0.1018147
+        </button>
+        <small>
+          Each test records 120 physics steps (2.00 s) in window.__ROBOT_SIM_WRIST3_AB__.
+        </small>
       </div>
     </section>
   );

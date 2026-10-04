@@ -9,7 +9,11 @@ import type { PlaybackChunk } from '../app/inferenceProtocol';
 import type { ControlMode, JointCommand, JointValues, RobotDescription } from '../core/types';
 import { PhysicsWorld } from '../sim/PhysicsWorld';
 import { OfficialCupArrangementScene, type CupBodyRef } from '../sim/tasks/CupArrangementScene';
-import { RobotBody, type Wrist3PhysicsDebugState } from '../sim/RobotBody';
+import {
+  RobotBody,
+  type Wrist3ExperimentTrace,
+  type Wrist3PhysicsDebugState,
+} from '../sim/RobotBody';
 import { publishDebugEvent } from '../app/debugBus';
 import { URDFViewer } from './URDFViewer';
 import { DEBUG_LAYER, setDebugLayer } from './sceneLayers';
@@ -38,6 +42,7 @@ interface SceneManagerProps {
   tcpPose: Pose;
   onCameraFrame: (frame: SimCameraFrame) => void;
   onWrist3DebugState: (state: Wrist3PhysicsDebugState | null) => void;
+  onWrist3ExperimentComplete: (trace: Wrist3ExperimentTrace) => void;
 }
 
 const PLAYBACK_ACTION_SECONDS = 0.5;
@@ -201,6 +206,7 @@ export const SceneManager = ({
   cameraEnabled,
   tcpPose,
   onCameraFrame,
+  onWrist3ExperimentComplete,
 }: SceneManagerProps) => {
   const model = findRobotConfig(modelId);
   const diagnosticQuery = new URLSearchParams(
@@ -327,6 +333,7 @@ export const SceneManager = ({
           mode={mode}
           onJointState={onJointState}
           onWrist3DebugState={onWrist3DebugState}
+          onWrist3ExperimentComplete={onWrist3ExperimentComplete}
           onReady={handlePhysicsReady}
         />
       </Physics>

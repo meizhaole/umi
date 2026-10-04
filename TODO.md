@@ -33,7 +33,7 @@
 - [x] 隔离 UR5 TCP 调试标记与辅助线，腕部相机仅渲染仿真层
 - [x] 对 UR5 frame 0 执行重力与碰撞 A/B/C 诊断
 - [x] 为 wrist_3_joint 增加独立 Rapier 物理调试面板
-- [ ] 完成 UMI episode 0 UR5 Rapier motor 回放；Phase 2B-2.4 确认 wrist_3 setter 目标保持 +0.1018 rad，但刚体相对角与读回均衰减至零，待 Rapier motor/constraint 诊断
+- [x] 完成 wrist_3_joint Manual Control 与 dataset single-frame Replay 同目标 A/B 实验并记录 120 个 physics step
 - [ ] 将本机训练 checkpoint 接入 Gazebo 回放启动参数
 - [ ] 接通 Gazebo 相机与 UMI 推理观测
 - [ ] 将实时 UMI 策略接入 ReBot RS 实机控制链路

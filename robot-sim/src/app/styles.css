@@ -968,6 +968,68 @@ button {
   font-size: 12px;
   font-weight: 700;
 }
+.wrist3-ab-controls {
+  display: grid;
+  gap: 8px;
+  margin-top: 13px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(154, 183, 201, 0.3);
+}
+.wrist3-ab-status,
+.wrist3-ab-result {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  font-weight: 800;
+}
+.wrist3-ab-status b {
+  color: #a9bfcd;
+  letter-spacing: 0.7px;
+}
+.wrist3-ab-status span {
+  color: #ffe66d;
+  text-align: right;
+}
+.wrist3-ab-result {
+  color: #b9d0dc;
+  font-size: 10px;
+}
+.wrist3-ab-result output {
+  color: #fff;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.wrist3-ab-controls button {
+  min-height: 39px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  color: #07121a;
+  cursor: pointer;
+  font: 900 12px/1 var(--font-mono);
+  letter-spacing: 0.2px;
+  pointer-events: auto;
+}
+.wrist3-ab-controls button:disabled {
+  cursor: not-allowed;
+  filter: grayscale(0.8);
+  opacity: 0.4;
+}
+.wrist3-reset-button {
+  background: #ffe66d;
+}
+.wrist3-manual-test-button {
+  background: #53e0a3;
+}
+.wrist3-replay-test-button {
+  background: #69caff;
+}
+.wrist3-ab-controls > small {
+  color: #9bb1be;
+  font-size: 9px;
+  line-height: 1.4;
+}
 .view-axis {
   position: absolute;
   z-index: 3;
