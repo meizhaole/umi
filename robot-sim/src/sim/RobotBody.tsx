@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { useAfterPhysicsStep, useBeforePhysicsStep, useRapier } from '@react-three/rapier';
 import { Quaternion, Vector3 } from 'three';
 import { Kinematics } from '../core/Kinematics';
@@ -20,6 +20,12 @@ import { publishDebugEvent } from '../app/debugBus';
 interface RobotBodyProps {
   description: RobotDescription;
   packageMappings: Readonly<Record<string, string>>;
+  diagnostics?: {
+    gravity: [number, number, number];
+    solverIterations?: number;
+    disableCollisions: boolean;
+    lockUpstream: boolean;
+  };
   positionExecution: 'joint_motors' | 'kinematic_fk';
   jointValues: JointValues;
   commands: Record<string, JointCommand>;
@@ -59,13 +65,34 @@ interface BodyFrame {
   isDynamicLink: boolean;
 }
 
+interface Phase2B23Sample {
+  time_ms: number;
+  joint_values: Record<string, number>;
+  joints: Record<string, Record<string, unknown>>;
+  links: Record<string, Record<string, unknown>>;
+}
+
+declare global {
+  interface Window {
+    __ROBOT_SIM_PHASE2B23__?: {
+      setup: Record<string, unknown>;
+      samples: Phase2B23Sample[];
+    };
+  }
+}
+
 const ROS_TO_SCENE = new Quaternion().setFromAxisAngle(new Vector3(1, 0, 0), -Math.PI / 2);
 const DEFAULT_JOINT_STIFFNESS = 100;
 const DEFAULT_JOINT_DAMPING = 18;
 const MAX_HULL_POINTS = 512;
+const MAX_PHASE2B23_SAMPLES = 4096;
 const meshPointCache = new Map<string, Promise<Float32Array>>();
 
 const vectorObject = (vector: Vector3): VectorObject => ({ x: vector.x, y: vector.y, z: vector.z });
+const vectorArray = (vector?: VectorObject): number[] | null =>
+  vector ? [vector.x, vector.y, vector.z] : null;
+const rotationArray = (rotation?: RotationObject): number[] | null =>
+  rotation ? [rotation.x, rotation.y, rotation.z, rotation.w] : null;
 
 const rotationObject = (rotation: Quaternion): RotationObject => ({
   x: rotation.x,
@@ -309,9 +336,16 @@ const setRobotPositionControl = (
   rapier: RapierModule,
   frames: Map<string, BodyFrame>,
   enabled: boolean,
+  lockedLinkNames: ReadonlySet<string>,
 ): void => {
-  frames.forEach((frame) => {
+  frames.forEach((frame, linkName) => {
     if (!frame.isDynamicLink) return;
+    if (lockedLinkNames.has(linkName)) {
+      if (!frame.body.isKinematic()) {
+        frame.body.setBodyType(rapier.RigidBodyType.KinematicPositionBased, true);
+      }
+      return;
+    }
     if (enabled && frame.body.isDynamic()) {
       frame.body.setBodyType(rapier.RigidBodyType.KinematicPositionBased, true);
     } else if (!enabled && !frame.body.isDynamic()) {
@@ -379,6 +413,7 @@ const axisInWorld = (joint: SimulatedJoint): Vector3 => {
 export const RobotBody = ({
   description,
   packageMappings,
+  diagnostics,
   positionExecution,
   jointValues,
   commands,
@@ -387,6 +422,17 @@ export const RobotBody = ({
   onReady,
 }: RobotBodyProps) => {
   const { world, rapier } = useRapier();
+  const lockedLinkNames = useMemo(
+    () =>
+      new Set(
+        diagnostics?.lockUpstream
+          ? description.joints
+              .filter((joint) => joint.type !== 'fixed' && joint.name !== 'wrist_3_joint')
+              .map((joint) => joint.child)
+          : [],
+      ),
+    [description, diagnostics?.lockUpstream],
+  );
   const bodies = useRef(new Map<string, BodyFrame>());
   const joints = useRef<SimulatedJoint[]>([]);
   const latestValues = useRef(jointValues);
@@ -439,14 +485,16 @@ export const RobotBody = ({
           robotToBodyRotation: new Quaternion(),
           isDynamicLink: false,
         });
-        await attachCollisions(
-          rapier,
-          world,
-          rootBody,
-          rootLink,
-          new Quaternion(),
-          packageMappings,
-        );
+        if (!diagnostics?.disableCollisions) {
+          await attachCollisions(
+            rapier,
+            world,
+            rootBody,
+            rootLink,
+            new Quaternion(),
+            packageMappings,
+          );
+        }
         publishDebugEvent('physics:progress', { stage: 'root-colliders' });
 
         const jointsByParent = new Map<string, JointDescription[]>();
@@ -512,14 +560,16 @@ export const RobotBody = ({
               isDynamicLink: Boolean(link.inertial),
             };
             bodyFrames.set(link.name, frame);
-            await attachCollisions(
-              rapier,
-              world,
-              body,
-              link,
-              childLinkToBodyRotation,
-              packageMappings,
-            );
+            if (!diagnostics?.disableCollisions) {
+              await attachCollisions(
+                rapier,
+                world,
+                body,
+                link,
+                childLinkToBodyRotation,
+                packageMappings,
+              );
+            }
             if (cancelled) break;
             publishDebugEvent('physics:progress', { stage: 'child-colliders', joint: joint.name });
 
@@ -542,11 +592,103 @@ export const RobotBody = ({
         }
 
         if (cancelled) return;
+        lockedLinkNames.forEach((linkName) => {
+          const frame = bodyFrames.get(linkName);
+          if (frame?.isDynamicLink) {
+            frame.body.setBodyType(rapier.RigidBodyType.KinematicPositionBased, true);
+          }
+        });
         createdBodies.forEach((body) => {
           if (body.isDynamic()) body.setGravityScale(1, true);
         });
         bodies.current = bodyFrames;
         joints.current = createdJoints;
+        if (diagnostics && typeof window !== 'undefined') {
+          const rootFrame = bodyFrames.get(description.rootLink);
+          const jointFrames = Object.fromEntries(
+            createdJoints.map((entry) => {
+              const joint = entry.joint as JointMotor & {
+                anchor1?: () => VectorObject;
+                anchor2?: () => VectorObject;
+                frameX1?: () => RotationObject;
+                frameX2?: () => RotationObject;
+                rawAxis?: () => number;
+                configureMotorMaxForce?: (force: number) => void;
+                limitsEnabled?: () => boolean;
+                limitsMin?: () => number;
+                limitsMax?: () => number;
+              };
+              return [
+                entry.description.name,
+                {
+                  parent: entry.description.parent,
+                  child: entry.description.child,
+                  origin_position: entry.description.origin.position,
+                  origin_orientation: entry.description.origin.orientation,
+                  urdf_axis: entry.description.axis,
+                  axis_local: entry.axisLocal.toArray(),
+                  anchor1: vectorArray(joint.anchor1?.()),
+                  anchor2: vectorArray(joint.anchor2?.()),
+                  frameX1: rotationArray(joint.frameX1?.()),
+                  frameX2: rotationArray(joint.frameX2?.()),
+                  rawAxis: joint.rawAxis?.(),
+                  motor_api_available: typeof joint.configureMotorPosition === 'function',
+                  motor_max_force_api_available: typeof joint.configureMotorMaxForce === 'function',
+                  limits: {
+                    enabled: joint.limitsEnabled?.(),
+                    minimum: joint.limitsMin?.(),
+                    maximum: joint.limitsMax?.(),
+                  },
+                  initial_position: entry.initialPosition,
+                  initial_relative_rotation: [
+                    entry.initialRelativeRotation.x,
+                    entry.initialRelativeRotation.y,
+                    entry.initialRelativeRotation.z,
+                    entry.initialRelativeRotation.w,
+                  ],
+                },
+              ];
+            }),
+          );
+          const bodyProperties = Object.fromEntries(
+            Array.from(bodyFrames, ([name, frame]) => {
+              return [
+                name,
+                {
+                  type: frame.body.isFixed()
+                    ? 'fixed'
+                    : frame.body.isDynamic()
+                      ? 'dynamic'
+                      : 'kinematic',
+                  has_urdf_inertial: frame.isDynamicLink,
+                  gravity_scale: frame.body.gravityScale(),
+                  linear_damping: frame.body.linearDamping(),
+                  angular_damping: frame.body.angularDamping(),
+                },
+              ];
+            }),
+          );
+          window.__ROBOT_SIM_PHASE2B23__ = {
+            setup: {
+              model: description.name,
+              root_link: description.rootLink,
+              tip_link: description.tipLink,
+              gravity: diagnostics.gravity,
+              collision_disabled: diagnostics.disableCollisions,
+              locked_upstream: diagnostics.lockUpstream,
+              position_execution: positionExecution,
+              motor_model_explicitly_configured: false,
+              default_stiffness: DEFAULT_JOINT_STIFFNESS,
+              default_damping: DEFAULT_JOINT_DAMPING,
+              solver_iterations: diagnostics.solverIterations ?? 4,
+              internal_pgs_iterations: 1,
+              base_body_type: rootFrame?.body.isFixed() ? 'fixed' : 'other',
+              joints: jointFrames,
+              bodies: bodyProperties,
+            },
+            samples: [],
+          };
+        }
         meshPointCache.clear();
         publishDebugEvent('physics:ready', {
           model: description.name,
@@ -593,14 +735,23 @@ export const RobotBody = ({
       meshPointCache.clear();
       onReady(false);
     };
-  }, [description, onReady, packageMappings, rapier, world]);
+  }, [
+    description,
+    diagnostics,
+    lockedLinkNames,
+    onReady,
+    packageMappings,
+    positionExecution,
+    rapier,
+    world,
+  ]);
 
   const applyCommands = useCallback(() => {
     const values = latestValues.current;
     const activeMode = latestMode.current;
     const activeCommands = latestCommands.current;
     const positionControl = activeMode === 'position' && positionExecution === 'kinematic_fk';
-    setRobotPositionControl(rapier, bodies.current, positionControl);
+    setRobotPositionControl(rapier, bodies.current, positionControl, lockedLinkNames);
     const commandSignature = JSON.stringify({ mode: activeMode, commands: activeCommands });
     if (commandSignature !== lastCommandSignature.current) {
       lastCommandSignature.current = commandSignature;
@@ -660,7 +811,7 @@ export const RobotBody = ({
     });
 
     setKinematicBodies(description, values, bodies.current);
-  }, [description, positionExecution, rapier]);
+  }, [description, lockedLinkNames, positionExecution, rapier]);
 
   useBeforePhysicsStep(applyCommands);
   useAfterPhysicsStep(() => {
@@ -668,6 +819,153 @@ export const RobotBody = ({
     if (now - lastStatePublish.current < 100) return;
     lastStatePublish.current = now;
     const measured = readJointState(joints.current);
+    if (diagnostics && typeof window !== 'undefined') {
+      const fkPoses = new Kinematics(description).forwardKinematicsAll(measured);
+      const jointSamples = Object.fromEntries(
+        joints.current.map((entry) => {
+          const command = latestCommands.current[entry.description.name];
+          const currentPosition =
+            latestValues.current[entry.description.name] ?? entry.initialPosition;
+          const commandedPosition =
+            latestMode.current === 'position' && command?.mode === 'position'
+              ? command.value
+              : currentPosition;
+          const parentVelocity = entry.parent.angvel();
+          const childVelocity = entry.child.angvel();
+          const relativeAngularVelocity = new Vector3(
+            childVelocity.x - parentVelocity.x,
+            childVelocity.y - parentVelocity.y,
+            childVelocity.z - parentVelocity.z,
+          );
+          const worldAxis = axisInWorld(entry);
+          const joint = entry.joint as JointMotor & {
+            anchor1?: () => VectorObject;
+            anchor2?: () => VectorObject;
+            frameX1?: () => RotationObject;
+            frameX2?: () => RotationObject;
+            rawAxis?: () => number;
+            configureMotorMaxForce?: (force: number) => void;
+            limitsEnabled?: () => boolean;
+            limitsMin?: () => number;
+            limitsMax?: () => number;
+          };
+          return [
+            entry.description.name,
+            {
+              commanded: commandedPosition,
+              commanded_motor_relative_target: commandedPosition - entry.initialPosition,
+              actual: measured[entry.description.name],
+              tracking_error: measured[entry.description.name] - commandedPosition,
+              delta_from_initial: measured[entry.description.name] - entry.initialPosition,
+              relative_angular_velocity: relativeAngularVelocity.dot(worldAxis),
+              world_axis: worldAxis.toArray(),
+              anchor1: vectorArray(joint.anchor1?.()),
+              anchor2: vectorArray(joint.anchor2?.()),
+              frameX1: rotationArray(joint.frameX1?.()),
+              frameX2: rotationArray(joint.frameX2?.()),
+              rawAxis: joint.rawAxis?.(),
+              motor_api_available: typeof joint.configureMotorPosition === 'function',
+              motor_max_force_api_available: typeof joint.configureMotorMaxForce === 'function',
+              limits: {
+                enabled: joint.limitsEnabled?.(),
+                minimum: joint.limitsMin?.(),
+                maximum: joint.limitsMax?.(),
+              },
+              stiffness: DEFAULT_JOINT_STIFFNESS,
+              damping: DEFAULT_JOINT_DAMPING,
+            },
+          ];
+        }),
+      );
+      const linkSamples = Object.fromEntries(
+        Array.from(bodies.current, ([name, frame]) => {
+          const bodyPosition = frame.body.translation();
+          const bodyRotationValue = frame.body.rotation();
+          const bodyRotation = new Quaternion(
+            bodyRotationValue.x,
+            bodyRotationValue.y,
+            bodyRotationValue.z,
+            bodyRotationValue.w,
+          );
+          const linkRotation = bodyRotation
+            .clone()
+            .multiply(frame.robotToBodyRotation.clone().invert());
+          const bodyOrientation = [bodyRotation.x, bodyRotation.y, bodyRotation.z, bodyRotation.w];
+          const fkPose = fkPoses[name];
+          const sceneFkPose = fkPose ? worldPose(fkPose) : null;
+          const orientationDot = sceneFkPose
+            ? Math.abs(
+                linkRotation.x * sceneFkPose.rotation.x +
+                  linkRotation.y * sceneFkPose.rotation.y +
+                  linkRotation.z * sceneFkPose.rotation.z +
+                  linkRotation.w * sceneFkPose.rotation.w,
+              )
+            : 0;
+          const positionError = sceneFkPose
+            ? new Vector3(bodyPosition.x, bodyPosition.y, bodyPosition.z).distanceTo(
+                sceneFkPose.position,
+              )
+            : null;
+          const orientationError = sceneFkPose ? 2 * Math.acos(Math.min(1, orientationDot)) : null;
+          const linearVelocity = frame.body.linvel();
+          const angularVelocity = frame.body.angvel();
+          const localCom = frame.body.localCom();
+          const principalInertia = frame.body.principalInertia();
+          const principalInertiaLocalFrame = frame.body.principalInertiaLocalFrame();
+          return [
+            name,
+            {
+              body_position: [bodyPosition.x, bodyPosition.y, bodyPosition.z],
+              body_orientation: bodyOrientation,
+              link_position: [bodyPosition.x, bodyPosition.y, bodyPosition.z],
+              link_orientation: [linkRotation.x, linkRotation.y, linkRotation.z, linkRotation.w],
+              fk_position: sceneFkPose?.position.toArray() ?? null,
+              fk_orientation: sceneFkPose
+                ? [
+                    sceneFkPose.rotation.x,
+                    sceneFkPose.rotation.y,
+                    sceneFkPose.rotation.z,
+                    sceneFkPose.rotation.w,
+                  ]
+                : null,
+              position_error: positionError,
+              orientation_error_rad: orientationError,
+              linear_velocity: [linearVelocity.x, linearVelocity.y, linearVelocity.z],
+              angular_velocity: [angularVelocity.x, angularVelocity.y, angularVelocity.z],
+              mass: frame.body.mass(),
+              local_com: [localCom.x, localCom.y, localCom.z],
+              principal_inertia: [principalInertia.x, principalInertia.y, principalInertia.z],
+              principal_inertia_local_frame: [
+                principalInertiaLocalFrame.x,
+                principalInertiaLocalFrame.y,
+                principalInertiaLocalFrame.z,
+                principalInertiaLocalFrame.w,
+              ],
+              gravity_scale: frame.body.gravityScale(),
+              linear_damping: frame.body.linearDamping(),
+              angular_damping: frame.body.angularDamping(),
+              body_type: frame.body.isFixed()
+                ? 'fixed'
+                : frame.body.isDynamic()
+                  ? 'dynamic'
+                  : 'kinematic',
+            },
+          ];
+        }),
+      );
+      const diagnosticState = window.__ROBOT_SIM_PHASE2B23__;
+      if (diagnosticState) {
+        diagnosticState.samples.push({
+          time_ms: now,
+          joint_values: measured,
+          joints: jointSamples,
+          links: linkSamples,
+        });
+        if (diagnosticState.samples.length > MAX_PHASE2B23_SAMPLES) {
+          diagnosticState.samples.shift();
+        }
+      }
+    }
     if (Object.keys(measured).length > 0) {
       const signature = Object.entries(measured)
         .map(([name, value]) => `${name}:${value.toFixed(4)}`)

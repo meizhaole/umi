@@ -42,6 +42,7 @@ interface SceneManagerProps {
 const PLAYBACK_ACTION_SECONDS = 0.5;
 const MAX_PLAYBACK_DELTA_SECONDS = 0.05;
 const ROBOT_TO_SCENE = new Quaternion().setFromAxisAngle(new Vector3(1, 0, 0), -Math.PI / 2);
+const ZERO_GRAVITY: [number, number, number] = [0, 0, 0];
 
 interface DatasetPoseMarkersProps {
   targetPose: Pose | null;
@@ -200,6 +201,44 @@ export const SceneManager = ({
   onCameraFrame,
 }: SceneManagerProps) => {
   const model = findRobotConfig(modelId);
+  const diagnosticQuery = new URLSearchParams(
+    typeof window === 'undefined' ? '' : window.location.search,
+  );
+  const phase2b23Diagnostics = diagnosticQuery.get('phase2b23') === '1' && model.type === 'ur5';
+  const diagnosticGravity =
+    phase2b23Diagnostics && diagnosticQuery.get('gravity') === 'off'
+      ? ZERO_GRAVITY
+      : SIMULATION_CONFIG.gravity;
+  const diagnosticSolverIterationsValue = Number(diagnosticQuery.get('solverIterations'));
+  const diagnosticSolverIterations =
+    phase2b23Diagnostics &&
+    diagnosticQuery.has('solverIterations') &&
+    Number.isInteger(diagnosticSolverIterationsValue) &&
+    diagnosticSolverIterationsValue > 0
+      ? diagnosticSolverIterationsValue
+      : undefined;
+  const diagnosticCollisionOff =
+    phase2b23Diagnostics && diagnosticQuery.get('collisions') === 'off';
+  const diagnosticLockUpstream =
+    phase2b23Diagnostics && diagnosticQuery.get('lockUpstream') === '1';
+  const robotDiagnostics = useMemo(
+    () =>
+      phase2b23Diagnostics
+        ? {
+            gravity: diagnosticGravity,
+            solverIterations: diagnosticSolverIterations,
+            disableCollisions: diagnosticCollisionOff,
+            lockUpstream: diagnosticLockUpstream,
+          }
+        : undefined,
+    [
+      diagnosticCollisionOff,
+      diagnosticGravity,
+      diagnosticLockUpstream,
+      diagnosticSolverIterations,
+      phase2b23Diagnostics,
+    ],
+  );
   const [readyModelId, setReadyModelId] = useState<RobotModelId | null>(null);
   const robotPhysicsReady = readyModelId === modelId;
   const controlsRef = useRef<OrbitControls | null>(null);
@@ -259,7 +298,8 @@ export const SceneManager = ({
       />
       <Physics
         colliders={false}
-        gravity={SIMULATION_CONFIG.gravity}
+        gravity={diagnosticGravity}
+        numSolverIterations={diagnosticSolverIterations}
         paused={!isRunning || !robotPhysicsReady}
         timeStep={SIMULATION_CONFIG.fixedTimeStep}
       >
@@ -271,8 +311,13 @@ export const SceneManager = ({
         <RobotBody
           commands={commands}
           description={description}
+          diagnostics={robotDiagnostics}
           packageMappings={model.packageMappings}
-          positionExecution={positionExecutionOverride ?? model.positionExecution}
+          positionExecution={
+            phase2b23Diagnostics
+              ? 'joint_motors'
+              : (positionExecutionOverride ?? model.positionExecution)
+          }
           jointValues={jointValues}
           mode={mode}
           onJointState={onJointState}
