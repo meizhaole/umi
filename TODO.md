@@ -28,6 +28,7 @@
 - [x] 端到端保留并显式处理 UMI action_pose_repr
 - [x] 将 Policy 完整预测与 6 项执行时域分离
 - [x] 审计 UMI 在线坐标、旋转、时间与抓放链路并记录
+- [x] 对官方 UMI episode 0 前 100 帧执行 UR5 TCP 连续 IK dry-run 并记录结果
 - [ ] 将本机训练 checkpoint 接入 Gazebo 回放启动参数
 - [ ] 接通 Gazebo 相机与 UMI 推理观测
 - [ ] 将实时 UMI 策略接入 ReBot RS 实机控制链路
