@@ -9,7 +9,7 @@ import type { PlaybackChunk } from '../app/inferenceProtocol';
 import type { ControlMode, JointCommand, JointValues, RobotDescription } from '../core/types';
 import { PhysicsWorld } from '../sim/PhysicsWorld';
 import { OfficialCupArrangementScene, type CupBodyRef } from '../sim/tasks/CupArrangementScene';
-import { RobotBody } from '../sim/RobotBody';
+import { RobotBody, type Wrist3PhysicsDebugState } from '../sim/RobotBody';
 import { publishDebugEvent } from '../app/debugBus';
 import { URDFViewer } from './URDFViewer';
 import { DEBUG_LAYER, setDebugLayer } from './sceneLayers';
@@ -37,6 +37,7 @@ interface SceneManagerProps {
   cameraEnabled: boolean;
   tcpPose: Pose;
   onCameraFrame: (frame: SimCameraFrame) => void;
+  onWrist3DebugState: (state: Wrist3PhysicsDebugState | null) => void;
 }
 
 const PLAYBACK_ACTION_SECONDS = 0.5;
@@ -193,6 +194,7 @@ export const SceneManager = ({
   datasetReplayTargetPose = null,
   datasetReplayActualPose = null,
   onJointState,
+  onWrist3DebugState,
   onPhysicsReady,
   onPlaybackStep,
   onPlaybackComplete,
@@ -324,6 +326,7 @@ export const SceneManager = ({
           jointValues={jointValues}
           mode={mode}
           onJointState={onJointState}
+          onWrist3DebugState={onWrist3DebugState}
           onReady={handlePhysicsReady}
         />
       </Physics>

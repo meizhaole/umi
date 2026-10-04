@@ -32,6 +32,7 @@ interface RobotBodyProps {
   commands: Record<string, JointCommand>;
   mode: ControlMode;
   onJointState: (values: JointValues) => void;
+  onWrist3DebugState: (state: Wrist3PhysicsDebugState | null) => void;
   onReady: (ready: boolean) => void;
 }
 
@@ -59,6 +60,17 @@ interface SimulatedJoint {
   initialRelativeRotation: Quaternion;
   initialJointFrameRelativeRotation: Quaternion | null;
   initialPosition: number;
+}
+
+export interface Wrist3PhysicsDebugState {
+  readback: number | null;
+  bodyAngle: number | null;
+  childAngularVelocity: [number, number, number];
+  swingErrorRad: number | null;
+  anchorErrorM: number | null;
+  jointHandle: number;
+  parentBodyHandle: number;
+  childBodyHandle: number;
 }
 
 interface BodyFrame {
@@ -652,6 +664,76 @@ const getRapierJointFrameMotion = (entry: SimulatedJoint) => {
   };
 };
 
+const getWrist3PhysicsDebugState = (
+  entry: SimulatedJoint,
+  measured: JointValues,
+): Wrist3PhysicsDebugState => {
+  const bodyMotion = getRapierJointFrameMotion(entry);
+  const joint = entry.joint as JointMotor & {
+    anchor1?: () => VectorObject;
+    anchor2?: () => VectorObject;
+  };
+  const parentAnchor = joint.anchor1?.();
+  const childAnchor = joint.anchor2?.();
+  let swingErrorRad: number | null = null;
+  let anchorErrorM: number | null = null;
+
+  if (bodyMotion) {
+    const parentBodyRotation = new Quaternion().fromArray(
+      bodyMotion.parent_body_world_quaternion,
+    );
+    const childBodyRotation = new Quaternion().fromArray(
+      bodyMotion.child_body_world_quaternion,
+    );
+    const parentJointFrame = parentBodyRotation
+      .clone()
+      .multiply(new Quaternion().fromArray(bodyMotion.frameX1));
+    const childJointFrame = childBodyRotation
+      .clone()
+      .multiply(new Quaternion().fromArray(bodyMotion.frameX2));
+    const parentWorldAxis = new Vector3(1, 0, 0)
+      .applyQuaternion(parentJointFrame)
+      .normalize();
+    const childWorldAxis = new Vector3(1, 0, 0)
+      .applyQuaternion(childJointFrame)
+      .normalize();
+    swingErrorRad = Math.acos(
+      Math.max(-1, Math.min(1, parentWorldAxis.dot(childWorldAxis))),
+    );
+
+    if (parentAnchor && childAnchor) {
+      const parentPosition = entry.parent.translation();
+      const childPosition = entry.child.translation();
+      const parentAnchorWorld = new Vector3(parentPosition.x, parentPosition.y, parentPosition.z)
+        .add(
+          new Vector3(parentAnchor.x, parentAnchor.y, parentAnchor.z).applyQuaternion(
+            parentBodyRotation,
+          ),
+        );
+      const childAnchorWorld = new Vector3(childPosition.x, childPosition.y, childPosition.z).add(
+        new Vector3(childAnchor.x, childAnchor.y, childAnchor.z).applyQuaternion(childBodyRotation),
+      );
+      anchorErrorM = parentAnchorWorld.distanceTo(childAnchorWorld);
+    }
+  }
+
+  const childAngularVelocity = entry.child.angvel();
+  return {
+    readback: measured.wrist_3_joint ?? null,
+    bodyAngle: bodyMotion?.q_body ?? null,
+    childAngularVelocity: [
+      childAngularVelocity.x,
+      childAngularVelocity.y,
+      childAngularVelocity.z,
+    ],
+    swingErrorRad,
+    anchorErrorM,
+    jointHandle: entry.joint.handle,
+    parentBodyHandle: entry.parent.handle,
+    childBodyHandle: entry.child.handle,
+  };
+};
+
 const appendPhase2B24Checkpoint = (
   trace: Phase2B24Trace,
   joints: SimulatedJoint[],
@@ -695,6 +777,7 @@ export const RobotBody = ({
   commands,
   mode,
   onJointState,
+  onWrist3DebugState,
   onReady,
 }: RobotBodyProps) => {
   const { world, rapier } = useRapier();
@@ -1196,6 +1279,8 @@ export const RobotBody = ({
     if (now - lastStatePublish.current < 100) return;
     lastStatePublish.current = now;
     const measured = readJointState(joints.current);
+    const wrist3 = joints.current.find((entry) => entry.description.name === 'wrist_3_joint');
+    onWrist3DebugState(wrist3 ? getWrist3PhysicsDebugState(wrist3, measured) : null);
     if (diagnostics && typeof window !== 'undefined') {
       const fkPoses = new Kinematics(description).forwardKinematicsAll(measured);
       const jointSamples = Object.fromEntries(

@@ -43,6 +43,8 @@ import {
   parseDatasetReplayReport,
 } from './datasetReplay';
 import { DatasetReplayPanel, type DatasetReplayState } from '../ui/DatasetReplayPanel';
+import { Wrist3PhysicsDebugPanel } from '../ui/Wrist3PhysicsDebugPanel';
+import type { Wrist3PhysicsDebugState } from '../sim/RobotBody';
 
 interface LoadedRobot {
   description: RobotDescription;
@@ -143,6 +145,8 @@ export const App = () => {
   const [jointDeltaNorm, setJointDeltaNorm] = useState<number | null>(null);
   const [ikMessage, setIkMessage] = useState('');
   const [physicsReady, setPhysicsReady] = useState(false);
+  const [wrist3PhysicsDebugState, setWrist3PhysicsDebugState] =
+    useState<Wrist3PhysicsDebugState | null>(null);
   const [datasetReplayReport, setDatasetReplayReport] = useState<DatasetReplayReport | null>(null);
   const [datasetReplayEnabled, setDatasetReplayEnabled] = useState(false);
   const [datasetReplayLoading, setDatasetReplayLoading] = useState(false);
@@ -175,6 +179,15 @@ export const App = () => {
   const observationIndexRef = useRef(0);
 
   const currentModel = findRobotConfig(modelId);
+  const hasWrist3Joint = loadedRobot?.description.joints.some(
+    (joint) => joint.name === 'wrist_3_joint',
+  );
+  const wrist3CommandValue =
+    mode === 'position'
+      ? commands.wrist_3_joint?.mode === 'position'
+        ? commands.wrist_3_joint.value
+        : (jointValues.wrist_3_joint ?? null)
+      : null;
 
   useEffect(() => {
     let active = true;
@@ -187,6 +200,7 @@ export const App = () => {
     setJointValues({});
     setCommands({});
     setPhysicsReady(false);
+    setWrist3PhysicsDebugState(null);
     setDatasetReplayReport(null);
     setDatasetReplayEnabled(false);
     setDatasetReplayLoading(false);
@@ -1116,6 +1130,7 @@ export const App = () => {
                 jointValues={jointValues}
                 modelId={modelId}
                 onJointState={updatePhysicsState}
+                onWrist3DebugState={setWrist3PhysicsDebugState}
                 onPhysicsReady={setPhysicsReady}
                 playback={inference.playback}
                 inferenceActive={inference.isLocked}
@@ -1169,6 +1184,12 @@ export const App = () => {
           />
         </section>
       </div>
+      {hasWrist3Joint ? (
+        <Wrist3PhysicsDebugPanel
+          commandValue={wrist3CommandValue}
+          state={wrist3PhysicsDebugState}
+        />
+      ) : null}
     </main>
   );
 };

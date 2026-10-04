@@ -836,6 +836,138 @@ button {
   background: var(--mint);
   box-shadow: 0 0 7px var(--mint);
 }
+.wrist3-physics-debug {
+  position: fixed;
+  z-index: 20;
+  top: 86px;
+  right: 18px;
+  width: 400px;
+  max-width: calc(100vw - 24px);
+  max-height: calc(100vh - 102px);
+  overflow-y: auto;
+  padding: 16px;
+  border: 1px solid #43a99d;
+  border-radius: 12px;
+  background: rgba(4, 11, 18, 0.98);
+  box-shadow:
+    0 16px 48px rgba(0, 0, 0, 0.62),
+    0 0 24px rgba(47, 218, 192, 0.16);
+  color: #f1f7fb;
+  font-family: var(--font-mono);
+  pointer-events: none;
+}
+.wrist3-debug-header > span {
+  color: #65dfc8;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1.3px;
+}
+.wrist3-debug-header h2 {
+  margin: 5px 0 13px;
+  color: #f7fbff;
+  font: 800 17px/1.2 var(--font-mono);
+  letter-spacing: 0.2px;
+}
+.wrist3-following {
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+  padding: 9px 11px;
+  border: 1px solid #ff6670;
+  border-radius: 8px;
+  background: #571b25;
+  color: #fff4f4;
+}
+.wrist3-following.following {
+  border-color: #4de5ad;
+  background: #123a30;
+  color: #defff2;
+}
+.wrist3-following-dot {
+  width: 10px;
+  height: 10px;
+  flex: 0 0 10px;
+  border-radius: 50%;
+  background: #ff6873;
+  box-shadow: 0 0 12px rgba(255, 104, 115, 0.8);
+}
+.wrist3-following.following .wrist3-following-dot {
+  background: #51e8ae;
+  box-shadow: 0 0 12px rgba(81, 232, 174, 0.8);
+}
+.wrist3-following strong {
+  flex: 1;
+  font: 900 20px/1 var(--font-mono);
+  letter-spacing: 0.5px;
+}
+.wrist3-following small {
+  color: inherit;
+  font-size: 9px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.wrist3-primary-readings {
+  display: grid;
+  gap: 3px;
+  padding: 1px 0 11px;
+  border-bottom: 1px solid rgba(154, 183, 201, 0.24);
+}
+.wrist3-primary-reading,
+.wrist3-secondary-reading,
+.wrist3-handle-reading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+.wrist3-primary-reading {
+  min-height: 39px;
+}
+.wrist3-primary-reading b,
+.wrist3-secondary-reading b,
+.wrist3-handle-reading b {
+  color: #a9bfcd;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+}
+.wrist3-primary-reading output {
+  color: #f4fbff;
+  font-size: 18px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.wrist3-primary-reading output small,
+.wrist3-secondary-reading output small {
+  color: #83a0af;
+  font-size: 10px;
+  font-weight: 500;
+}
+.wrist3-secondary-readings {
+  display: grid;
+  gap: 8px;
+  padding: 12px 0;
+  border-bottom: 1px solid rgba(154, 183, 201, 0.24);
+}
+.wrist3-secondary-reading output {
+  color: #e1f0f8;
+  font-size: 12px;
+  font-weight: 600;
+  text-align: right;
+  white-space: nowrap;
+}
+.wrist3-handle-readings {
+  display: grid;
+  gap: 7px;
+  padding-top: 11px;
+}
+.wrist3-handle-reading output {
+  color: #8fd8ff;
+  font-size: 12px;
+  font-weight: 700;
+}
 .view-axis {
   position: absolute;
   z-index: 3;
@@ -995,6 +1127,22 @@ button {
   .status-bar {
     font-size: 7px;
     padding: 0 8px;
+  }
+  .wrist3-physics-debug {
+    top: 68px;
+    right: 8px;
+    max-width: calc(100vw - 16px);
+    max-height: calc(100vh - 76px);
+    padding: 13px;
+  }
+  .wrist3-debug-header h2 {
+    font-size: 15px;
+  }
+  .wrist3-primary-reading output {
+    font-size: 16px;
+  }
+  .wrist3-following strong {
+    font-size: 18px;
   }
   .tcp-readout {
     gap: 5px;
