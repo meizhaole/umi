@@ -25,6 +25,7 @@ interface RobotBodyProps {
     solverIterations?: number;
     disableCollisions: boolean;
     lockUpstream: boolean;
+    traceMotorWrites?: boolean;
   };
   positionExecution: 'joint_motors' | 'kinematic_fk';
   jointValues: JointValues;
@@ -56,6 +57,7 @@ interface SimulatedJoint {
   childAnchor: Vector3;
   parentAnchor: Vector3;
   initialRelativeRotation: Quaternion;
+  initialJointFrameRelativeRotation: Quaternion | null;
   initialPosition: number;
 }
 
@@ -72,12 +74,57 @@ interface Phase2B23Sample {
   links: Record<string, Record<string, unknown>>;
 }
 
+interface Phase2B24MotorWrite {
+  physics_step: number | null;
+  writer_id: string;
+  joint_name: string;
+  kind: 'position' | 'velocity';
+  absolute_command: number | null;
+  configure_motor_position_target: number | null;
+  configure_motor_velocity_target: number | null;
+  stiffness: number | null;
+  damping: number;
+  write_index_in_step: number;
+  last_write: boolean;
+}
+
+interface Phase2B24Sample {
+  checkpoint_s: number;
+  elapsed_s: number;
+  physics_step: number;
+  writer_id: string | null;
+  q_command: number | null;
+  q_configureMotorPosition: number | null;
+  q_readback: number;
+  q_body: number | null;
+  relative_joint_frame_quaternion: number[] | null;
+  relative_angular_residual_rad: number | null;
+  parent_body_world_quaternion: number[];
+  child_body_world_quaternion: number[];
+  frameX1: number[] | null;
+  frameX2: number[] | null;
+  writes_this_step: Phase2B24MotorWrite[];
+}
+
+interface Phase2B24Trace {
+  setup: Record<string, unknown>;
+  physics_step: number;
+  wrist3_initial_position: number;
+  experiment_start_step: number | null;
+  experiment_start_time_ms: number | null;
+  checkpoints_s: number[];
+  next_checkpoint_index: number;
+  motor_writes: Phase2B24MotorWrite[];
+  samples: Phase2B24Sample[];
+}
+
 declare global {
   interface Window {
     __ROBOT_SIM_PHASE2B23__?: {
       setup: Record<string, unknown>;
       samples: Phase2B23Sample[];
     };
+    __ROBOT_SIM_PHASE2B24__?: Phase2B24Trace;
   }
 }
 
@@ -86,6 +133,7 @@ const DEFAULT_JOINT_STIFFNESS = 100;
 const DEFAULT_JOINT_DAMPING = 18;
 const MAX_HULL_POINTS = 512;
 const MAX_PHASE2B23_SAMPLES = 4096;
+const PHASE2B24_CHECKPOINTS_S = [0, 0.25, 0.5, 1, 2, 3, 4, 6, 10, 20];
 const meshPointCache = new Map<string, Promise<Float32Array>>();
 
 const vectorObject = (vector: Vector3): VectorObject => ({ x: vector.x, y: vector.y, z: vector.z });
@@ -93,6 +141,100 @@ const vectorArray = (vector?: VectorObject): number[] | null =>
   vector ? [vector.x, vector.y, vector.z] : null;
 const rotationArray = (rotation?: RotationObject): number[] | null =>
   rotation ? [rotation.x, rotation.y, rotation.z, rotation.w] : null;
+
+const recordPhase2B24MotorWrite = (
+  write: Omit<Phase2B24MotorWrite, 'write_index_in_step' | 'last_write'>,
+  initialPosition: number,
+): void => {
+  if (typeof window === 'undefined' || write.joint_name !== 'wrist_3_joint') return;
+  const trace = window.__ROBOT_SIM_PHASE2B24__;
+  if (!trace) return;
+
+  let writeIndex = 1;
+  for (let index = trace.motor_writes.length - 1; index >= 0; index -= 1) {
+    const previous = trace.motor_writes[index];
+    if (previous.physics_step !== write.physics_step) break;
+    previous.last_write = false;
+    writeIndex += 1;
+  }
+  trace.motor_writes.push({ ...write, write_index_in_step: writeIndex, last_write: true });
+
+  if (
+    write.kind === 'position' &&
+    write.physics_step !== null &&
+    trace.experiment_start_time_ms === null &&
+    write.absolute_command !== null &&
+    Math.abs(write.absolute_command - initialPosition) >= 0.05
+  ) {
+    trace.experiment_start_step = write.physics_step;
+    trace.experiment_start_time_ms = performance.now();
+  }
+};
+
+const writePositionMotor = (
+  joint: JointMotor,
+  jointName: string,
+  absoluteCommand: number,
+  initialPosition: number,
+  stiffness: number,
+  damping: number,
+  writerId: string,
+  physicsStep: number | null | undefined,
+  onBeforeSet?: (relativeTarget: number) => void,
+): void => {
+  if (!joint.configureMotorPosition) return;
+  const relativeTarget = absoluteCommand - initialPosition;
+  const currentStep =
+    physicsStep === null
+      ? null
+      : (physicsStep ??
+        (typeof window !== 'undefined'
+          ? (window.__ROBOT_SIM_PHASE2B24__?.physics_step ?? null)
+          : null));
+  recordPhase2B24MotorWrite(
+    {
+      physics_step: currentStep,
+      writer_id: writerId,
+      joint_name: jointName,
+      kind: 'position',
+      absolute_command: absoluteCommand,
+      configure_motor_position_target: relativeTarget,
+      configure_motor_velocity_target: null,
+      stiffness,
+      damping,
+    },
+    initialPosition,
+  );
+  onBeforeSet?.(relativeTarget);
+  joint.configureMotorPosition(relativeTarget, stiffness, damping);
+};
+
+const writeVelocityMotor = (
+  joint: JointMotor,
+  jointName: string,
+  velocity: number,
+  damping: number,
+  writerId: string,
+): void => {
+  if (!joint.configureMotorVelocity) return;
+  const physicsStep =
+    typeof window !== 'undefined' ? (window.__ROBOT_SIM_PHASE2B24__?.physics_step ?? null) : null;
+  recordPhase2B24MotorWrite(
+    {
+      physics_step: physicsStep,
+      writer_id: writerId,
+      joint_name: jointName,
+      kind: 'velocity',
+      absolute_command: null,
+      configure_motor_position_target: null,
+      configure_motor_velocity_target: velocity,
+      stiffness: null,
+      damping,
+    },
+    0,
+  );
+  joint.configureMotorVelocity(velocity, damping);
+};
 
 const rotationObject = (rotation: Quaternion): RotationObject => ({
   x: rotation.x,
@@ -294,9 +436,37 @@ const createJoint = (
   if (joint.limit?.lower !== undefined && joint.limit.upper !== undefined) {
     handle.setLimits?.(joint.limit.lower, joint.limit.upper);
   }
-  handle.configureMotorPosition?.(0, DEFAULT_JOINT_STIFFNESS, DEFAULT_JOINT_DAMPING);
+  writePositionMotor(
+    handle,
+    joint.name,
+    initialPosition,
+    initialPosition,
+    DEFAULT_JOINT_STIFFNESS,
+    DEFAULT_JOINT_DAMPING,
+    'RobotBody.createJoint.initialPosition',
+    null,
+  );
 
   const initialRelativeRotation = parentBodyRotation.clone().invert().multiply(childBodyRotation);
+  const jointFrame = handle as JointMotor & {
+    frameX1?: () => RotationObject;
+    frameX2?: () => RotationObject;
+  };
+  const frameX1 = jointFrame.frameX1?.();
+  const frameX2 = jointFrame.frameX2?.();
+  const initialJointFrameRelativeRotation =
+    frameX1 && frameX2
+      ? parentBodyRotation
+          .clone()
+          .multiply(new Quaternion(frameX1.x, frameX1.y, frameX1.z, frameX1.w))
+          .invert()
+          .multiply(
+            childBodyRotation
+              .clone()
+              .multiply(new Quaternion(frameX2.x, frameX2.y, frameX2.z, frameX2.w)),
+          )
+          .normalize()
+      : null;
   return {
     description: joint,
     joint: handle,
@@ -306,6 +476,7 @@ const createJoint = (
     childAnchor,
     parentAnchor,
     initialRelativeRotation,
+    initialJointFrameRelativeRotation,
     initialPosition,
   };
 };
@@ -410,6 +581,111 @@ const axisInWorld = (joint: SimulatedJoint): Vector3 => {
     .normalize();
 };
 
+const getRapierJointFrameMotion = (entry: SimulatedJoint) => {
+  const joint = entry.joint as JointMotor & {
+    frameX1?: () => RotationObject;
+    frameX2?: () => RotationObject;
+    rawAxis?: () => number;
+  };
+  const frameX1 = joint.frameX1?.();
+  const frameX2 = joint.frameX2?.();
+  if (!frameX1 || !frameX2 || !entry.initialJointFrameRelativeRotation) return null;
+
+  const parentBodyRotationValue = entry.parent.rotation();
+  const childBodyRotationValue = entry.child.rotation();
+  const parentBodyRotation = new Quaternion(
+    parentBodyRotationValue.x,
+    parentBodyRotationValue.y,
+    parentBodyRotationValue.z,
+    parentBodyRotationValue.w,
+  );
+  const childBodyRotation = new Quaternion(
+    childBodyRotationValue.x,
+    childBodyRotationValue.y,
+    childBodyRotationValue.z,
+    childBodyRotationValue.w,
+  );
+  const parentJointFrameWorld = parentBodyRotation.multiply(
+    new Quaternion(frameX1.x, frameX1.y, frameX1.z, frameX1.w),
+  );
+  const childJointFrameWorld = childBodyRotation.multiply(
+    new Quaternion(frameX2.x, frameX2.y, frameX2.z, frameX2.w),
+  );
+  const relativeJointFrame = parentJointFrameWorld
+    .clone()
+    .invert()
+    .multiply(childJointFrameWorld)
+    .normalize();
+  const motion = entry.initialJointFrameRelativeRotation
+    .clone()
+    .invert()
+    .multiply(relativeJointFrame)
+    .normalize();
+  const offAxisVectorMagnitude = Math.hypot(motion.y, motion.z);
+
+  return {
+    q_body: entry.initialPosition + 2 * Math.atan2(motion.x, motion.w),
+    relative_joint_frame_quaternion: [
+      relativeJointFrame.x,
+      relativeJointFrame.y,
+      relativeJointFrame.z,
+      relativeJointFrame.w,
+    ],
+    relative_angular_residual_rad:
+      2 * Math.atan2(offAxisVectorMagnitude, Math.hypot(motion.x, motion.w)),
+    parent_body_world_quaternion: [
+      parentBodyRotation.x,
+      parentBodyRotation.y,
+      parentBodyRotation.z,
+      parentBodyRotation.w,
+    ],
+    child_body_world_quaternion: [
+      childBodyRotation.x,
+      childBodyRotation.y,
+      childBodyRotation.z,
+      childBodyRotation.w,
+    ],
+    frameX1: [frameX1.x, frameX1.y, frameX1.z, frameX1.w],
+    frameX2: [frameX2.x, frameX2.y, frameX2.z, frameX2.w],
+    rawAxis: joint.rawAxis?.() ?? null,
+    delta_joint_frame_quaternion: [motion.x, motion.y, motion.z, motion.w],
+  };
+};
+
+const appendPhase2B24Checkpoint = (
+  trace: Phase2B24Trace,
+  joints: SimulatedJoint[],
+  checkpointS: number,
+  elapsedS: number,
+): void => {
+  const measured = readJointState(joints);
+  const wrist3 = joints.find((entry) => entry.description.name === 'wrist_3_joint');
+  const bodyMotion = wrist3 ? getRapierJointFrameMotion(wrist3) : null;
+  const writesThisStep = trace.motor_writes.filter(
+    (write) => write.physics_step === trace.physics_step && write.joint_name === 'wrist_3_joint',
+  );
+  const lastWrite = writesThisStep[writesThisStep.length - 1];
+  trace.samples.push({
+    checkpoint_s: checkpointS,
+    elapsed_s: elapsedS,
+    physics_step: trace.physics_step,
+    writer_id: lastWrite?.writer_id ?? null,
+    q_command: lastWrite?.kind === 'position' ? lastWrite.absolute_command : null,
+    q_configureMotorPosition:
+      lastWrite?.kind === 'position' ? lastWrite.configure_motor_position_target : null,
+    q_readback: measured.wrist_3_joint ?? Number.NaN,
+    q_body: bodyMotion?.q_body ?? null,
+    relative_joint_frame_quaternion: bodyMotion?.relative_joint_frame_quaternion ?? null,
+    relative_angular_residual_rad: bodyMotion?.relative_angular_residual_rad ?? null,
+    parent_body_world_quaternion: bodyMotion?.parent_body_world_quaternion ?? [],
+    child_body_world_quaternion: bodyMotion?.child_body_world_quaternion ?? [],
+    frameX1: bodyMotion?.frameX1 ?? null,
+    frameX2: bodyMotion?.frameX2 ?? null,
+    writes_this_step: writesThisStep.map((write) => ({ ...write })),
+  });
+  trace.next_checkpoint_index += 1;
+};
+
 export const RobotBody = ({
   description,
   packageMappings,
@@ -462,6 +738,27 @@ export const RobotBody = ({
     const kinematics = new Kinematics(description);
     const initialValues = { ...latestValues.current };
     const currentPoses = kinematics.forwardKinematicsAll(initialValues);
+    if (diagnostics?.traceMotorWrites && typeof window !== 'undefined') {
+      window.__ROBOT_SIM_PHASE2B24__ = {
+        setup: {
+          model: description.name,
+          initial_joint_values: initialValues,
+          gravity: diagnostics.gravity,
+          collision_disabled: diagnostics.disableCollisions,
+          position_execution: positionExecution,
+          stiffness: DEFAULT_JOINT_STIFFNESS,
+          damping: DEFAULT_JOINT_DAMPING,
+        },
+        physics_step: 0,
+        wrist3_initial_position: initialValues.wrist_3_joint ?? 0,
+        experiment_start_step: null,
+        experiment_start_time_ms: null,
+        checkpoints_s: PHASE2B24_CHECKPOINTS_S,
+        next_checkpoint_index: 0,
+        motor_writes: [],
+        samples: [],
+      };
+    }
 
     const initialize = async () => {
       try {
@@ -689,6 +986,35 @@ export const RobotBody = ({
             samples: [],
           };
         }
+        if (diagnostics?.traceMotorWrites && typeof window !== 'undefined') {
+          const trace = window.__ROBOT_SIM_PHASE2B24__;
+          const wrist3 = createdJoints.find((entry) => entry.description.name === 'wrist_3_joint');
+          if (trace && wrist3) {
+            const joint = wrist3.joint as JointMotor & {
+              frameX1?: () => RotationObject;
+              frameX2?: () => RotationObject;
+              rawAxis?: () => number;
+            };
+            trace.setup = {
+              ...trace.setup,
+              wrist3_joint: {
+                parent: wrist3.description.parent,
+                child: wrist3.description.child,
+                origin_position: wrist3.description.origin.position,
+                origin_orientation: wrist3.description.origin.orientation,
+                urdf_axis: wrist3.description.axis,
+                axis_local: wrist3.axisLocal.toArray(),
+                anchor1: vectorArray(joint.anchor1?.()),
+                anchor2: vectorArray(joint.anchor2?.()),
+                frameX1: rotationArray(joint.frameX1?.()),
+                frameX2: rotationArray(joint.frameX2?.()),
+                rawAxis: joint.rawAxis?.(),
+                initial_joint_frame_relative_rotation:
+                  wrist3.initialJointFrameRelativeRotation?.toArray() ?? null,
+              },
+            };
+          }
+        }
         meshPointCache.clear();
         publishDebugEvent('physics:ready', {
           model: description.name,
@@ -747,6 +1073,10 @@ export const RobotBody = ({
   ]);
 
   const applyCommands = useCallback(() => {
+    if (diagnostics?.traceMotorWrites && typeof window !== 'undefined') {
+      const trace = window.__ROBOT_SIM_PHASE2B24__;
+      if (trace) trace.physics_step += 1;
+    }
     const values = latestValues.current;
     const activeMode = latestMode.current;
     const activeCommands = latestCommands.current;
@@ -790,14 +1120,46 @@ export const RobotBody = ({
 
       applyJointCommand(joint, activeMode, activeCommands[joint.name], currentPosition, {
         position: (target) =>
-          entry.joint.configureMotorPosition?.(
-            target - entry.initialPosition,
+          writePositionMotor(
+            entry.joint,
+            joint.name,
+            target,
+            entry.initialPosition,
             DEFAULT_JOINT_STIFFNESS,
             DEFAULT_JOINT_DAMPING,
+            'RobotBody.useBeforePhysicsStep.applyCommands.position',
+            undefined,
+            () => {
+              if (typeof window === 'undefined') return;
+              const trace = window.__ROBOT_SIM_PHASE2B24__;
+              if (
+                trace &&
+                trace.experiment_start_step === trace.physics_step &&
+                trace.next_checkpoint_index === 0
+              ) {
+                appendPhase2B24Checkpoint(trace, joints.current, 0, 0);
+              }
+            },
           ),
-        velocity: (target) => entry.joint.configureMotorVelocity?.(target, DEFAULT_JOINT_DAMPING),
+        velocity: (target) =>
+          writeVelocityMotor(
+            entry.joint,
+            joint.name,
+            target,
+            DEFAULT_JOINT_DAMPING,
+            'RobotBody.useBeforePhysicsStep.applyCommands.velocity',
+          ),
         effort: (value, kind) => {
-          entry.joint.configureMotorPosition?.(0, 0, 0);
+          writePositionMotor(
+            entry.joint,
+            joint.name,
+            entry.initialPosition,
+            entry.initialPosition,
+            0,
+            0,
+            'RobotBody.useBeforePhysicsStep.applyCommands.effortDisarm',
+            undefined,
+          );
           const force = vectorObject(axisInWorld(entry).multiplyScalar(value));
           if (kind === 'force') {
             child.addForce(force, true);
@@ -811,11 +1173,26 @@ export const RobotBody = ({
     });
 
     setKinematicBodies(description, values, bodies.current);
-  }, [description, lockedLinkNames, positionExecution, rapier]);
+  }, [description, diagnostics?.traceMotorWrites, lockedLinkNames, positionExecution, rapier]);
 
   useBeforePhysicsStep(applyCommands);
   useAfterPhysicsStep(() => {
     const now = performance.now();
+    const phase2b24Trace =
+      diagnostics?.traceMotorWrites && typeof window !== 'undefined'
+        ? window.__ROBOT_SIM_PHASE2B24__
+        : undefined;
+    if (
+      phase2b24Trace &&
+      phase2b24Trace.experiment_start_time_ms !== null &&
+      phase2b24Trace.next_checkpoint_index < phase2b24Trace.checkpoints_s.length
+    ) {
+      const checkpointS = phase2b24Trace.checkpoints_s[phase2b24Trace.next_checkpoint_index];
+      const elapsedS = (now - phase2b24Trace.experiment_start_time_ms) / 1000;
+      if (elapsedS >= checkpointS) {
+        appendPhase2B24Checkpoint(phase2b24Trace, joints.current, checkpointS, elapsedS);
+      }
+    }
     if (now - lastStatePublish.current < 100) return;
     lastStatePublish.current = now;
     const measured = readJointState(joints.current);

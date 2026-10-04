@@ -32,7 +32,7 @@
 - [x] 将官方 UMI episode 0 的 UR5 TCP 连续 IK dry-run 扩展到 400 帧并记录统计
 - [x] 隔离 UR5 TCP 调试标记与辅助线，腕部相机仅渲染仿真层
 - [x] 对 UR5 frame 0 执行重力与碰撞 A/B/C 诊断
-- [ ] 完成 UMI episode 0 UR5 Rapier motor 回放；Phase 2B-2.3 在 wrist_3 正向命令时出现 motor 跟踪与动态 FK 残差，已停测，待 motor/关节诊断
+- [ ] 完成 UMI episode 0 UR5 Rapier motor 回放；Phase 2B-2.4 确认 wrist_3 setter 目标保持 +0.1018 rad，但刚体相对角与读回均衰减至零，待 Rapier motor/constraint 诊断
 - [ ] 将本机训练 checkpoint 接入 Gazebo 回放启动参数
 - [ ] 接通 Gazebo 相机与 UMI 推理观测
 - [ ] 将实时 UMI 策略接入 ReBot RS 实机控制链路

@@ -205,8 +205,10 @@ export const SceneManager = ({
     typeof window === 'undefined' ? '' : window.location.search,
   );
   const phase2b23Diagnostics = diagnosticQuery.get('phase2b23') === '1' && model.type === 'ur5';
+  const phase2b24Diagnostics = diagnosticQuery.get('phase2b24') === '1' && model.type === 'ur5';
+  const phase2bDiagnostics = phase2b23Diagnostics || phase2b24Diagnostics;
   const diagnosticGravity =
-    phase2b23Diagnostics && diagnosticQuery.get('gravity') === 'off'
+    phase2bDiagnostics && diagnosticQuery.get('gravity') === 'off'
       ? ZERO_GRAVITY
       : SIMULATION_CONFIG.gravity;
   const diagnosticSolverIterationsValue = Number(diagnosticQuery.get('solverIterations'));
@@ -217,18 +219,18 @@ export const SceneManager = ({
     diagnosticSolverIterationsValue > 0
       ? diagnosticSolverIterationsValue
       : undefined;
-  const diagnosticCollisionOff =
-    phase2b23Diagnostics && diagnosticQuery.get('collisions') === 'off';
+  const diagnosticCollisionOff = phase2bDiagnostics && diagnosticQuery.get('collisions') === 'off';
   const diagnosticLockUpstream =
     phase2b23Diagnostics && diagnosticQuery.get('lockUpstream') === '1';
   const robotDiagnostics = useMemo(
     () =>
-      phase2b23Diagnostics
+      phase2bDiagnostics
         ? {
             gravity: diagnosticGravity,
             solverIterations: diagnosticSolverIterations,
             disableCollisions: diagnosticCollisionOff,
             lockUpstream: diagnosticLockUpstream,
+            traceMotorWrites: phase2b24Diagnostics,
           }
         : undefined,
     [
@@ -236,7 +238,8 @@ export const SceneManager = ({
       diagnosticGravity,
       diagnosticLockUpstream,
       diagnosticSolverIterations,
-      phase2b23Diagnostics,
+      phase2b24Diagnostics,
+      phase2bDiagnostics,
     ],
   );
   const [readyModelId, setReadyModelId] = useState<RobotModelId | null>(null);
@@ -314,7 +317,7 @@ export const SceneManager = ({
           diagnostics={robotDiagnostics}
           packageMappings={model.packageMappings}
           positionExecution={
-            phase2b23Diagnostics
+            phase2bDiagnostics
               ? 'joint_motors'
               : (positionExecutionOverride ?? model.positionExecution)
           }
