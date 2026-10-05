@@ -13,3 +13,7 @@ This directory stores small, reproducible validation outputs that belong to robo
 `phase2c1-umi-episode0-frame0.json` records one browser run of episode 0 frame 0 through `KINEMATIC_REPLAY`. It contains the Phase 2B-1 aligned target and IK solution, six joint commands/readbacks/`q_body` values, and TCP errors. The run settled at frame 0 and did not advance further.
 
 ![UR5 episode 0 frame 0 Kinematic Replay](../screenshots/phase2c1-umi-episode0-frame0.png)
+
+`phase2c2-umi-episode0-frames0-399.json` records the complete browser replay of episode 0 frames 0–399 through `KINEMATIC_REPLAY`, using the existing Phase 2B-1 sequential IK report. It contains per-frame joint commands/readbacks/`q_body`, tracking and TCP errors, adjacent joint deltas, anomaly checks, and summary statistics.
+
+![UR5 episode 0 frame 399 Kinematic Replay](../screenshots/phase2c2-umi-episode0-frames0-399.png)

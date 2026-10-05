@@ -31,6 +31,7 @@
 - [x] 对官方 UMI episode 0 前 100 帧执行 UR5 TCP 连续 IK dry-run 并记录结果
 - [x] 将官方 UMI episode 0 的 UR5 TCP 连续 IK dry-run 扩展到 400 帧并记录统计
 - [x] 完成 Phase 2C-1：官方 UMI episode 0 frame 0 Kinematic Replay 验证
+- [x] 完成 Phase 2C-2：官方 UMI episode 0 的 400 帧 Kinematic Replay 验证
 - [x] 隔离 UR5 TCP 调试标记与辅助线，腕部相机仅渲染仿真层
 - [x] 对 UR5 frame 0 执行重力与碰撞 A/B/C 诊断
 - [x] 为 wrist_3_joint 增加独立 Rapier 物理调试面板
