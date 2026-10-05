@@ -531,7 +531,7 @@
         <mesh filename="package://umi_gripper/meshes/right_finger.stl"/>
       </geometry>
     </collision>
-  </link><!-- DEBUG / PLACEHOLDER: identity only; the measured tool0-to-body1 transform is not yet known. --><joint name="ur5_to_umi_mount" type="fixed"><origin xyz="0 0 0" rpy="0 0 0"/><parent link="tool0"/><child link="body1"/></joint><joint name="left_finger_joint" type="prismatic">
+  </link><!-- DEBUG / PLACEHOLDER: identity only; the measured tool0-to-body1 transform is not yet known. --><joint name="ur5_to_umi_mount" type="fixed"><origin xyz="0 0 0.08" rpy="0 0 1.5707963267948966"/><parent link="tool0"/><child link="body1"/></joint><joint name="left_finger_joint" type="prismatic">
     <origin xyz="0 0 0" rpy="1.5707963267948968 0 0"/>
     <parent link="body1"/>
     <child link="left_finger_holder"/>
