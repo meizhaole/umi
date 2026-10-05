@@ -27,10 +27,10 @@ interface WristCameraCaptureProps {
 
 const CAPTURE_INTERVAL_MS = 50;
 
-const createCanvasPipeline = () => {
+const createCanvasPipeline = (captureWidth: number, captureHeight: number) => {
   const sourceCanvas = document.createElement('canvas');
-  sourceCanvas.width = WRIST_CAMERA_CONFIG.captureWidth;
-  sourceCanvas.height = WRIST_CAMERA_CONFIG.captureHeight;
+  sourceCanvas.width = captureWidth;
+  sourceCanvas.height = captureHeight;
   const sourceContext = sourceCanvas.getContext('2d', { willReadFrequently: true });
   const outputCanvas = document.createElement('canvas');
   outputCanvas.width = CAMERA_IMAGE_SIZE;
@@ -44,22 +44,11 @@ const createCanvasPipeline = () => {
   return {
     sourceCanvas,
     sourceContext,
-    sourceImageData: sourceContext.createImageData(
-      WRIST_CAMERA_CONFIG.captureWidth,
-      WRIST_CAMERA_CONFIG.captureHeight,
-    ),
+    sourceImageData: sourceContext.createImageData(captureWidth, captureHeight),
     outputContext,
-    cropSize: Math.min(WRIST_CAMERA_CONFIG.captureWidth, WRIST_CAMERA_CONFIG.captureHeight),
-    cropLeft: Math.floor(
-      (WRIST_CAMERA_CONFIG.captureWidth -
-        Math.min(WRIST_CAMERA_CONFIG.captureWidth, WRIST_CAMERA_CONFIG.captureHeight)) /
-        2,
-    ),
-    cropTop: Math.floor(
-      (WRIST_CAMERA_CONFIG.captureHeight -
-        Math.min(WRIST_CAMERA_CONFIG.captureWidth, WRIST_CAMERA_CONFIG.captureHeight)) /
-        2,
-    ),
+    cropSize: Math.min(captureWidth, captureHeight),
+    cropLeft: Math.floor((captureWidth - Math.min(captureWidth, captureHeight)) / 2),
+    cropTop: Math.floor((captureHeight - Math.min(captureWidth, captureHeight)) / 2),
   };
 };
 
@@ -88,10 +77,13 @@ export const WristCameraCapture = ({
   onCapture,
 }: WristCameraCaptureProps) => {
   const { gl, scene } = useThree();
+  const isGoProMount = Boolean(robot.links.mount_link);
+  const captureWidth = isGoProMount ? WRIST_CAMERA_CONFIG.captureWidth : CAMERA_IMAGE_SIZE;
+  const captureHeight = isGoProMount ? WRIST_CAMERA_CONFIG.captureHeight : CAMERA_IMAGE_SIZE;
   const camera = useMemo(() => {
     const sensorCamera = new PerspectiveCamera(
       WRIST_CAMERA_CONFIG.fieldOfViewDegrees,
-      WRIST_CAMERA_CONFIG.captureWidth / WRIST_CAMERA_CONFIG.captureHeight,
+      captureWidth / captureHeight,
       WRIST_CAMERA_CONFIG.near,
       WRIST_CAMERA_CONFIG.far,
     );
@@ -101,17 +93,19 @@ export const WristCameraCapture = ({
   }, []);
   const cameraAnchor = useMemo(() => new Group(), []);
   const target = useMemo(
-    () =>
-      new WebGLRenderTarget(WRIST_CAMERA_CONFIG.captureWidth, WRIST_CAMERA_CONFIG.captureHeight),
-    [],
+    () => new WebGLRenderTarget(captureWidth, captureHeight),
+    [captureHeight, captureWidth],
   );
   target.texture.colorSpace = SRGBColorSpace;
   const pixels = useMemo(
-    () => new Uint8Array(WRIST_CAMERA_CONFIG.captureWidth * WRIST_CAMERA_CONFIG.captureHeight * 4),
-    [],
+    () => new Uint8Array(captureWidth * captureHeight * 4),
+    [captureHeight, captureWidth],
   );
   const rgb = useMemo(() => new Uint8Array(CAMERA_IMAGE_SIZE * CAMERA_IMAGE_SIZE * 3), []);
-  const canvasPipeline = useMemo(createCanvasPipeline, []);
+  const canvasPipeline = useMemo(
+    () => (isGoProMount ? createCanvasPipeline(captureWidth, captureHeight) : null),
+    [captureHeight, captureWidth, isGoProMount],
+  );
   const cadence = useMemo(() => ({ lastCapture: 0 }), []);
   const layerAudit = useMemo(() => ({ signature: '' }), []);
 
@@ -120,6 +114,8 @@ export const WristCameraCapture = ({
     const parentLink = mountLink ?? robot.links[description.tipLink] ?? robot.links.end_link;
     if (!parentLink) throw new Error(`URDF 缺少末端 link：${description.tipLink}`);
 
+    camera.aspect = captureWidth / captureHeight;
+    camera.updateProjectionMatrix();
     cameraAnchor.name = mountLink ? 'gopro_camera_anchor' : 'wrist_camera_anchor';
     if (mountLink) {
       cameraAnchor.position.set(...WRIST_CAMERA_CONFIG.goproVisualOrigin);
@@ -140,13 +136,15 @@ export const WristCameraCapture = ({
       opticalCenterStatus: mountLink ? 'geometric_proxy_requires_calibration' : 'legacy_mount',
       localCameraPosition: camera.position.toArray(),
       localCameraQuaternion: camera.quaternion.toArray(),
-      renderResolution: [WRIST_CAMERA_CONFIG.captureWidth, WRIST_CAMERA_CONFIG.captureHeight],
-      centerCrop: {
-        x: canvasPipeline.cropLeft,
-        y: canvasPipeline.cropTop,
-        width: canvasPipeline.cropSize,
-        height: canvasPipeline.cropSize,
-      },
+      renderResolution: [captureWidth, captureHeight],
+      centerCrop: canvasPipeline
+        ? {
+            x: canvasPipeline.cropLeft,
+            y: canvasPipeline.cropTop,
+            width: canvasPipeline.cropSize,
+            height: canvasPipeline.cropSize,
+          }
+        : { x: 0, y: 0, width: CAMERA_IMAGE_SIZE, height: CAMERA_IMAGE_SIZE },
       policyResolution: [CAMERA_IMAGE_SIZE, CAMERA_IMAGE_SIZE],
       fieldOfViewDegrees: WRIST_CAMERA_CONFIG.fieldOfViewDegrees,
       near: WRIST_CAMERA_CONFIG.near,
@@ -156,7 +154,15 @@ export const WristCameraCapture = ({
     return () => {
       parentLink.remove(cameraAnchor);
     };
-  }, [camera, cameraAnchor, canvasPipeline, description.tipLink, robot]);
+  }, [
+    camera,
+    cameraAnchor,
+    canvasPipeline,
+    captureHeight,
+    captureWidth,
+    description.tipLink,
+    robot,
+  ]);
 
   useEffect(() => () => target.dispose(), [target]);
 
@@ -191,51 +197,55 @@ export const WristCameraCapture = ({
     try {
       gl.setRenderTarget(target);
       gl.render(scene, camera);
-      gl.readRenderTargetPixels(
-        target,
-        0,
-        0,
-        WRIST_CAMERA_CONFIG.captureWidth,
-        WRIST_CAMERA_CONFIG.captureHeight,
-        pixels,
-      );
+      gl.readRenderTargetPixels(target, 0, 0, captureWidth, captureHeight, pixels);
     } finally {
       gl.setRenderTarget(previousTarget);
       gl.xr.enabled = previousXr;
     }
 
-    for (let y = 0; y < WRIST_CAMERA_CONFIG.captureHeight; y += 1) {
-      const sourceStart =
-        (WRIST_CAMERA_CONFIG.captureHeight - y - 1) * WRIST_CAMERA_CONFIG.captureWidth * 4;
-      const targetStart = y * WRIST_CAMERA_CONFIG.captureWidth * 4;
-      canvasPipeline.sourceImageData.data.set(
-        pixels.subarray(sourceStart, sourceStart + WRIST_CAMERA_CONFIG.captureWidth * 4),
-        targetStart,
+    if (canvasPipeline) {
+      for (let y = 0; y < captureHeight; y += 1) {
+        const sourceStart = (captureHeight - y - 1) * captureWidth * 4;
+        const targetStart = y * captureWidth * 4;
+        canvasPipeline.sourceImageData.data.set(
+          pixels.subarray(sourceStart, sourceStart + captureWidth * 4),
+          targetStart,
+        );
+      }
+      canvasPipeline.sourceContext.putImageData(canvasPipeline.sourceImageData, 0, 0);
+      canvasPipeline.outputContext.drawImage(
+        canvasPipeline.sourceCanvas,
+        canvasPipeline.cropLeft,
+        canvasPipeline.cropTop,
+        canvasPipeline.cropSize,
+        canvasPipeline.cropSize,
+        0,
+        0,
+        CAMERA_IMAGE_SIZE,
+        CAMERA_IMAGE_SIZE,
       );
-    }
-    canvasPipeline.sourceContext.putImageData(canvasPipeline.sourceImageData, 0, 0);
-    canvasPipeline.outputContext.drawImage(
-      canvasPipeline.sourceCanvas,
-      canvasPipeline.cropLeft,
-      canvasPipeline.cropTop,
-      canvasPipeline.cropSize,
-      canvasPipeline.cropSize,
-      0,
-      0,
-      CAMERA_IMAGE_SIZE,
-      CAMERA_IMAGE_SIZE,
-    );
-    const outputPixels = canvasPipeline.outputContext.getImageData(
-      0,
-      0,
-      CAMERA_IMAGE_SIZE,
-      CAMERA_IMAGE_SIZE,
-    ).data;
-    for (let source = 0, destination = 0; source < outputPixels.length; source += 4) {
-      rgb[destination] = outputPixels[source];
-      rgb[destination + 1] = outputPixels[source + 1];
-      rgb[destination + 2] = outputPixels[source + 2];
-      destination += 3;
+      const outputPixels = canvasPipeline.outputContext.getImageData(
+        0,
+        0,
+        CAMERA_IMAGE_SIZE,
+        CAMERA_IMAGE_SIZE,
+      ).data;
+      for (let source = 0, destination = 0; source < outputPixels.length; source += 4) {
+        rgb[destination] = outputPixels[source];
+        rgb[destination + 1] = outputPixels[source + 1];
+        rgb[destination + 2] = outputPixels[source + 2];
+        destination += 3;
+      }
+    } else {
+      for (let y = 0; y < CAMERA_IMAGE_SIZE; y += 1) {
+        for (let x = 0; x < CAMERA_IMAGE_SIZE; x += 1) {
+          const source = ((CAMERA_IMAGE_SIZE - y - 1) * CAMERA_IMAGE_SIZE + x) * 4;
+          const destination = (y * CAMERA_IMAGE_SIZE + x) * 3;
+          rgb[destination] = pixels[source];
+          rgb[destination + 1] = pixels[source + 1];
+          rgb[destination + 2] = pixels[source + 2];
+        }
+      }
     }
 
     onCapture({
