@@ -1,7 +1,7 @@
 import type { JointValues } from '../core/types';
 
 export interface RobotConfig {
-  id: 'RS' | 'DM' | 'UR5' | 'UR5_UMI';
+  id: 'RS' | 'DM' | 'UR5' | 'UR5_CAD';
   type: 'rs' | 'dm' | 'ur5';
   label: string;
   positionExecution: 'joint_motors' | 'kinematic_fk';
@@ -52,14 +52,14 @@ export const ROBOT_MODELS = [
     tcpOffset: 0.0,
   },
   {
-    id: 'UR5_UMI',
+    id: 'UR5_CAD',
     type: 'ur5',
-    label: 'UR5 + UMI Gripper',
+    label: 'UR5 + CAD Mount',
     positionExecution: 'kinematic_fk',
-    file: 'ur_umi/ur5_umi.urdf',
+    file: 'ur_umi_real/urdf/ur5_umi_real.urdf',
     packageMappings: {
       ur_description: '/robot/ur_description',
-      umi_gripper: '/robot/umi-gripper',
+      ur_umi_real: '/robot/ur_umi_real',
     },
     initialJoints: {
       shoulder_pan_joint: 0,
@@ -68,8 +68,6 @@ export const ROBOT_MODELS = [
       wrist_1_joint: -Math.PI / 2,
       wrist_2_joint: Math.PI / 2,
       wrist_3_joint: 0,
-      left_finger_joint: 0,
-      right_finger_joint: 0,
     },
     tipLink: 'tool0',
   },

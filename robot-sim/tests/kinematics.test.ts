@@ -200,11 +200,85 @@ describe('UR5 官方描述、TCP、FK 与 IK', () => {
   ];
 
   it('保留 RS、DM 并以 RS 为默认型号', () => {
-    expect(ROBOT_MODELS.map((robot) => robot.id)).toEqual(['RS', 'DM', 'UR5']);
+    expect(ROBOT_MODELS.map((robot) => robot.id)).toEqual(['RS', 'DM', 'UR5', 'UR5_CAD']);
     expect(DEFAULT_ROBOT_MODEL_ID).toBe('RS');
     expect(findRobotConfig('RS').positionExecution).toBe('joint_motors');
     expect(findRobotConfig('DM').positionExecution).toBe('joint_motors');
     expect(findRobotConfig('UR5').positionExecution).toBe('kinematic_fk');
+    expect(findRobotConfig('UR5_CAD').file).toBe('ur_umi_real/urdf/ur5_umi_real.urdf');
+  });
+
+  it('UR5 CAD 型号只在 tool0 下挂载真实 mount，并保留六轴结构', () => {
+    const description = readDescription('../public/robot/ur_umi_real/urdf/ur5_umi_real.urdf');
+    const revoluteJoints = description.joints
+      .filter((joint) => joint.type === 'revolute')
+      .map((joint) => joint.name);
+    const mountJoint = description.joints.find((joint) => joint.name === 'ur5_to_mount');
+    const mountLink = description.links.find((link) => link.name === 'mount_link');
+    const mountVisualMeshes = mountLink?.visuals.map((visual) => visual.geometry) ?? [];
+
+    expect(revoluteJoints).toEqual(expectedJointNames);
+    expect(description.links.some((link) => link.name === 'umi_base_link')).toBe(false);
+    expect(description.links.some((link) => link.name.includes('finger'))).toBe(false);
+    expect(mountJoint).toMatchObject({
+      type: 'fixed',
+      parent: 'tool0',
+      child: 'mount_link',
+      origin: {
+        position: [0, 0, 0],
+        orientation: quaternionFromEuler(-Math.PI / 2, 0, Math.PI),
+      },
+    });
+    expect(mountLink?.visuals.map((visual) => visual.name)).toEqual([
+      'Part 1',
+      'Part 2',
+      'Part 3',
+      'Part 4',
+      'Part 5',
+      'Part 6',
+      'finger_holder_right',
+      'finger_holder_left',
+      'gripper_mount',
+    ]);
+    expect(mountLink?.visuals.map((visual) => visual.materialName)).toEqual([
+      'cad_part_1',
+      'cad_parts_2_to_6',
+      'cad_parts_2_to_6',
+      'cad_parts_2_to_6',
+      'cad_parts_2_to_6',
+      'cad_parts_2_to_6',
+      'cad_finger_holders',
+      'cad_finger_holders',
+      'cad_gripper_mount',
+    ]);
+    expect(mountVisualMeshes).toEqual([
+      'part_1.stl',
+      'part_2.stl',
+      'part_3.stl',
+      'part_4.stl',
+      'part_5.stl',
+      'part_6.stl',
+      'finger_holder_right.stl',
+      'finger_holder_left.stl',
+      'mount.stl',
+    ].map((mesh) => ({
+      type: 'mesh',
+      filename: `package://ur_umi_real/meshes/${mesh}`,
+      scale: [1, 1, 1],
+    })));
+    expect(mountLink?.visuals.map((visual) => visual.origin)).toEqual(
+      Array.from({ length: 9 }, () => ({
+        position: [0, 0, 0],
+        orientation: [0, 0, 0, 1],
+      })),
+    );
+    expect(mountLink?.collisions.map((collision) => collision.geometry)).toEqual([
+      {
+        type: 'mesh',
+        filename: 'package://ur_umi_real/meshes/mount.stl',
+        scale: [1, 1, 1],
+      },
+    ]);
   });
 
   it('解析官方六关节、关键连杆和显式 umi_tcp', () => {

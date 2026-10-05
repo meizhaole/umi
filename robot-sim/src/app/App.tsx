@@ -195,7 +195,7 @@ export const App = () => {
 
   const currentModel = findRobotConfig(modelId);
   const hasWrist3Joint =
-    modelId !== 'UR5_UMI' &&
+    modelId !== 'UR5_CAD' &&
     loadedRobot?.description.joints.some((joint) => joint.name === 'wrist_3_joint');
   const wrist3CommandValue =
     mode === 'position'
@@ -1111,7 +1111,7 @@ export const App = () => {
               onClick={() => setModelId(model.id)}
               type="button"
             >
-              {model.id === 'UR5_UMI' ? 'UR5+UMI' : model.id}
+              {model.id === 'UR5_CAD' ? 'UR5 CAD' : model.id}
             </button>
           ))}
         </div>
@@ -1142,7 +1142,7 @@ export const App = () => {
             </div>
           </section>
 
-          {modelId !== 'UR5_UMI' ? (
+          {modelId !== 'UR5_CAD' ? (
             <InferencePanel
               canStep={
                 Boolean(loadedRobot && physicsReady && !loadError) &&
@@ -1351,7 +1351,7 @@ export const App = () => {
                 datasetReplayActualPose={datasetReplayActualPose}
                 onPlaybackStep={applyReplayStep}
                 onPlaybackComplete={inference.completePlayback}
-                cameraEnabled={modelId !== 'UR5_UMI' && Boolean(loadedRobot)}
+                cameraEnabled={modelId !== 'UR5_CAD' && Boolean(loadedRobot)}
                 tcpPose={tcpPose ?? DEFAULT_TARGET}
                 onCameraFrame={handleCameraFrame}
               />

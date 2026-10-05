@@ -2,6 +2,26 @@
 
 使用 Playwright Chromium 本地检查 RS、DM 模型加载与关节控制后保存。
 
+## Phase 3C-1：完整 `wsg50_mount`
+
+Playwright Chromium 浏览器中选择 `UR5 + CAD Mount`，确认 Part Studio 的 9 个 STL 均加载后保存。全局视图显示 UR5 与 mount 的安装位置；末端视图隐藏页面浮层以便查看 mount 外形。
+
+![UR5 与完整 wsg50_mount 浏览器预览](./phase3c1-wsg50-mount-full-assembly.png)
+
+![tool0 上的 mount 末端视图](./phase3c1-wsg50-mount-tool0-detail.png)
+
+左右 soft finger 按 holder-finger Assembly STEP 的实测局部位姿安装，浏览器中分别拖动 jaw 滑块确认独立运动。
+
+![UR5 与左右 soft finger Assembly STEP 预览](./phase3c1-wsg50-soft-fingers-assembly.png)
+
+## Gripper 开合滑条
+
+Playwright Chromium 中依次测试 0、27、55、0 mm；端点截图展示统一滑条的最小和最大值。
+
+![Gripper opening 最小值 0 mm](./gripper-opening-0mm.png)
+
+![Gripper opening 最大值 55 mm](./gripper-opening-55mm.png)
+
 ![RS 仿真页面](./RS.png)
 
 ![DM 仿真页面](./DM.png)

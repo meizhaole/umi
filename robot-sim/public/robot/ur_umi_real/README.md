@@ -1,37 +1,41 @@
-# UR5 + UMI CAD 末端资产
+# UR5 真实 CAD Mount 末端
 
-该目录保存 Phase 3C-1 新建的组合模型。原始 `ur5.urdf`、`umi-gripper.urdf` 和 Phase 3B 组合文件均未改动。
-
-## 资产与坐标
-
-| 文件 | 来源与坐标 | 输出单位 |
-|---|---|---|
-| `meshes/mount.stl` | 从 PartStudio 导出 STL 的 mount 三角面组中提取，保留 CAD 原点和轴向 | m |
-| `meshes/umi_base.stl` | 复用旧 UMI `base_link.stl`，顶点不变 | m |
-| `meshes/gopro.stl` | 复用旧 GoPro visual 网格，顶点不变 | m |
-| `meshes/left_finger.stl` | 单指 CAD 网格，按旧 UMI URDF 的左指 visual 位姿烘焙到 finger link 坐标 | m |
-| `meshes/right_finger.stl` | 左指网格关于 finger joint 坐标系 `x=0` 离线镜像 | m |
-
-`mount-partstudio.stl` 原始导出包含整个 Part Studio。三角面 `[127732, 140750)` 与 `gripper_mount` 的 198 个 BREP 顶点、包围盒及闭合拓扑相符。其他实体在该分段没有独立顶点匹配；主组件 `1` 与它仅有 4 个接口共点。提取后将毫米坐标乘以 `0.001`，转为 URDF 使用的米。
-
-单指 CAD 与旧 UMI 指夹网格表面最大差约 `0.14 mm`。旧 URDF 将两侧几何放置后，左右指关于 `body1` 的 `x=0` 平面对称；该证据用于确定新右指的镜像面。镜像时已反转三角绕序并重算法线。
-
-## 运动学树
+`urdf/ur5_umi_real.urdf` 保留 UR5 原有六轴结构，只连接当前已确认安装关系的真实 CAD mount。运行时树为：
 
 ```mermaid
 graph TD
     tool0 -->|ur5_to_mount| mount_link
-    mount_link -->|mount_to_umi placeholder| umi_base_link
-    umi_base_link -->|left_finger_joint| left_finger_link
-    umi_base_link -->|right_finger_joint| right_finger_link
 ```
 
-`left_finger_joint` 与 `right_finger_joint` 保留旧模型的 prismatic 轴向和 `0–0.05 m` 行程。
+`mount-partstudio.step` 中的 9 个 Part 分别导出为独立 STL，并保留 STEP 的 Part Studio 全局顶点坐标；静止零位不设置单独 visual origin，也不对网格重新居中或配准。STEP 坐标从毫米乘以 `0.001` 转成米。URDF 将固定实体放入 `mount_link` 和 `fixed_mount_link`，两个 holder 则分别放入独立的 jaw link。
 
-## Transform 状态
+| STEP Part | 网格 | STEP RGB | 三角面 |
+|---|---|---|---:|
+| `Part 1` | `meshes/part_1.stl` | `0.216, 0.216, 0.216` | 36,472 |
+| `Part 2` | `meshes/part_2.stl` | `0.527, 0.527, 0.527` | 7,846 |
+| `Part 3` | `meshes/part_3.stl` | `0.527, 0.527, 0.527` | 3,636 |
+| `Part 4` | `meshes/part_4.stl` | `0.527, 0.527, 0.527` | 3,636 |
+| `Part 5` | `meshes/part_5.stl` | `0.527, 0.527, 0.527` | 2,428 |
+| `Part 6` | `meshes/part_6.stl` | `0.527, 0.527, 0.527` | 2,428 |
+| `finger_holder_right` | `meshes/finger_holder_right.stl` | `0.212, 0.212, 0.212` | 5,248 |
+| `finger_holder_left` | `meshes/finger_holder_left.stl` | `0.212, 0.212, 0.212` | 5,248 |
+| `gripper_mount` | `meshes/mount.stl` | `0.956, 0.468, 0.000` | 7,896 |
 
-`tool0 → mount_link` 使用 `xyz=[0,0,0] m`、`rpy=[-π/2,0,0] rad`。这是几何推断：CAD mount 的 y=0 面和居中的 50 mm 孔距对齐 UR 输出法兰；CAD 定位孔在安装面上的位置为 z=+25 mm。按官方法兰图的定位孔方向和 UR5 URDF 的 tool0 轴注释，将 CAD +z 对齐 tool0 +y，并让 mount 从法兰朝 tool0 +z 延伸。它不是 CAD Assembly mate 测量，使用前仍需实机或装配 CAD 核验。[UR5e 用户手册：Securing Tool](https://www.universal-robots.com/manuals/EN/PDF/SW5_19/user-manual-UR5e-PDF_online/710-965-00_UR5e_User_Manual_en_Global.pdf)，[当前 UR5 + UMI URDF](../ur_umi/ur5_umi.urdf)
+导出网格使用 `0.01 mm` 线性偏差和 `0.15 rad` 角度偏差；仅移除 9 个零面积退化三角面，不改变有效表面。URDF visual 使用 STEP 产品级 RGB 颜色；标准 URDF 材质不能表达 STEP 中的逐面颜色覆盖。`mount_link` 的 collision 仍只使用 `meshes/mount.stl`。
 
-`mount → umi_base_link` 当前为显式标记的 identity placeholder。提供的 mount Assembly 不含 UMI base，因此真实 `T_mount_umi_base` 尚未知。该 placeholder 只保持 URDF 树可遍历，不能当作标定结果。
+## Holder 与 soft finger
 
-GoPro 只作为 `umi_base_link` 下的 visual，保留旧 visual origin，不含 collision；没有添加 TCP 或 optical frame。加载时将 `ur_description` 映射到 `/robot/ur_description`，将 `ur_umi_real` 映射到 `/robot/ur_umi_real`。
+`left-holder-finger-assembly.step` 和 `right-holder-finger-assembly.step` 定义了两侧 holder 与 soft finger 的相对位姿。finger 网格以对应 Assembly 产品局部坐标为原点：右侧由 `cad-input/phase3c1/umi-single-finger.stl` 毫米转米；左侧再关于产品局部 `x=0` 镜像并反转三角面绕序。原始 CAD 输入保持不变。
+
+| 侧 | STEP holder → finger translation (m) | URDF RPY (rad) |
+|---|---|---|
+| left | `0.0008625831240207, -0.101421295298399, -0.0093` | `-1.5707963267948966, 0, 0` |
+| right | `-0.000862583124020702, -0.101421295298399, -0.0093` | `-1.5707963267948966, 0, 0` |
+
+两个 prismatic joint 在 `x` 轴上分别向外运动，`q=0` 对应 Assembly STEP 的静止装配位姿；行程上限为每指 `55 mm`。该 joint 位置范围对应 WSG 50 用户手册列出的每指行程。[WSG 50 用户手册](https://weiss-robotics.com/servo-electric/wsg-series/product/wsg-serie/?cid=11014&file=files%2Fdownloads%2Fwsg%2Fum_wsg50_en.pdf)
+
+固定变换为 `xyz=[0,0,0] m`、`rpy=[-π/2,0,π] rad`，即在原安装姿态上绕法兰轴旋转 `180°`，用于将整个 Part Studio 坐标系连接到 UR5 `tool0`。
+
+`left_finger.stl`、`right_finger.stl` 不属于 mount Part Studio 的 9 个 Part；它们分别随 `left_jaw_link`、`right_jaw_link` 运动。`gopro.stl` 保留在目录中，当前 URDF 不引用它。
+
+URDF 网格 URI 通过加载配置解析：`ur_description` 映射到 `/robot/ur_description`，`ur_umi_real` 映射到 `/robot/ur_umi_real`。

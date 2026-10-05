@@ -39,6 +39,10 @@
 - [x] 完成 Phase 3B-2：独立预览并验证 UMI gripper 网格与 finger joints
 - [x] 完成 Phase 3B-3：固定 UMI 子树并新增 UR5 + UMI 组合预览
 - [x] 完成 Phase 3C-1：基于 CAD 新建 UR5 + UMI 末端资产
+- [x] 清理旧 UMI 仿真入口并切换到真实 CAD mount
+- [x] 恢复 wsg50_mount Part Studio 的九个全局坐标网格
+- [x] 接入左右 holder-finger Assembly 实测位姿并拆分独立 jaw link
+- [x] 增加统一 Gripper opening 滑条并验证左右 jaw 同步运动
 - [ ] 将本机训练 checkpoint 接入 Gazebo 回放启动参数
 - [ ] 接通 Gazebo 相机与 UMI 推理观测
 - [ ] 将实时 UMI 策略接入 ReBot RS 实机控制链路
