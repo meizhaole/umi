@@ -300,6 +300,12 @@
       <geometry><mesh filename="package://ur_umi_real/meshes/mount.stl"/></geometry>
       <material name="cad_gripper_mount"/>
     </visual>
+    <visual name="gopro">
+      <origin xyz="-0.01265 -0.0223 0.08185" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://ur_umi_real/meshes/gopro.stl"/>
+      </geometry>
+    </visual>
     <collision>
       <geometry>
         <mesh filename="package://ur_umi_real/meshes/mount.stl"/>
