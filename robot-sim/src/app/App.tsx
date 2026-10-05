@@ -194,9 +194,9 @@ export const App = () => {
   const observationIndexRef = useRef(0);
 
   const currentModel = findRobotConfig(modelId);
-  const hasWrist3Joint = loadedRobot?.description.joints.some(
-    (joint) => joint.name === 'wrist_3_joint',
-  );
+  const hasWrist3Joint =
+    modelId !== 'UR5_UMI' &&
+    loadedRobot?.description.joints.some((joint) => joint.name === 'wrist_3_joint');
   const wrist3CommandValue =
     mode === 'position'
       ? commands.wrist_3_joint?.mode === 'position'
@@ -1102,6 +1102,7 @@ export const App = () => {
         <div className="model-switch" aria-label="机械臂型号">
           {ROBOT_MODELS.map((model) => (
             <button
+              aria-label={model.label}
               className={model.id === modelId ? 'model-tab active' : 'model-tab'}
               key={model.id}
               disabled={
@@ -1110,7 +1111,7 @@ export const App = () => {
               onClick={() => setModelId(model.id)}
               type="button"
             >
-              {model.id}
+              {model.id === 'UR5_UMI' ? 'UR5+UMI' : model.id}
             </button>
           ))}
         </div>
@@ -1141,26 +1142,28 @@ export const App = () => {
             </div>
           </section>
 
-          <InferencePanel
-            canStep={
-              Boolean(loadedRobot && physicsReady && !loadError) &&
-              !datasetReplayEnabled &&
-              !experimentRecording &&
-              (!inference.isLocked || inference.status === 'waiting')
-            }
-            error={inference.error}
-            isLocked={inference.isLocked}
-            onStep={() => {
-              if (mode !== 'position' && !inference.isLocked) setControlMode('position');
-              setIsRunning(true);
-              inference.step();
-            }}
-            onStop={inference.stop}
-            progress={inference.progress}
-            status={inference.status}
-          />
+          {modelId !== 'UR5_UMI' ? (
+            <InferencePanel
+              canStep={
+                Boolean(loadedRobot && physicsReady && !loadError) &&
+                !datasetReplayEnabled &&
+                !experimentRecording &&
+                (!inference.isLocked || inference.status === 'waiting')
+              }
+              error={inference.error}
+              isLocked={inference.isLocked}
+              onStep={() => {
+                if (mode !== 'position' && !inference.isLocked) setControlMode('position');
+                setIsRunning(true);
+                inference.step();
+              }}
+              onStop={inference.stop}
+              progress={inference.progress}
+              status={inference.status}
+            />
+          ) : null}
 
-          {currentModel.type === 'ur5' ? (
+          {modelId === 'UR5' ? (
             <DatasetReplayPanel
               active={datasetReplayEnabled}
               canControl={Boolean(
@@ -1348,7 +1351,7 @@ export const App = () => {
                 datasetReplayActualPose={datasetReplayActualPose}
                 onPlaybackStep={applyReplayStep}
                 onPlaybackComplete={inference.completePlayback}
-                cameraEnabled={Boolean(loadedRobot)}
+                cameraEnabled={modelId !== 'UR5_UMI' && Boolean(loadedRobot)}
                 tcpPose={tcpPose ?? DEFAULT_TARGET}
                 onCameraFrame={handleCameraFrame}
               />

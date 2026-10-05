@@ -1,0 +1,13 @@
+Umi Gripper
+
+Built by:   Umi
+Licence:    MIT
+Source:     https://github.com/google-deepmind/mujoco_menagerie/tree/main/umi_gripper
+Collection: MuJoCo Menagerie
+Packaged:   2026-10-05 by urdfbase.com/models/umi-gripper/
+
+This folder holds the model written as URDF, with mesh paths rewritten to
+meshes/ so they resolve wherever the folder is opened. The original files, with
+the paths their authors wrote, are at the source above.
+
+The robot belongs to the people who built it. Credit the source, not this site.

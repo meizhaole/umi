@@ -37,6 +37,7 @@
 - [x] 为 wrist_3_joint 增加独立 Rapier 物理调试面板
 - [x] 完成 wrist_3_joint Manual Control 与 dataset single-frame Replay 同目标 A/B 实验并记录 120 个 physics step
 - [x] 完成 Phase 3B-2：独立预览并验证 UMI gripper 网格与 finger joints
+- [x] 完成 Phase 3B-3：固定 UMI 子树并新增 UR5 + UMI 组合预览
 - [ ] 将本机训练 checkpoint 接入 Gazebo 回放启动参数
 - [ ] 接通 Gazebo 相机与 UMI 推理观测
 - [ ] 将实时 UMI 策略接入 ReBot RS 实机控制链路

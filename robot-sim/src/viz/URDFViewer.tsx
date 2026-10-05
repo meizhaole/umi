@@ -84,16 +84,18 @@ export const URDFViewer = ({
   return robot ? (
     <>
       <primitive object={robot} />
-      <WristCameraCapture
-        description={description}
-        enabled={cameraEnabled}
-        cupBodyRef={cupBodyRef}
-        inferenceActive={inferenceActive}
-        jointValues={jointValues}
-        onCapture={onCameraFrame}
-        eefPose={tcpPose}
-        robot={robot}
-      />
+      {cameraEnabled ? (
+        <WristCameraCapture
+          description={description}
+          enabled={cameraEnabled}
+          cupBodyRef={cupBodyRef}
+          inferenceActive={inferenceActive}
+          jointValues={jointValues}
+          onCapture={onCameraFrame}
+          eefPose={tcpPose}
+          robot={robot}
+        />
+      ) : null}
     </>
   ) : null;
 };
