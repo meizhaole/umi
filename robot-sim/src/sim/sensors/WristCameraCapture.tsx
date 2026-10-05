@@ -1,13 +1,12 @@
 import { useEffect, useMemo } from 'react';
 import { useFrame, useThree } from '@react-three/fiber';
-import { PerspectiveCamera, SRGBColorSpace, WebGLRenderTarget } from 'three';
+import { Group, PerspectiveCamera, SRGBColorSpace, WebGLRenderTarget } from 'three';
 import type { URDFRobot } from 'urdf-loader';
-import { Vector3 } from 'three';
 import type { JointValues, Pose, RobotDescription } from '../../core/types';
 import { publishDebugEvent } from '../../app/debugBus';
 import { SIMULATION_LAYER } from '../../viz/sceneLayers';
 import { CAMERA_IMAGE_SIZE } from './CameraSensor';
-import type { CupBodyRef } from '../tasks/CupArrangementScene';
+import { WRIST_CAMERA_CONFIG } from './wristCameraConfig';
 
 export interface SimCameraFrame {
   timestamp: number;
@@ -23,15 +22,46 @@ interface WristCameraCaptureProps {
   eefPose: Pose;
   jointValues: JointValues;
   enabled: boolean;
-  inferenceActive: boolean;
-  cupBodyRef: CupBodyRef;
   onCapture: (frame: SimCameraFrame) => void;
 }
 
-const IMAGE_SIZE = CAMERA_IMAGE_SIZE;
 const CAPTURE_INTERVAL_MS = 50;
-const CAMERA_MOUNT_POSITION: [number, number, number] = [0, 0, 0.055];
-const CAMERA_MOUNT_ROTATION: [number, number, number] = [0, 1.355 - Math.PI / 2, 0];
+
+const createCanvasPipeline = () => {
+  const sourceCanvas = document.createElement('canvas');
+  sourceCanvas.width = WRIST_CAMERA_CONFIG.captureWidth;
+  sourceCanvas.height = WRIST_CAMERA_CONFIG.captureHeight;
+  const sourceContext = sourceCanvas.getContext('2d', { willReadFrequently: true });
+  const outputCanvas = document.createElement('canvas');
+  outputCanvas.width = CAMERA_IMAGE_SIZE;
+  outputCanvas.height = CAMERA_IMAGE_SIZE;
+  const outputContext = outputCanvas.getContext('2d', { willReadFrequently: true });
+
+  if (!sourceContext || !outputContext) {
+    throw new Error('无法创建腕部相机裁剪画布');
+  }
+
+  return {
+    sourceCanvas,
+    sourceContext,
+    sourceImageData: sourceContext.createImageData(
+      WRIST_CAMERA_CONFIG.captureWidth,
+      WRIST_CAMERA_CONFIG.captureHeight,
+    ),
+    outputContext,
+    cropSize: Math.min(WRIST_CAMERA_CONFIG.captureWidth, WRIST_CAMERA_CONFIG.captureHeight),
+    cropLeft: Math.floor(
+      (WRIST_CAMERA_CONFIG.captureWidth -
+        Math.min(WRIST_CAMERA_CONFIG.captureWidth, WRIST_CAMERA_CONFIG.captureHeight)) /
+        2,
+    ),
+    cropTop: Math.floor(
+      (WRIST_CAMERA_CONFIG.captureHeight -
+        Math.min(WRIST_CAMERA_CONFIG.captureWidth, WRIST_CAMERA_CONFIG.captureHeight)) /
+        2,
+    ),
+  };
+};
 
 const getGripperWidth = (description: RobotDescription, jointValues: JointValues) =>
   description.joints
@@ -55,35 +85,78 @@ export const WristCameraCapture = ({
   eefPose,
   jointValues,
   enabled,
-  inferenceActive,
-  cupBodyRef,
   onCapture,
 }: WristCameraCaptureProps) => {
   const { gl, scene } = useThree();
   const camera = useMemo(() => {
-    const sensorCamera = new PerspectiveCamera(60, 1, 0.01, 5);
-    sensorCamera.position.set(...CAMERA_MOUNT_POSITION);
-    sensorCamera.rotation.set(...CAMERA_MOUNT_ROTATION);
+    const sensorCamera = new PerspectiveCamera(
+      WRIST_CAMERA_CONFIG.fieldOfViewDegrees,
+      WRIST_CAMERA_CONFIG.captureWidth / WRIST_CAMERA_CONFIG.captureHeight,
+      WRIST_CAMERA_CONFIG.near,
+      WRIST_CAMERA_CONFIG.far,
+    );
     sensorCamera.layers.set(SIMULATION_LAYER);
     sensorCamera.updateProjectionMatrix();
     return sensorCamera;
   }, []);
-  const target = useMemo(() => new WebGLRenderTarget(IMAGE_SIZE, IMAGE_SIZE), []);
+  const cameraAnchor = useMemo(() => new Group(), []);
+  const target = useMemo(
+    () =>
+      new WebGLRenderTarget(WRIST_CAMERA_CONFIG.captureWidth, WRIST_CAMERA_CONFIG.captureHeight),
+    [],
+  );
   target.texture.colorSpace = SRGBColorSpace;
-  const pixels = useMemo(() => new Uint8Array(IMAGE_SIZE * IMAGE_SIZE * 4), []);
-  const rgb = useMemo(() => new Uint8Array(IMAGE_SIZE * IMAGE_SIZE * 3), []);
-  const cupTarget = useMemo(() => new Vector3(), []);
+  const pixels = useMemo(
+    () => new Uint8Array(WRIST_CAMERA_CONFIG.captureWidth * WRIST_CAMERA_CONFIG.captureHeight * 4),
+    [],
+  );
+  const rgb = useMemo(() => new Uint8Array(CAMERA_IMAGE_SIZE * CAMERA_IMAGE_SIZE * 3), []);
+  const canvasPipeline = useMemo(createCanvasPipeline, []);
   const cadence = useMemo(() => ({ lastCapture: 0 }), []);
   const layerAudit = useMemo(() => ({ signature: '' }), []);
 
   useEffect(() => {
-    const link = robot.links[description.tipLink] ?? robot.links.end_link;
-    if (!link) throw new Error(`URDF 缺少末端 link：${description.tipLink}`);
-    link.add(camera);
+    const mountLink = robot.links.mount_link;
+    const parentLink = mountLink ?? robot.links[description.tipLink] ?? robot.links.end_link;
+    if (!parentLink) throw new Error(`URDF 缺少末端 link：${description.tipLink}`);
+
+    cameraAnchor.name = mountLink ? 'gopro_camera_anchor' : 'wrist_camera_anchor';
+    if (mountLink) {
+      cameraAnchor.position.set(...WRIST_CAMERA_CONFIG.goproVisualOrigin);
+      cameraAnchor.rotation.set(...WRIST_CAMERA_CONFIG.goproVisualRotation);
+      camera.position.set(...WRIST_CAMERA_CONFIG.goproCameraPosition);
+      camera.quaternion.set(...WRIST_CAMERA_CONFIG.goproCameraQuaternion);
+    } else {
+      cameraAnchor.position.set(...WRIST_CAMERA_CONFIG.legacyMountPosition);
+      cameraAnchor.rotation.set(...WRIST_CAMERA_CONFIG.legacyMountRotation);
+      camera.position.set(0, 0, 0);
+      camera.quaternion.identity();
+    }
+    cameraAnchor.add(camera);
+    parentLink.add(cameraAnchor);
+    publishDebugEvent('camera:wrist_mount', {
+      parentLink: mountLink ? 'mount_link' : description.tipLink,
+      anchor: cameraAnchor.name,
+      opticalCenterStatus: mountLink ? 'geometric_proxy_requires_calibration' : 'legacy_mount',
+      localCameraPosition: camera.position.toArray(),
+      localCameraQuaternion: camera.quaternion.toArray(),
+      renderResolution: [WRIST_CAMERA_CONFIG.captureWidth, WRIST_CAMERA_CONFIG.captureHeight],
+      centerCrop: {
+        x: canvasPipeline.cropLeft,
+        y: canvasPipeline.cropTop,
+        width: canvasPipeline.cropSize,
+        height: canvasPipeline.cropSize,
+      },
+      policyResolution: [CAMERA_IMAGE_SIZE, CAMERA_IMAGE_SIZE],
+      fieldOfViewDegrees: WRIST_CAMERA_CONFIG.fieldOfViewDegrees,
+      near: WRIST_CAMERA_CONFIG.near,
+      far: WRIST_CAMERA_CONFIG.far,
+    });
+
     return () => {
-      link.remove(camera);
+      parentLink.remove(cameraAnchor);
     };
-  }, [camera, description.tipLink, robot]);
+  }, [camera, cameraAnchor, canvasPipeline, description.tipLink, robot]);
 
   useEffect(() => () => target.dispose(), [target]);
 
@@ -111,36 +184,60 @@ export const WristCameraCapture = ({
       });
       layerAudit.signature = layerAuditSignature;
     }
-    const cupPosition = cupBodyRef.current?.translation();
-    if (inferenceActive && cupPosition) {
-      cupTarget.set(cupPosition.x, cupPosition.y + 0.039, cupPosition.z);
-      camera.lookAt(cupTarget);
-      camera.updateMatrixWorld(true);
-    } else {
-      camera.rotation.set(...CAMERA_MOUNT_ROTATION);
-      camera.updateMatrixWorld(true);
-    }
+
     const previousTarget = gl.getRenderTarget();
     const previousXr = gl.xr.enabled;
     gl.xr.enabled = false;
     try {
       gl.setRenderTarget(target);
       gl.render(scene, camera);
-      gl.readRenderTargetPixels(target, 0, 0, IMAGE_SIZE, IMAGE_SIZE, pixels);
+      gl.readRenderTargetPixels(
+        target,
+        0,
+        0,
+        WRIST_CAMERA_CONFIG.captureWidth,
+        WRIST_CAMERA_CONFIG.captureHeight,
+        pixels,
+      );
     } finally {
       gl.setRenderTarget(previousTarget);
       gl.xr.enabled = previousXr;
     }
 
-    for (let y = 0; y < IMAGE_SIZE; y += 1) {
-      for (let x = 0; x < IMAGE_SIZE; x += 1) {
-        const source = ((IMAGE_SIZE - y - 1) * IMAGE_SIZE + x) * 4;
-        const destination = (y * IMAGE_SIZE + x) * 3;
-        rgb[destination] = pixels[source];
-        rgb[destination + 1] = pixels[source + 1];
-        rgb[destination + 2] = pixels[source + 2];
-      }
+    for (let y = 0; y < WRIST_CAMERA_CONFIG.captureHeight; y += 1) {
+      const sourceStart =
+        (WRIST_CAMERA_CONFIG.captureHeight - y - 1) * WRIST_CAMERA_CONFIG.captureWidth * 4;
+      const targetStart = y * WRIST_CAMERA_CONFIG.captureWidth * 4;
+      canvasPipeline.sourceImageData.data.set(
+        pixels.subarray(sourceStart, sourceStart + WRIST_CAMERA_CONFIG.captureWidth * 4),
+        targetStart,
+      );
     }
+    canvasPipeline.sourceContext.putImageData(canvasPipeline.sourceImageData, 0, 0);
+    canvasPipeline.outputContext.drawImage(
+      canvasPipeline.sourceCanvas,
+      canvasPipeline.cropLeft,
+      canvasPipeline.cropTop,
+      canvasPipeline.cropSize,
+      canvasPipeline.cropSize,
+      0,
+      0,
+      CAMERA_IMAGE_SIZE,
+      CAMERA_IMAGE_SIZE,
+    );
+    const outputPixels = canvasPipeline.outputContext.getImageData(
+      0,
+      0,
+      CAMERA_IMAGE_SIZE,
+      CAMERA_IMAGE_SIZE,
+    ).data;
+    for (let source = 0, destination = 0; source < outputPixels.length; source += 4) {
+      rgb[destination] = outputPixels[source];
+      rgb[destination + 1] = outputPixels[source + 1];
+      rgb[destination + 2] = outputPixels[source + 2];
+      destination += 3;
+    }
+
     onCapture({
       timestamp: performance.now(),
       rgb: rgb.slice(),

@@ -1351,7 +1351,7 @@ export const App = () => {
                 datasetReplayActualPose={datasetReplayActualPose}
                 onPlaybackStep={applyReplayStep}
                 onPlaybackComplete={inference.completePlayback}
-                cameraEnabled={modelId !== 'UR5_CAD' && Boolean(loadedRobot)}
+                cameraEnabled={Boolean(loadedRobot)}
                 tcpPose={tcpPose ?? DEFAULT_TARGET}
                 onCameraFrame={handleCameraFrame}
               />

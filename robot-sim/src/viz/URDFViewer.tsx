@@ -6,7 +6,6 @@ import type { JointValues } from '../core/types';
 import type { RobotDescription, Pose } from '../core/types';
 import { publishDebugEvent } from '../app/debugBus';
 import { WristCameraCapture, type SimCameraFrame } from '../sim/sensors/WristCameraCapture';
-import type { CupBodyRef } from '../sim/tasks/CupArrangementScene';
 
 interface URDFViewerProps {
   urdfXml: string;
@@ -16,8 +15,6 @@ interface URDFViewerProps {
   onLoaded: () => void;
   description: RobotDescription;
   cameraEnabled: boolean;
-  cupBodyRef: CupBodyRef;
-  inferenceActive: boolean;
   tcpPose: Pose;
   onCameraFrame: (frame: SimCameraFrame) => void;
 }
@@ -30,8 +27,6 @@ export const URDFViewer = ({
   onLoaded,
   description,
   cameraEnabled,
-  cupBodyRef,
-  inferenceActive,
   tcpPose,
   onCameraFrame,
 }: URDFViewerProps) => {
@@ -88,8 +83,6 @@ export const URDFViewer = ({
         <WristCameraCapture
           description={description}
           enabled={cameraEnabled}
-          cupBodyRef={cupBodyRef}
-          inferenceActive={inferenceActive}
           jointValues={jointValues}
           onCapture={onCameraFrame}
           eefPose={tcpPose}
