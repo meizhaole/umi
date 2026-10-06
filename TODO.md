@@ -49,6 +49,7 @@
 - [x] 为 UR5_CAD 单独调整杯碟造型、初始位置与复位
 - [x] 为 UR5_CAD 单动作审阅增加机器人门禁与 JSON 持久化
 - [x] 完成 UR5_CAD 当前新场景单动作闭环验证并暂停待人工验收
+- [x] 修复仿真 bridge 的 episode start 与 UR5_CAD 夹爪宽度映射
 - [ ] 将本机训练 checkpoint 接入 Gazebo 回放启动参数
 - [ ] 接通 Gazebo 相机与 UMI 推理观测
 - [ ] 将实时 UMI 策略接入 ReBot RS 实机控制链路

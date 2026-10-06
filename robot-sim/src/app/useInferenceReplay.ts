@@ -15,6 +15,7 @@ import type {
   InferenceObservation,
 } from './inferenceProtocol';
 import { poseErrorRotation, vectorLength } from '../utils/math';
+import { getGripperJoints, mapGripperOpeningToJoints } from './gripperMapping';
 
 const INFERENCE_SOCKET_URL = 'ws://localhost:8000/ws/inference';
 const IK_TIMEOUT_MS = 1000;
@@ -116,6 +117,7 @@ export const useInferenceReplay = ({
     getObservation,
   });
   const socketRef = useRef<WebSocket | null>(null);
+  const episodeIndexRef = useRef(-1);
   const workerRef = useRef<Worker | null>(null);
   const workerTimeoutRef = useRef<number | null>(null);
   const activeChunkRef = useRef<ActionChunk | null>(null);
@@ -283,30 +285,28 @@ export const useInferenceReplay = ({
         { lower: joint.limit?.lower ?? null, upper: joint.limit?.upper ?? null },
       ]),
     );
-    const gripperJoints =
-      context.description?.joints.filter(
-        (joint) =>
-          joint.type === 'prismatic' && /gripper|finger/iu.test(joint.name + ' ' + joint.child),
-      ) ?? [];
+    const gripperJoints = context.description
+      ? getGripperJoints(context.description, context.robotConfig.gripperJointNames)
+      : [];
     const gripperJointLimits = Object.fromEntries(
       gripperJoints.map((joint) => [
         joint.name,
         { lower: joint.limit?.lower ?? 0, upper: joint.limit?.upper ?? joint.limit?.lower ?? 0 },
       ]),
     );
-    const maximumGripperOpening = gripperJoints.reduce((total, joint) => {
-      const lower = joint.limit?.lower ?? 0;
-      const upper = joint.limit?.upper ?? lower;
-      return total + Math.abs(upper - lower);
-    }, 0);
     const residual = isRecord(error.residual) ? error.residual : {};
     const targetTcpNumbers = targetTcp ? [...targetTcp.position, ...targetTcp.orientation] : [];
     const currentGripperOpening =
       lastObservationRef.current?.robot0_gripper_width.at(-1)?.[0] ?? null;
-    const targetGripperOpening =
-      typeof robotAction[6] === 'number'
-        ? Math.max(0, Math.min(maximumGripperOpening, robotAction[6]))
+    const gripperMapping =
+      context.description && typeof robotAction[6] === 'number'
+        ? mapGripperOpeningToJoints(
+            context.description,
+            robotAction[6],
+            context.robotConfig.gripperJointNames,
+          )
         : null;
+    const targetGripperOpening = gripperMapping?.clamped_gripper_opening_m ?? null;
     const finiteValues = [
       ...actionPrediction,
       ...robotAction,
@@ -317,6 +317,12 @@ export const useInferenceReplay = ({
       ...(currentTcp ? [...currentTcp.position, ...currentTcp.orientation] : []),
       ...(currentGripperOpening === null ? [] : [currentGripperOpening]),
       ...(targetGripperOpening === null ? [] : [targetGripperOpening]),
+      ...(gripperMapping
+        ? [
+            gripperMapping.requested_gripper_opening_m,
+            ...Object.values(gripperMapping.joint_targets),
+          ]
+        : []),
       ...(currentGripperOpening === null || targetGripperOpening === null
         ? []
         : [targetGripperOpening - currentGripperOpening]),
@@ -402,6 +408,7 @@ export const useInferenceReplay = ({
       maximum_joint_delta_joint: maximumJointDeltaName,
       joint_limits_rad: jointLimits,
       gripper_joint_limits_m: gripperJointLimits,
+      ...(gripperMapping ?? {}),
       finite_values: finiteValues,
       non_finite_values_present: !finiteValues,
       all_arm_joints_within_limits: false,
@@ -442,7 +449,13 @@ export const useInferenceReplay = ({
         }
       : observation;
     lastObservationRef.current = policyObservation;
-    socket.send(JSON.stringify({ type: 'observation', ...policyObservation }));
+    socket.send(
+      JSON.stringify({
+        type: 'observation',
+        episode_index: episodeIndexRef.current,
+        ...policyObservation,
+      }),
+    );
     if (mountedRef.current) setProgress('观测已发送，正在推理下一步动作');
     updateStatus('inferring');
     publishDebugEvent('inference:observation_sent', {
@@ -671,11 +684,9 @@ export const useInferenceReplay = ({
         const tcpRotationDeltaNorm = tcpRotationDelta ? vectorLength(tcpRotationDelta) : null;
         const currentGripperOpening =
           lastObservationRef.current?.robot0_gripper_width.at(-1)?.[0] ?? null;
-        const gripperJoints =
-          context.description?.joints.filter(
-            (joint) =>
-              joint.type === 'prismatic' && /gripper|finger/iu.test(joint.name + ' ' + joint.child),
-          ) ?? [];
+        const gripperJoints = context.description
+          ? getGripperJoints(context.description, context.robotConfig.gripperJointNames)
+          : [];
         const gripperJointLimits = Object.fromEntries(
           gripperJoints.map((joint) => [
             joint.name,
@@ -685,14 +696,15 @@ export const useInferenceReplay = ({
             },
           ]),
         );
-        const maximumGripperOpening = gripperJoints.reduce((total, joint) => {
-          const lower = joint.limit?.lower ?? 0;
-          const upper = joint.limit?.upper ?? lower;
-          return total + Math.abs(upper - lower);
-        }, 0);
-        const targetGripperOpening = firstRobotAction
-          ? Math.max(0, Math.min(maximumGripperOpening, firstRobotAction[6]))
-          : null;
+        const gripperMapping =
+          context.description && firstRobotAction
+            ? mapGripperOpeningToJoints(
+                context.description,
+                firstRobotAction[6],
+                context.robotConfig.gripperJointNames,
+              )
+            : null;
+        const targetGripperOpening = gripperMapping?.clamped_gripper_opening_m ?? null;
         const gripperDelta =
           currentGripperOpening !== null && targetGripperOpening !== null
             ? targetGripperOpening - currentGripperOpening
@@ -730,6 +742,12 @@ export const useInferenceReplay = ({
           ...(tcpRotationDeltaNorm === null ? [] : [tcpRotationDeltaNorm]),
           ...(currentGripperOpening === null ? [] : [currentGripperOpening]),
           ...(targetGripperOpening === null ? [] : [targetGripperOpening]),
+          ...(gripperMapping
+            ? [
+                gripperMapping.requested_gripper_opening_m,
+                ...Object.values(gripperMapping.joint_targets),
+              ]
+            : []),
           ...(gripperDelta === null ? [] : [gripperDelta]),
           ...(typeof ikRecord?.position_residual === 'number' ? [ikRecord.position_residual] : []),
           ...(typeof ikRecord?.orientation_residual === 'number'
@@ -801,6 +819,7 @@ export const useInferenceReplay = ({
           maximum_joint_delta_joint: maximumJointDeltaName,
           joint_limits_rad: jointLimits,
           gripper_joint_limits_m: gripperJointLimits,
+          ...(gripperMapping ?? {}),
           current_gripper_opening_m: currentGripperOpening,
           target_gripper_opening_m: targetGripperOpening,
           gripper_delta_m: gripperDelta,
@@ -864,6 +883,7 @@ export const useInferenceReplay = ({
       episode_index: chunk.episode_index,
       frame_index: chunk.frame_index,
       description: context.description,
+      gripperJointNames: context.robotConfig.gripperJointNames,
       startPose: context.tcpPose,
       initialJointValues: context.jointValues,
       actions: selection.actions,
@@ -954,8 +974,12 @@ export const useInferenceReplay = ({
     activeChunkRef.current = null;
     pendingPlaybackRef.current = null;
     activeJointAnglesRef.current = [];
+    episodeIndexRef.current += 1;
     updateStatus('connecting');
-    publishDebugEvent('inference:connect', { url: INFERENCE_SOCKET_URL });
+    publishDebugEvent('inference:connect', {
+      url: INFERENCE_SOCKET_URL,
+      episode_index: episodeIndexRef.current,
+    });
 
     try {
       clearWorker();

@@ -335,6 +335,7 @@ export const SceneManager = ({
         <RobotBody
           commands={commands}
           description={description}
+          gripperJointNames={model.gripperJointNames}
           diagnostics={robotDiagnostics}
           packageMappings={model.packageMappings}
           positionExecution={
@@ -357,6 +358,7 @@ export const SceneManager = ({
           onError={handleViewerError}
           onLoaded={handleViewerLoaded}
           description={description}
+          gripperJointNames={model.gripperJointNames}
           cameraEnabled={cameraEnabled}
           tcpPose={tcpPose}
           onCameraFrame={onCameraFrame}

@@ -1372,6 +1372,7 @@ export const App = () => {
           <JointPanel
             commands={commands}
             joints={loadedRobot?.model.getControllableJoints() ?? []}
+            gripperJointNames={currentModel.gripperJointNames}
             jointValues={jointValues}
             mode={mode}
             onCommand={commandJoint}

@@ -4,6 +4,7 @@ import { Group, PerspectiveCamera, SRGBColorSpace, WebGLRenderTarget } from 'thr
 import type { URDFRobot } from 'urdf-loader';
 import type { JointValues, Pose, RobotDescription } from '../../core/types';
 import { publishDebugEvent } from '../../app/debugBus';
+import { getGripperOpening } from '../../app/gripperMapping';
 import { SIMULATION_LAYER } from '../../viz/sceneLayers';
 import { CAMERA_IMAGE_SIZE } from './CameraSensor';
 import { WRIST_CAMERA_CONFIG } from './wristCameraConfig';
@@ -19,6 +20,7 @@ export interface SimCameraFrame {
 interface WristCameraCaptureProps {
   robot: URDFRobot;
   description: RobotDescription;
+  gripperJointNames?: readonly string[];
   eefPose: Pose;
   jointValues: JointValues;
   enabled: boolean;
@@ -52,25 +54,10 @@ const createCanvasPipeline = (captureWidth: number, captureHeight: number) => {
   };
 };
 
-const getGripperWidth = (description: RobotDescription, jointValues: JointValues) =>
-  description.joints
-    .filter(
-      (joint) =>
-        joint.type === 'prismatic' && /gripper|finger/iu.test(joint.name + ' ' + joint.child),
-    )
-    .reduce((width, joint) => {
-      const source = joint.mimic
-        ? description.joints.find((candidate) => candidate.name === joint.mimic?.joint)
-        : null;
-      const baseline = joint.mimic
-        ? (source?.limit?.lower ?? 0) * joint.mimic.multiplier + joint.mimic.offset
-        : (joint.limit?.lower ?? 0);
-      return width + Math.abs((jointValues[joint.name] ?? baseline) - baseline);
-    }, 0);
-
 export const WristCameraCapture = ({
   robot,
   description,
+  gripperJointNames,
   eefPose,
   jointValues,
   enabled,
@@ -253,7 +240,7 @@ export const WristCameraCapture = ({
       rgb: rgb.slice(),
       eefPose: { position: [...eefPose.position], orientation: [...eefPose.orientation] },
       jointValues: { ...jointValues },
-      gripperWidth: getGripperWidth(description, jointValues),
+      gripperWidth: getGripperOpening(description, jointValues, gripperJointNames),
     });
   }, -1);
 

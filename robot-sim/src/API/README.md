@@ -43,7 +43,7 @@ IK 求得的每个动作目标会记录到 `robot-sim/server/logs/inference-acti
 模型载入后发送 `{"type":"status","state":"ready"}` 并等待观测。前端观测消息示例：
 
 ```json
-{"type":"observation","frame_index":0,"camera0_rgb":"<base64 RGB>","robot0_eef_pos":[[0,0,0],[0,0,0]],"robot0_eef_rot_axis_angle":[[0,0,0],[0,0,0]],"robot0_gripper_width":[[0],[0]]}
+{"type":"observation","episode_index":0,"frame_index":0,"camera0_rgb":"<base64 RGB>","robot0_eef_pos":[[0,0,0],[0,0,0]],"robot0_eef_rot_axis_angle":[[0,0,0],[0,0,0]],"robot0_gripper_width":[[0],[0]]}
 ```
 
 服务收到观测后逐块发送动作。每个动作是 `[dx, dy, dz, rx, ry, rz, grip_width]`，位置和夹爪宽度单位为米，旋转是弧度轴角；块内动作都相对于块开始时的 TCP 位姿。

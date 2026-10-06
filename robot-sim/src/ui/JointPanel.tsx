@@ -4,6 +4,7 @@ import { rotateVector } from '../utils/math';
 
 interface JointPanelProps {
   joints: JointDescription[];
+  gripperJointNames?: readonly string[];
   jointValues: JointValues;
   commands: Record<string, JointCommand>;
   mode: ControlMode;
@@ -16,6 +17,8 @@ interface GripperControl {
   left: JointDescription;
   right: JointDescription;
   rightMultiplier: number;
+  leftTravel: number;
+  rightTravel: number;
   range: [number, number];
 }
 
@@ -55,9 +58,16 @@ const rangeLabel = (
   return `${range[0].toFixed(1)} / ${range[1].toFixed(1)} ${unit}`;
 };
 
-const getGripperControl = (joints: JointDescription[]): GripperControl | null => {
-  const left = joints.find((joint) => joint.name === 'left_jaw_joint');
-  const right = joints.find((joint) => joint.name === 'right_jaw_joint');
+const getGripperControl = (
+  joints: JointDescription[],
+  configuredJointNames?: readonly string[],
+): GripperControl | null => {
+  const left = joints.find(
+    (joint) => joint.name === (configuredJointNames?.[0] ?? 'left_jaw_joint'),
+  );
+  const right = joints.find(
+    (joint) => joint.name === (configuredJointNames?.[1] ?? 'right_jaw_joint'),
+  );
   if (
     !left ||
     !right ||
@@ -85,17 +95,25 @@ const getGripperControl = (joints: JointDescription[]): GripperControl | null =>
     rightMultiplier > 0
       ? [right.limit.lower, right.limit.upper]
       : [-right.limit.upper, -right.limit.lower];
-  const range: [number, number] = [
-    Math.max(left.limit.lower, rightRange[0]),
-    Math.min(left.limit.upper, rightRange[1]),
-  ];
-  if (range[0] > range[1]) return null;
+  if (Math.max(left.limit.lower, rightRange[0]) > Math.min(left.limit.upper, rightRange[1])) {
+    return null;
+  }
+  const leftTravel = left.limit.upper - left.limit.lower;
+  const rightTravel = right.limit.upper - right.limit.lower;
 
-  return { left, right, rightMultiplier, range };
+  return {
+    left,
+    right,
+    rightMultiplier,
+    leftTravel,
+    rightTravel,
+    range: [0, leftTravel + rightTravel],
+  };
 };
 
 export const JointPanel = ({
   joints,
+  gripperJointNames,
   jointValues,
   commands,
   mode,
@@ -103,16 +121,27 @@ export const JointPanel = ({
   onModeChange,
   disabled,
 }: JointPanelProps) => {
-  const gripper = getGripperControl(joints);
+  const gripper = getGripperControl(joints, gripperJointNames);
   const individualJoints = gripper
     ? joints.filter(
         (joint) => joint.name !== gripper.left.name && joint.name !== gripper.right.name,
       )
     : joints;
   const gripperValue = gripper
-    ? commands[gripper.left.name]?.mode === 'position'
-      ? commands[gripper.left.name].value
-      : (jointValues[gripper.left.name] ?? gripper.range[0])
+    ? Math.abs(
+        (commands[gripper.left.name]?.mode === 'position'
+          ? commands[gripper.left.name].value
+          : (jointValues[gripper.left.name] ?? gripper.left.limit?.lower ?? 0)) -
+          (gripper.left.limit?.lower ?? 0),
+      ) +
+      Math.abs(
+        (commands[gripper.right.name]?.mode === 'position'
+          ? commands[gripper.right.name].value
+          : (jointValues[gripper.right.name] ?? gripper.right.limit?.lower ?? 0)) -
+          (gripper.rightMultiplier > 0
+            ? (gripper.right.limit?.lower ?? 0)
+            : (gripper.right.limit?.upper ?? 0)),
+      )
     : 0;
 
   return (
@@ -157,8 +186,19 @@ export const JointPanel = ({
             min={gripper.range[0]}
             onChange={(event: ChangeEvent<HTMLInputElement>) => {
               const value = Number(event.target.value);
-              onCommand(gripper.left.name, value);
-              onCommand(gripper.right.name, gripper.rightMultiplier * value);
+              const fraction = gripper.range[1] > 0 ? value / gripper.range[1] : 0;
+              onCommand(
+                gripper.left.name,
+                (gripper.left.limit?.lower ?? 0) + gripper.leftTravel * fraction,
+              );
+              const rightStart =
+                gripper.rightMultiplier > 0
+                  ? (gripper.right.limit?.lower ?? 0)
+                  : (gripper.right.limit?.upper ?? 0);
+              onCommand(
+                gripper.right.name,
+                rightStart + gripper.rightMultiplier * gripper.rightTravel * fraction,
+              );
             }}
             step={0.001}
             type="range"

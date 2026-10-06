@@ -411,6 +411,9 @@ async def read_observation_or_stop(websocket: WebSocket):
     frame_index = message.get("frame_index")
     if isinstance(frame_index, bool) or not isinstance(frame_index, int) or frame_index < 0:
         raise ReplayError("invalid_observation", "read_observation", "frame_index 必须是非负整数")
+    episode_index = message.get("episode_index")
+    if isinstance(episode_index, bool) or not isinstance(episode_index, int) or episode_index < 0:
+        raise ReplayError("invalid_observation", "read_observation", "episode_index 必须是非负整数")
     # 观测包含 base64 图像，按 UTF-8 字节数限制体积。
     size = len(raw_message.encode("utf-8"))
     if size > MAX_WEBSOCKET_MESSAGE_BYTES:

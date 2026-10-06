@@ -14,6 +14,7 @@ interface URDFViewerProps {
   onError: (message: string) => void;
   onLoaded: () => void;
   description: RobotDescription;
+  gripperJointNames?: readonly string[];
   cameraEnabled: boolean;
   tcpPose: Pose;
   onCameraFrame: (frame: SimCameraFrame) => void;
@@ -26,6 +27,7 @@ export const URDFViewer = ({
   onError,
   onLoaded,
   description,
+  gripperJointNames,
   cameraEnabled,
   tcpPose,
   onCameraFrame,
@@ -82,6 +84,7 @@ export const URDFViewer = ({
       {cameraEnabled ? (
         <WristCameraCapture
           description={description}
+          gripperJointNames={gripperJointNames}
           enabled={cameraEnabled}
           jointValues={jointValues}
           onCapture={onCameraFrame}

@@ -8,6 +8,7 @@ export interface RobotConfig {
   file: string;
   packageMappings: Readonly<Record<string, string>>;
   initialJoints: JointValues;
+  gripperJointNames?: readonly string[];
   tipLink?: string;
   tcpParentLink?: string;
   tcpOffset?: number;
@@ -69,6 +70,7 @@ export const ROBOT_MODELS = [
       wrist_2_joint: Math.PI / 2,
       wrist_3_joint: 0,
     },
+    gripperJointNames: ['left_jaw_joint', 'right_jaw_joint'],
     tipLink: 'tool0',
   },
 ] as const satisfies readonly RobotConfig[];

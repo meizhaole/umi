@@ -93,6 +93,37 @@ def save_capture_metadata(metadata_path, metadata):
     )
 
 
+def get_episode_start_pose(env_obs):
+    return [np.concatenate([
+        env_obs["robot0_eef_pos"],
+        env_obs["robot0_eef_rot_axis_angle"],
+    ], axis=-1)[-1].copy()]
+
+
+class EpisodeStartState:
+    def __init__(self):
+        self.episode_index = None
+        self.episode_start_pose = None
+
+    def update(self, episode_index, env_obs, policy):
+        if (
+            isinstance(episode_index, bool)
+            or not isinstance(episode_index, int)
+            or episode_index < 0
+        ):
+            raise ValueError("episode_index 必须是非负整数")
+        if self.episode_index == episode_index:
+            return
+
+        policy.reset()
+        self.episode_index = episode_index
+        self.episode_start_pose = get_episode_start_pose(env_obs)
+
+    def stop(self):
+        self.episode_index = None
+        self.episode_start_pose = None
+
+
 def emit_actions(args):
     if not args.checkpoint.is_file():
         raise FileNotFoundError(f"权重不存在：{args.checkpoint}")
@@ -114,12 +145,14 @@ def emit_actions(args):
     shape_meta = cfg.task.shape_meta
     obs_pose_repr = cfg.task.pose_repr.obs_pose_repr
     action_pose_repr = cfg.task.pose_repr.action_pose_repr
-    episode_start_pose = None
+    episode_state = EpisodeStartState()
+    # 一个 WebSocket 对应一个 worker 进程；stop、断连会终止进程，重连时从新状态开始。
     print(json.dumps({"type": "ready"}), flush=True)
 
     for line in sys.stdin:
         try:
             message = json.loads(line)
+            episode_index = message["episode_index"]
             frame_index = int(message["frame_index"])
             image = np.frombuffer(
                 base64.b64decode(message["camera0_rgb"], validate=True),
@@ -166,16 +199,12 @@ def emit_actions(args):
                 }
                 save_capture_metadata(metadata_path, metadata)
 
-            if episode_start_pose is None:
-                episode_start_pose = [np.concatenate([
-                    env_obs["robot0_eef_pos"][0],
-                    env_obs["robot0_eef_rot_axis_angle"][0],
-                ])]
+            episode_state.update(episode_index, env_obs, policy)
             obs_np = get_real_umi_obs_dict(
                 env_obs,
                 shape_meta,
                 obs_pose_repr=obs_pose_repr,
-                episode_start_pose=episode_start_pose,
+                episode_start_pose=episode_state.episode_start_pose,
             )
             if capture_enabled:
                 metadata["get_real_umi_obs_dict_camera0_rgb"] = array_statistics(
@@ -212,6 +241,7 @@ def emit_actions(args):
                 prediction_statistics = array_statistics(prediction)
                 result = {
                     "type": "prediction_result",
+                    "episode_index": episode_state.episode_index,
                     "frame_index": frame_index,
                     "prediction_keys": list(policy_output.keys()),
                     "action_shape": prediction_statistics["shape"],
@@ -305,7 +335,7 @@ def emit_actions(args):
                 axis=-1
             )
             output = {
-                "episode_index": 0,
+                "episode_index": episode_state.episode_index,
                 "frame_index": frame_index,
                 "last_chunk": False,
                 "actions": robot_actions.tolist(),
@@ -320,6 +350,7 @@ def emit_actions(args):
             print(f"[推理错误] {error}", file=sys.stderr, flush=True)
             traceback.print_exc(file=sys.stderr)
             raise
+    episode_state.stop()
 
 
 def main():

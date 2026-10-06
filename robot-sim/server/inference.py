@@ -102,7 +102,7 @@ async def inference(websocket: WebSocket) -> None:
             request_id = uuid.uuid4().hex
             # 将当前帧写入错误上下文，便于定位模型推理阶段的问题。
             worker.context = {
-                "episode_index": 0,
+                "episode_index": observation["episode_index"],
                 "frame_index": frame_index,
                 "request_id": request_id,
             }

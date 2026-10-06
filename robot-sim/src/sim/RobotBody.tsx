@@ -19,6 +19,7 @@ import { publishDebugEvent } from '../app/debugBus';
 
 interface RobotBodyProps {
   description: RobotDescription;
+  gripperJointNames?: readonly string[];
   packageMappings: Readonly<Record<string, string>>;
   diagnostics?: {
     gravity: [number, number, number];
@@ -839,6 +840,7 @@ const appendPhase2B24Checkpoint = (
 
 export const RobotBody = ({
   description,
+  gripperJointNames,
   packageMappings,
   diagnostics,
   positionExecution,
@@ -1286,7 +1288,9 @@ export const RobotBody = ({
       if (child.isKinematic()) return;
 
       let currentPosition = values[joint.name] ?? 0;
-      const isGripperJoint = /gripper|finger/iu.test(joint.name + ' ' + joint.child);
+      const isGripperJoint =
+        gripperJointNames?.includes(joint.name) ||
+        /gripper|finger/iu.test(joint.name + ' ' + joint.child);
       if (
         activeMode === 'position' &&
         isGripperJoint &&
@@ -1353,7 +1357,14 @@ export const RobotBody = ({
     });
 
     setKinematicBodies(description, values, bodies.current);
-  }, [description, diagnostics?.traceMotorWrites, lockedLinkNames, positionExecution, rapier]);
+  }, [
+    description,
+    diagnostics?.traceMotorWrites,
+    gripperJointNames,
+    lockedLinkNames,
+    positionExecution,
+    rapier,
+  ]);
 
   useBeforePhysicsStep(applyCommands);
   useAfterPhysicsStep(() => {

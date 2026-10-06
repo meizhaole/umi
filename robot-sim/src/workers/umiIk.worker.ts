@@ -8,6 +8,7 @@ import type {
   InferenceError,
 } from '../app/inferenceProtocol';
 import { composePoses, quaternionFromAxisAngle } from '../utils/math';
+import { mapGripperOpeningToJoints } from '../app/gripperMapping';
 
 interface WorkerScope {
   onmessage: ((event: MessageEvent<IkWorkerRequest>) => void) | null;
@@ -45,12 +46,6 @@ export const decodeActionPose = (
   return decoder(startPose, actionPose);
 };
 
-const getGripperJoints = (description: IkWorkerRequest['description']) =>
-  description.joints.filter(
-    (joint) =>
-      joint.type === 'prismatic' && /gripper|finger/iu.test(joint.name + ' ' + joint.child),
-  );
-
 const createError = (
   request: IkWorkerRequest,
   actionIndex: number,
@@ -81,6 +76,10 @@ const createDebugRecord = (
 ): IKActionDebugRecord => {
   const converged = result?.converged === true;
   const includeTrace = recordPhase === 'result' && (!converged || request.traceAllIterations);
+  const gripperMapping =
+    Array.isArray(action) && action.length === 7 && Number.isFinite(action[6])
+      ? mapGripperOpeningToJoints(request.description, action[6], request.gripperJointNames)
+      : null;
 
   return {
     record_phase: recordPhase,
@@ -97,6 +96,7 @@ const createDebugRecord = (
     status: recordPhase === 'started' ? 'in_progress' : converged ? 'success' : 'failure',
     trace_level: includeTrace ? 'full' : 'summary',
     raw_action: Array.isArray(action) ? [...action] : action,
+    ...(gripperMapping ?? {}),
     start_pose: request.startPose,
     target_pose: targetPose,
     seed_joint_values: { ...seed },
@@ -140,12 +140,6 @@ export const runIkSolve = (
 
   const robot = new RobotModel(request.description);
   const kinematics = new Kinematics(request.description);
-  const gripperJoints = getGripperJoints(request.description);
-  const maximumOpening = gripperJoints.reduce((total, joint) => {
-    const lower = joint.limit?.lower ?? 0;
-    const upper = joint.limit?.upper ?? lower;
-    return total + Math.abs(upper - lower);
-  }, 0);
   const resolvedActions = [];
   let seed = request.initialJointValues;
   let previousActionOutputSeed: JointValues | null = null;
@@ -280,13 +274,13 @@ export const runIkSolve = (
       }
 
       robot.setJointValues(result.jointValues);
-      const requestedOpening = Math.max(0, Math.min(maximumOpening, action[6]));
-      const openingFraction = maximumOpening > 0 ? requestedOpening / maximumOpening : 0;
-      gripperJoints.forEach((joint) => {
-        if (joint.mimic) return;
-        const lower = joint.limit?.lower ?? 0;
-        const upper = joint.limit?.upper ?? lower;
-        robot.setJointValue(joint.name, lower + (upper - lower) * openingFraction);
+      const gripperMapping = mapGripperOpeningToJoints(
+        request.description,
+        action[6],
+        request.gripperJointNames,
+      );
+      Object.entries(gripperMapping.joint_targets).forEach(([jointName, target]) => {
+        robot.setJointValue(jointName, target);
       });
 
       seed = robot.getJointValues();

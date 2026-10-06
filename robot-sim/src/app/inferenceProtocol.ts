@@ -100,6 +100,7 @@ export interface IkWorkerRequest {
   episode_index: number;
   frame_index: number;
   description: RobotDescription;
+  gripperJointNames?: readonly string[];
   startPose: Pose;
   initialJointValues: JointValues;
   actions: number[][];
@@ -126,6 +127,12 @@ export interface IKActionDebugRecord {
   status: 'in_progress' | 'success' | 'failure';
   trace_level: 'summary' | 'full';
   raw_action: unknown;
+  requested_gripper_opening_m?: number;
+  clamped_gripper_opening_m?: number;
+  gripper_target_clamped?: boolean;
+  left_jaw_target?: number | null;
+  right_jaw_target?: number | null;
+  joint_targets?: JointValues;
   start_pose: Pose;
   target_pose: Pose | null;
   seed_joint_values: JointValues;
