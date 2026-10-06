@@ -102,6 +102,7 @@ export interface IkWorkerRequest {
   frame_index: number;
   description: RobotDescription;
   gripperJointNames?: readonly string[];
+  ikOptions?: IKOptions;
   startPose: Pose;
   initialJointValues: JointValues;
   actions: number[][];

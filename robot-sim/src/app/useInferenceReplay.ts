@@ -352,6 +352,9 @@ export const useInferenceReplay = ({
       timestamp: new Date().toISOString(),
       robot_id: context.robotId,
       robot_config_id: context.robotConfig.id,
+      request_id: chunk.request_id,
+      episode_index: chunk.episode_index,
+      action_index: 0,
       robot_config: context.robotConfig,
       robot_config_file: context.robotConfig.file,
       urdf: {
@@ -361,6 +364,8 @@ export const useInferenceReplay = ({
         tcp_link: context.description?.tipLink ?? null,
       },
       frame_index: chunk.frame_index,
+      observation_tcp_snapshot: observationTcpPose,
+      action_start_pose: currentTcp,
       camera_frame_index: lastObservationRef.current?.frame_index ?? null,
       camera_frame_timestamp_ms: lastObservationRef.current?.camera_frame_timestamp_ms ?? null,
       input_image_shape: chunk.input_image_shape,
@@ -407,6 +412,7 @@ export const useInferenceReplay = ({
         currentTcp && targetTcp && currentGripperOpening !== null && targetGripperOpening !== null,
       ),
       ik_seed_joints: seedJoints,
+      solver_options: ikRecord?.solver_options ?? null,
       ik_result: error,
       target_joints: targetJoints,
       position_residual_m: ikRecord?.position_residual ?? residual.position ?? null,
@@ -422,7 +428,7 @@ export const useInferenceReplay = ({
       non_finite_values_present: !finiteValues,
       all_arm_joints_within_limits: false,
       safety_verdict: 'BLOCKED',
-      review_status: 'WAITING_FOR_HUMAN_APPROVAL',
+      review_status: 'NOT_READY_FOR_EXECUTION',
       human_confirmation_required: true,
       persistence_status: 'saving',
       ik_record: ikRecord,
@@ -893,13 +899,25 @@ export const useInferenceReplay = ({
             ? 'ZERO_WITHIN_TOLERANCE'
             : 'NONZERO_IK_TARGET';
         const safetyVerdict =
-          ikSucceeded && requiredSafetyDataAvailable && finiteValues && allArmJointsWithinLimits
+          ikSucceeded &&
+          jointDeltaNorm !== null &&
+          jointDeltaNorm > 0 &&
+          requiredSafetyDataAvailable &&
+          finiteValues &&
+          allArmJointsWithinLimits
             ? 'READY_FOR_HUMAN_APPROVAL'
             : 'BLOCKED';
+        const reviewStatus =
+          safetyVerdict === 'READY_FOR_HUMAN_APPROVAL'
+            ? 'WAITING_FOR_HUMAN_APPROVAL'
+            : 'NOT_READY_FOR_EXECUTION';
         const nextReviewData: Record<string, unknown> = {
           timestamp: new Date().toISOString(),
           robot_id: context.robotId,
           robot_config_id: context.robotConfig.id,
+          request_id: chunk.request_id,
+          episode_index: chunk.episode_index,
+          action_index: firstActionIndex,
           robot_config: context.robotConfig,
           robot_config_file: context.robotConfig.file,
           urdf: {
@@ -910,6 +928,8 @@ export const useInferenceReplay = ({
           },
           tcp_link: context.description?.tipLink ?? null,
           frame_index: chunk.frame_index,
+          observation_tcp_snapshot: observationTcpPose,
+          action_start_pose: ikRecord?.start_pose ?? observationTcpPose,
           camera_frame_index: lastObservationRef.current?.frame_index ?? null,
           camera_frame_timestamp_ms: lastObservationRef.current?.camera_frame_timestamp_ms ?? null,
           input_image_shape: chunk.input_image_shape,
@@ -951,6 +971,7 @@ export const useInferenceReplay = ({
           tcp_rotation_delta_norm_rad: tcpRotationDeltaNorm,
           current_joints: seedJoints,
           ik_seed_joints: seedJoints,
+          solver_options: ikRecord?.solver_options ?? null,
           target_joints: targetJoints,
           joint_deltas_rad: jointDeltas,
           joint_delta_norm_rad: jointDeltaNorm,
@@ -967,7 +988,7 @@ export const useInferenceReplay = ({
           required_safety_data_available: requiredSafetyDataAvailable,
           all_arm_joints_within_limits: allArmJointsWithinLimits,
           ik_success: ikSucceeded,
-          review_status: 'WAITING_FOR_HUMAN_APPROVAL',
+          review_status: reviewStatus,
           arm_motion_classification: armMotionClassification,
           policy_target_near_zero: policyTargetNearZero,
           policy_target_near_zero_threshold: {
@@ -1034,6 +1055,7 @@ export const useInferenceReplay = ({
       frame_index: chunk.frame_index,
       description: context.description,
       gripperJointNames: context.robotConfig.gripperJointNames,
+      ikOptions: context.robotConfig.ikOptions,
       startPose: observationTcpPose,
       initialJointValues: context.jointValues,
       actions: selection.actions,

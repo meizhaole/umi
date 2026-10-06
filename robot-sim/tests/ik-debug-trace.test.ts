@@ -32,6 +32,60 @@ const seed = { shoulder: 0, elbow: 0 };
 const startPose = new Kinematics(description).forwardKinematics(seed);
 
 describe('IK 逐轮 trace', () => {
+  it('应用请求级 tolerance 覆盖并在记录中保留有效 solver options', () => {
+    const action = [0, 0.0006, 0, 0, 0, 0, 0];
+    const solve = (ikOptions?: { positionTolerance: number; orientationTolerance: number }) => {
+      const messages: IkWorkerResponse[] = [];
+      runIkSolve(
+        {
+          type: 'solve',
+          request_id: 'request-tolerance',
+          episode_index: 0,
+          frame_index: 0,
+          description,
+          startPose,
+          initialJointValues: seed,
+          actions: [action],
+          predictionCount: 1,
+          configuredExecutionHorizon: 6,
+          executionCount: 1,
+          selectedActionIndexes: [0],
+          action_pose_repr: 'relative',
+          traceAllIterations: false,
+          ...(ikOptions ? { ikOptions } : {}),
+        },
+        (message) => messages.push(message),
+      );
+      return messages.find(
+        (message) => message.type === 'ik_record' && message.record.record_phase === 'result',
+      );
+    };
+
+    const baseline = solve();
+    const candidate = solve({ positionTolerance: 0.0005, orientationTolerance: 0.001 });
+
+    expect(baseline).toMatchObject({
+      type: 'ik_record',
+      record: {
+        status: 'success',
+        iterations: 0,
+        solver_options: { positionTolerance: 0.005, orientationTolerance: 0.01 },
+      },
+    });
+    expect(candidate).toMatchObject({
+      type: 'ik_record',
+      record: {
+        status: 'success',
+        iterations: 1,
+        solver_options: { positionTolerance: 0.0005, orientationTolerance: 0.001 },
+      },
+    });
+    if (candidate?.type !== 'ik_record' || baseline?.type !== 'ik_record') {
+      throw new Error('IK worker 没有返回结果记录');
+    }
+    expect(candidate.record.final_joint_values).not.toEqual(baseline.record.final_joint_values);
+  });
+
   it('为成功动作记录关联编号、输入 Seed 和目标位姿摘要', () => {
     const messages: IkWorkerResponse[] = [];
     runIkSolve(

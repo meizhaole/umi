@@ -35,6 +35,13 @@ describe('UR5_CAD umi_tcp_link', () => {
     expect(findRobotConfig('UR5').tipLink).toBe('umi_tcp');
     expect(findRobotConfig('RS').tipLink).toBeUndefined();
     expect(findRobotConfig('DM').tipLink).toBeUndefined();
+    expect(ur5CadConfig.ikOptions).toEqual({
+      positionTolerance: 0.0005,
+      orientationTolerance: 0.001,
+    });
+    expect(findRobotConfig('UR5').ikOptions).toBeUndefined();
+    expect(findRobotConfig('RS').ikOptions).toBeUndefined();
+    expect(findRobotConfig('DM').ikOptions).toBeUndefined();
     expect(tcpLink?.visuals).toEqual([]);
     expect(tcpLink?.collisions).toEqual([]);
     expect(tcpLink?.inertial).toBeUndefined();

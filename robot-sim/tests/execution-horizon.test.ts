@@ -1,5 +1,7 @@
 // 验证完整预测与执行前缀分离，并保持单步人工确认。
 // @vitest-environment jsdom
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { act, createElement } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -14,6 +16,7 @@ import { useInferenceReplay } from '../src/app/useInferenceReplay';
 import type { InferenceObservation } from '../src/app/inferenceProtocol';
 import { Kinematics } from '../src/core/Kinematics';
 import { parseUrdf } from '../src/utils/urdfParser';
+import { quaternionToRotationVector } from '../src/utils/math';
 import { runIkSolve } from '../src/workers/umiIk.worker';
 
 const planarUrdf = `
@@ -40,6 +43,13 @@ const planarUrdf = `
 const description = parseUrdf(planarUrdf);
 const seed = { shoulder: 0, elbow: 0 };
 const startPose = new Kinematics(description).forwardKinematics(seed);
+const cadConfig = findRobotConfig('UR5_CAD');
+const cadDescription = parseUrdf(readFileSync(resolve('public/robot', cadConfig.file), 'utf8'), {
+  tipLink: cadConfig.tipLink,
+});
+const cadSeed = cadConfig.initialJoints;
+const cadStartPose = new Kinematics(cadDescription).forwardKinematics(cadSeed);
+const cadStartRotation = quaternionToRotationVector(cadStartPose.orientation);
 const makeActions = (count: number) =>
   Array.from({ length: count }, (_, index) => [index, 0, 0, 0, 0, 0, 0]);
 
@@ -170,7 +180,10 @@ describe('execution horizon', () => {
     };
     const context = {
       robotId: 'UR5' as const,
-      robotConfig: findRobotConfig('UR5'),
+      robotConfig: {
+        ...findRobotConfig('UR5'),
+        ikOptions: { positionTolerance: 0.0005, orientationTolerance: 0.001 },
+      },
       loadedRobotId: 'UR5' as const,
       loadedRobotUrdfFile: findRobotConfig('UR5').file,
       description,
@@ -224,6 +237,7 @@ describe('execution horizon', () => {
       executionCount: 6,
       selectedActionIndexes: [0, 1, 2, 3, 4, 5],
       action_pose_repr: 'relative',
+      ikOptions: { positionTolerance: 0.0005, orientationTolerance: 0.001 },
       actions: predictedActions.slice(0, 6),
     });
     expect(predictedActions).toHaveLength(16);
@@ -263,5 +277,120 @@ describe('execution horizon', () => {
 
     act(() => root.unmount());
     container.remove();
+  });
+
+  it('single-action review 只让非零 IK 目标进入人工审批', async () => {
+    vi.stubGlobal('fetch', async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ saved: true, path: '/tmp/single-action-review.json' }),
+    }));
+    const observation: InferenceObservation = {
+      frame_index: 7,
+      camera_frame_timestamp_ms: 50,
+      camera0_rgb: 'AAAA',
+      robot0_eef_pos: [cadStartPose.position, cadStartPose.position],
+      robot0_eef_rot_axis_angle: [cadStartRotation, cadStartRotation],
+      robot0_gripper_width: [[0], [0]],
+    };
+    const context = {
+      robotId: 'UR5_CAD' as const,
+      robotConfig: cadConfig,
+      loadedRobotId: 'UR5_CAD' as const,
+      loadedRobotUrdfFile: cadConfig.file,
+      description: cadDescription,
+      jointValues: cadSeed,
+      tcpPose: cadStartPose,
+      getObservation: () => observation,
+      singleActionDebugEnabled: true,
+    };
+    const results = [];
+
+    for (const [requestId, translationX] of [
+      ['request-zero-target', 0],
+      ['request-nonzero-target', 0.001],
+    ] as const) {
+      FakeWebSocket.sockets = [];
+      FakeWorker.workers = [];
+      let replay!: ReturnType<typeof useInferenceReplay>;
+      const Probe = () => {
+        replay = useInferenceReplay(context);
+        return null;
+      };
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+
+      await act(async () => {
+        root.render(createElement(Probe));
+      });
+      act(() => replay.step());
+      const socket = FakeWebSocket.sockets[0];
+      socket.readyState = FakeWebSocket.OPEN;
+      act(() => socket.emitMessage({ type: 'status', state: 'ready' }));
+
+      const prediction = Array.from({ length: 16 }, () => [
+        translationX,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0.06,
+      ]);
+      const actions = Array.from({ length: 16 }, () => [translationX, 0, 0, 0, 0, 0, 0.06]);
+      await act(async () => {
+        socket.emitMessage({
+          type: 'action_chunk',
+          request_id: requestId,
+          episode_index: 0,
+          frame_index: 7,
+          last_chunk: false,
+          actions,
+          action_pose_repr: 'relative',
+          prediction,
+          prediction_keys: ['action', 'action_pred'],
+          action_pred_shape: [1, 16, 10],
+          policy_tensor_shapes: { camera0_rgb: [1, 1, 3, 224, 224] },
+          input_image_shape: [224, 224, 3],
+        });
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 0));
+      });
+
+      results.push({
+        requestId,
+        reviewData: replay.reviewData,
+        canExecuteAction: replay.canExecuteAction,
+        playback: replay.playback,
+      });
+      act(() => root.unmount());
+      container.remove();
+    }
+
+    expect(results[0]).toMatchObject({
+      requestId: 'request-zero-target',
+      reviewData: {
+        arm_motion_classification: 'ZERO_WITHIN_TOLERANCE',
+        safety_verdict: 'BLOCKED',
+        review_status: 'NOT_READY_FOR_EXECUTION',
+        persistence_status: 'saved',
+      },
+      canExecuteAction: false,
+      playback: null,
+    });
+    expect(results[1]).toMatchObject({
+      requestId: 'request-nonzero-target',
+      reviewData: {
+        arm_motion_classification: 'NONZERO_IK_TARGET',
+        safety_verdict: 'READY_FOR_HUMAN_APPROVAL',
+        review_status: 'WAITING_FOR_HUMAN_APPROVAL',
+        persistence_status: 'saved',
+      },
+      canExecuteAction: true,
+      playback: null,
+    });
   });
 });

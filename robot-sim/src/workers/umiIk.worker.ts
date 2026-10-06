@@ -25,6 +25,11 @@ const IK_OPTIONS: IKOptions = {
   maxLinearStep: 0.01,
 };
 
+const getIkOptions = (request: IkWorkerRequest): IKOptions => ({
+  ...IK_OPTIONS,
+  ...(request.ikOptions ?? {}),
+});
+
 type ActionPoseDecoder = (startPose: Pose, actionPose: Pose) => Pose;
 
 const getActionPoseDecoder = (actionPoseRepr: string): ActionPoseDecoder | null => {
@@ -101,7 +106,7 @@ const createDebugRecord = (
     target_pose: targetPose,
     seed_joint_values: { ...seed },
     previous_action_output_seed: previousActionOutputSeed ? { ...previousActionOutputSeed } : null,
-    solver_options: { ...IK_OPTIONS },
+    solver_options: getIkOptions(request),
     final_joint_values: result ? { ...result.jointValues } : null,
     action_output_seed: actionOutputSeed ? { ...actionOutputSeed } : null,
     position_residual: result?.residual.position ?? null,
@@ -120,6 +125,7 @@ export const runIkSolve = (
   postMessage: (message: IkWorkerResponse) => void,
 ): void => {
   if (request.type !== 'solve') return;
+  const ikOptions = getIkOptions(request);
 
   const actionPoseDecoder = getActionPoseDecoder(request.action_pose_repr);
   if (!actionPoseDecoder) {
@@ -223,7 +229,7 @@ export const runIkSolve = (
             : ([0, 0, 0, 1] as [number, number, number, number]),
       };
       targetPose = actionPoseDecoder(request.startPose, deltaPose);
-      result = kinematics.solveIK(targetPose, actionSeed, IK_OPTIONS, (iteration) => {
+      result = kinematics.solveIK(targetPose, actionSeed, ikOptions, (iteration) => {
         iterationTrace.push(iteration);
       });
 
@@ -260,12 +266,12 @@ export const runIkSolve = (
             residual: result.residual,
             joint_values: result.jointValues,
             ik_options: {
-              max_iterations: IK_OPTIONS.maxIterations,
-              damping: IK_OPTIONS.damping,
-              position_tolerance: IK_OPTIONS.positionTolerance,
-              orientation_tolerance: IK_OPTIONS.orientationTolerance,
-              max_angular_step: IK_OPTIONS.maxAngularStep,
-              max_linear_step: IK_OPTIONS.maxLinearStep,
+              max_iterations: ikOptions.maxIterations,
+              damping: ikOptions.damping,
+              position_tolerance: ikOptions.positionTolerance,
+              orientation_tolerance: ikOptions.orientationTolerance,
+              max_angular_step: ikOptions.maxAngularStep,
+              max_linear_step: ikOptions.maxLinearStep,
             },
             termination_reason: result.terminationReason,
             blocked_joints: result.blockedJoints,

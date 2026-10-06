@@ -1,4 +1,4 @@
-import type { JointValues } from '../core/types';
+import type { IKOptions, JointValues } from '../core/types';
 
 export interface RobotConfig {
   id: 'RS' | 'DM' | 'UR5' | 'UR5_CAD';
@@ -8,6 +8,7 @@ export interface RobotConfig {
   file: string;
   packageMappings: Readonly<Record<string, string>>;
   initialJoints: JointValues;
+  ikOptions?: IKOptions;
   gripperJointNames?: readonly string[];
   tipLink?: string;
   tcpParentLink?: string;
@@ -72,6 +73,10 @@ export const ROBOT_MODELS = [
     },
     gripperJointNames: ['left_jaw_joint', 'right_jaw_joint'],
     tipLink: 'umi_tcp_link',
+    ikOptions: {
+      positionTolerance: 0.0005,
+      orientationTolerance: 0.001,
+    },
   },
 ] as const satisfies readonly RobotConfig[];
 
