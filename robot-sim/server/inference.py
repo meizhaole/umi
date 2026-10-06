@@ -13,6 +13,7 @@ if __package__:
     from .prediction_log import record_prediction
     # 协议层：读观测/读动作块、序列化、错误回传、等待 ACK。
     from .inference_protocol import (
+        ack_timeout_seconds_for_observation,
         read_chunk_or_stop,
         read_observation_or_stop,
         send_error,
@@ -25,6 +26,7 @@ else:
     from action_log import record_joint_angles
     from prediction_log import record_prediction
     from inference_protocol import (
+        ack_timeout_seconds_for_observation,
         read_chunk_or_stop,
         read_observation_or_stop,
         send_error,
@@ -143,9 +145,16 @@ async def inference(websocket: WebSocket) -> None:
             # 校验并序列化动作块（拒绝 NaN/Inf、超过 1 MiB 的载荷），发给前端。
             serialized = serialize_action_chunk(chunk)
             await websocket.send_text(serialized)
-            # 阻塞等待前端回放完成：期间接收 IK trace，最终拿到 ack 或 stop。
+            # 单动作模式等待人工执行后 ACK；普通动作回放保留 20 秒期限。
+            # 等待期间接收 IK trace，最终拿到 ACK 或 stop。
             # 返回的 joint_angles 是本块解算出的关节角序列，写入滚动 CSV。
-            acknowledged, joint_angles = await wait_for_ack(websocket, worker, chunk)
+            ack_timeout_seconds = ack_timeout_seconds_for_observation(observation)
+            acknowledged, joint_angles = await wait_for_ack(
+                websocket,
+                worker,
+                chunk,
+                timeout_seconds=ack_timeout_seconds
+            )
             record_joint_angles(joint_angles)
             # 前端发 stop 时 acknowledged=False，回一条 complete 结束本次订阅。
             if not acknowledged:

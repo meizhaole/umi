@@ -18,12 +18,22 @@ else:
     from load_model import ReplayError
 
 
-# 等待前端回放确认的最长时间。
+# 普通动作回放等待前端 ACK 的最长时间。
 # 16 步动作每步回放 0.5 秒约需 8 秒，额外留出 IK 和浏览器调度时间。
 ACK_TIMEOUT_SECONDS = 20.0
 # WebSocket 单条消息上限 1 MiB，与 worker 子进程协议保持一致。
 MAX_WEBSOCKET_MESSAGE_BYTES = 1024 * 1024
 LOGGER = logging.getLogger("umi_replay_server")
+
+
+# 单动作审批只在用户执行或停止时结束等待。
+def ack_timeout_seconds_for_observation(observation: dict) -> Optional[float]:
+    if (
+        observation.get("robot_id") == "UR5_CAD"
+        and observation.get("single_action_validation") is True
+    ):
+        return None
+    return ACK_TIMEOUT_SECONDS
 
 
 # 解析并校验前端 ACK/stop 消息里回传的关节角。
@@ -170,6 +180,7 @@ async def wait_for_ack(
     websocket: WebSocket,
     worker,
     chunk: dict,
+    timeout_seconds: Optional[float] = ACK_TIMEOUT_SECONDS,
 ) -> tuple[bool, list[dict[str, float]]]:
     frame_index = chunk["frame_index"]
     context = {
@@ -182,8 +193,12 @@ async def wait_for_ack(
     if not chunk["last_chunk"]:
         exit_task = asyncio.create_task(worker.wait_for_process_exit())
 
-    # 整个等待共享一个截止时间，防止前端一直发 trace 而无限拖延。
-    deadline = asyncio.get_running_loop().time() + ACK_TIMEOUT_SECONDS
+    # 普通执行共享一个截止时间；人工审批期间不启用 ACK 截止时间。
+    deadline = (
+        None
+        if timeout_seconds is None
+        else asyncio.get_running_loop().time() + timeout_seconds
+    )
     try:
         while True:
             # 每轮重新创建接收任务，与退出发送任务一起竞速。
@@ -194,7 +209,11 @@ async def wait_for_ack(
 
             done, _ = await asyncio.wait(
                 wait_tasks,
-                timeout=max(0, deadline - asyncio.get_running_loop().time()),
+                timeout=(
+                    None
+                    if deadline is None
+                    else max(0, deadline - asyncio.get_running_loop().time())
+                ),
                 return_when=asyncio.FIRST_COMPLETED,
             )
 
@@ -205,7 +224,7 @@ async def wait_for_ack(
                 raise ReplayError(
                     "ack_timeout",
                     "wait_for_ack",
-                    f"等待 frame_index={frame_index} 的 ACK 超时（{ACK_TIMEOUT_SECONDS:g} 秒）",
+                    f"等待 frame_index={frame_index} 的 ACK 超时（{timeout_seconds:g} 秒）",
                     context=context,
                 )
 
