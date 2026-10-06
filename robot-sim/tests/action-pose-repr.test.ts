@@ -34,6 +34,11 @@ describe('action_pose_repr 协议与解码', () => {
       last_chunk: false,
       actions: [[0, 0, 0, 0, 0, 0, 0]],
       action_pose_repr: 'relative',
+      prediction: [[0, 0, 0, 1, 0, 0, 0, 1, 0, 0]],
+      prediction_keys: ['action', 'action_pred'],
+      action_pred_shape: [1, 1, 10],
+      policy_tensor_shapes: { camera0_rgb: [1, 1, 3, 224, 224] },
+      input_image_shape: [224, 224, 3],
     };
 
     expect(isActionChunk(chunk)).toBe(true);

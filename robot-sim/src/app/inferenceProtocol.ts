@@ -15,6 +15,11 @@ export interface ActionChunk {
   last_chunk: boolean;
   actions: number[][];
   action_pose_repr: string;
+  prediction: number[][];
+  prediction_keys: string[];
+  action_pred_shape: number[];
+  policy_tensor_shapes: Record<string, number[]>;
+  input_image_shape: number[];
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -31,16 +36,36 @@ export const isActionChunk = (value: unknown): value is ActionChunk => {
     typeof value.action_pose_repr !== 'string' ||
     !value.action_pose_repr.trim() ||
     !Array.isArray(value.actions) ||
-    value.actions.length === 0
+    value.actions.length === 0 ||
+    !Array.isArray(value.prediction) ||
+    value.prediction.length !== value.actions.length ||
+    !Array.isArray(value.prediction_keys) ||
+    !value.prediction_keys.every((key) => typeof key === 'string') ||
+    !Array.isArray(value.action_pred_shape) ||
+    !value.action_pred_shape.every((dimension) => Number.isInteger(dimension)) ||
+    typeof value.policy_tensor_shapes !== 'object' ||
+    value.policy_tensor_shapes === null ||
+    !Array.isArray(value.input_image_shape) ||
+    !value.input_image_shape.every((dimension) => Number.isInteger(dimension))
   ) {
     return false;
   }
-  return value.actions.every(
+  const validActions = value.actions.every(
     (action) =>
       Array.isArray(action) &&
       action.length === 7 &&
       action.every((number) => typeof number === 'number' && Number.isFinite(number)),
   );
+  const validPrediction = value.prediction.every(
+    (action) =>
+      Array.isArray(action) &&
+      action.length === 10 &&
+      action.every((number) => typeof number === 'number' && Number.isFinite(number)),
+  );
+  const validTensorShapes = Object.values(value.policy_tensor_shapes).every(
+    (shape) => Array.isArray(shape) && shape.every((dimension) => Number.isInteger(dimension)),
+  );
+  return validActions && validPrediction && validTensorShapes;
 };
 
 export interface ResolvedAction {
@@ -129,6 +154,7 @@ export type InferenceStatus =
   | 'loading'
   | 'inferring'
   | 'computing'
+  | 'review'
   | 'playing'
   | 'waiting'
   | 'complete'
@@ -137,6 +163,7 @@ export type InferenceStatus =
 
 export interface InferenceObservation {
   frame_index: number;
+  camera_frame_timestamp_ms: number;
   camera0_rgb: string;
   robot0_eef_pos: number[][];
   robot0_eef_rot_axis_angle: number[][];
@@ -158,3 +185,7 @@ export interface RgbImageStatistics {
 export const isPolicyInferenceOnlyEnabled = (): boolean =>
   typeof window !== 'undefined' &&
   new URLSearchParams(window.location.search).get('policyInferenceOnly') === '1';
+
+export const isSingleActionDebugEnabled = (): boolean =>
+  typeof window !== 'undefined' &&
+  new URLSearchParams(window.location.search).get('singleAction') === '1';

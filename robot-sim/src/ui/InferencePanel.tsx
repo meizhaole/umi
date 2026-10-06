@@ -7,6 +7,9 @@ interface InferencePanelProps {
   isLocked: boolean;
   canStep: boolean;
   onStep: () => void;
+  singleActionReview: boolean;
+  reviewData: Record<string, unknown> | null;
+  onExecuteAction: () => void;
   onStop: () => void;
 }
 
@@ -16,6 +19,7 @@ const STATUS_LABELS: Record<InferenceStatus, string> = {
   loading: '加载权重',
   inferring: '模型推理中',
   computing: '求解 IK',
+  review: '待验收',
   playing: '动作播放中',
   waiting: '等待点击下一步',
   complete: '推理完成',
@@ -30,6 +34,9 @@ export const InferencePanel = ({
   isLocked,
   canStep,
   onStep,
+  singleActionReview,
+  reviewData,
+  onExecuteAction,
   onStop,
 }: InferencePanelProps) => (
   <section className="panel inference-panel">
@@ -47,6 +54,14 @@ export const InferencePanel = ({
       <button className="primary-button" disabled={!canStep} onClick={onStep} type="button">
         推理一步
       </button>
+      {reviewData ? (
+        <pre className="inference-review">{JSON.stringify(reviewData, null, 2)}</pre>
+      ) : null}
+      {singleActionReview ? (
+        <button className="primary-button" onClick={onExecuteAction} type="button">
+          执行这一条动作
+        </button>
+      ) : null}
       <button className="secondary-button" disabled={!isLocked} onClick={onStop} type="button">
         停止
       </button>

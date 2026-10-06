@@ -1243,6 +1243,7 @@ button {
 .inference-status.connecting,
 .inference-status.loading,
 .inference-status.computing,
+.inference-status.review,
 .inference-status.playing,
 .inference-status.waiting {
   border-color: #315c57;
@@ -1274,6 +1275,21 @@ button {
 
 .inference-actions .primary-button {
   flex: 1;
+}
+
+.inference-review {
+  flex-basis: 100%;
+  max-height: 240px;
+  overflow: auto;
+  margin: 0;
+  padding: 8px;
+  border: 1px solid #344351;
+  border-radius: 6px;
+  color: #b8c5d0;
+  background: #111923;
+  font: 8px/1.5 var(--font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .inference-panel button:disabled,

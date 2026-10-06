@@ -32,6 +32,7 @@ import { InferencePanel } from '../ui/InferencePanel';
 import { quaternionToRotationVector } from '../utils/math';
 import {
   isPolicyInferenceOnlyEnabled,
+  isSingleActionDebugEnabled,
   type InferenceObservation,
   type RgbImageStatistics,
 } from './inferenceProtocol';
@@ -181,6 +182,9 @@ declare global {
 
 export const App = () => {
   const [modelId, setModelId] = useState<RobotModelId>(DEFAULT_ROBOT_MODEL_ID);
+  const [singleActionDebugEnabled, setSingleActionDebugEnabled] = useState(
+    isSingleActionDebugEnabled(),
+  );
   const [cupSceneResetToken, setCupSceneResetToken] = useState(0);
   const [loadedRobot, setLoadedRobot] = useState<LoadedRobot | null>(null);
   const [loadError, setLoadError] = useState('');
@@ -231,6 +235,7 @@ export const App = () => {
   const cameraPreviewLastDrawRef = useRef(0);
   const cameraPreviewReadyRef = useRef(false);
   const observationIndexRef = useRef(0);
+  const playbackCompletionTokenRef = useRef<number | null>(null);
 
   const currentModel = findRobotConfig(modelId);
   const hasWrist3Joint =
@@ -463,6 +468,7 @@ export const App = () => {
     const policyInferenceOnly = isPolicyInferenceOnlyEnabled();
     return {
       frame_index: observationIndexRef.current++,
+      camera_frame_timestamp_ms: latest.timestamp,
       camera0_rgb: btoa(binary),
       robot0_eef_pos: history.map((frame) => [...frame.eefPose.position]),
       robot0_eef_rot_axis_angle: history.map((frame) =>
@@ -482,7 +488,34 @@ export const App = () => {
     jointValues,
     tcpPose,
     getObservation,
+    singleActionDebugEnabled,
   });
+  useEffect(() => {
+    if (singleActionDebugEnabled && inference.status === 'complete') setIsRunning(false);
+  }, [inference.status, singleActionDebugEnabled]);
+
+  const completeInferencePlayback = (token: number) => {
+    if (playbackCompletionTokenRef.current === token) return;
+    playbackCompletionTokenRef.current = token;
+    window.setTimeout(() => {
+      if (!loadedRobot) {
+        inference.completePlayback(token);
+        return;
+      }
+      const actualJoints = loadedRobot.model.getJointValues();
+      const actualTcp = loadedRobot.kinematics.forwardKinematics(
+        actualJoints,
+        loadedRobot.description.tipLink,
+      );
+      const postActionObservation = getObservation();
+      inference.completePlayback(token, {
+        joint_values: actualJoints,
+        tcp_pose: actualTcp,
+        gripper_opening_m: postActionObservation?.robot0_gripper_width.at(-1)?.[0] ?? null,
+        observation: postActionObservation,
+      });
+    }, 100);
+  };
 
   const setControlMode = (nextMode: ControlMode) => {
     if (inference.isLocked) return;
@@ -1195,17 +1228,30 @@ export const App = () => {
             </div>
           </section>
 
-          {modelId !== 'UR5_CAD' || isPolicyInferenceOnlyEnabled() ? (
+          {modelId === 'UR5_CAD' && !singleActionDebugEnabled ? (
+            <button
+              className="secondary-button"
+              disabled={inference.isLocked}
+              onClick={() => setSingleActionDebugEnabled(true)}
+              type="button"
+            >
+              启用单动作验证模式
+            </button>
+          ) : null}
+
+          {modelId !== 'UR5_CAD' || isPolicyInferenceOnlyEnabled() || singleActionDebugEnabled ? (
             <InferencePanel
               canStep={
                 Boolean(loadedRobot && physicsReady && !loadError) &&
                 !datasetReplayEnabled &&
                 !experimentRecording &&
                 !(isPolicyInferenceOnlyEnabled() && inference.status === 'complete') &&
+                !(singleActionDebugEnabled && inference.status === 'complete') &&
                 (!inference.isLocked || inference.status === 'waiting')
               }
               error={inference.error}
               isLocked={inference.isLocked}
+              onExecuteAction={inference.executePendingAction}
               onStep={() => {
                 if (!isPolicyInferenceOnlyEnabled()) {
                   if (mode !== 'position' && !inference.isLocked) setControlMode('position');
@@ -1215,6 +1261,8 @@ export const App = () => {
               }}
               onStop={inference.stop}
               progress={inference.progress}
+              reviewData={inference.reviewData}
+              singleActionReview={singleActionDebugEnabled && inference.status === 'review'}
               status={inference.status}
             />
           ) : null}
@@ -1410,7 +1458,7 @@ export const App = () => {
                 datasetReplayTargetPose={datasetReplayTargetPose}
                 datasetReplayActualPose={datasetReplayActualPose}
                 onPlaybackStep={applyReplayStep}
-                onPlaybackComplete={inference.completePlayback}
+                onPlaybackComplete={completeInferencePlayback}
                 cameraEnabled={Boolean(loadedRobot)}
                 tcpPose={tcpPose ?? DEFAULT_TARGET}
                 onCameraFrame={handleCameraFrame}

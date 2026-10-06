@@ -240,8 +240,18 @@ def emit_actions(args):
 
             with contextlib.redirect_stdout(sys.stderr):
                 with torch.inference_mode():
-                    prediction = policy.predict_action(obs)["action_pred"][0]
+                    policy_output = policy.predict_action(obs)
+                    action_prediction = policy_output["action_pred"]
+                    prediction = action_prediction[0]
                     prediction = prediction.float().cpu().numpy()
+            prediction_metadata = {
+                "prediction_keys": list(policy_output.keys()),
+                "action_pred_shape": list(action_prediction.shape),
+                "policy_tensor_shapes": {
+                    key: list(value.shape) for key, value in obs.items()
+                },
+                "input_image_shape": list(image.shape),
+            }
 
             # 将完整预测序列还原到世界坐标，统计每个目标偏移和整段路径长度。
             current_pose = pose_to_mat(
@@ -301,6 +311,7 @@ def emit_actions(args):
                 "actions": robot_actions.tolist(),
                 "action_pose_repr": action_pose_repr,
                 "prediction": prediction.tolist(),
+                **prediction_metadata,
                 "trajectory_summary": trajectory_summary,
             }
             sys.stdout.write(json.dumps(output, separators=(",", ":")) + "\n")

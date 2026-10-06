@@ -13,6 +13,7 @@ import type {
   PlaybackChunk,
   InferenceObservation,
 } from './inferenceProtocol';
+import { poseErrorRotation, vectorLength } from '../utils/math';
 
 const INFERENCE_SOCKET_URL = 'ws://localhost:8000/ws/inference';
 const IK_TIMEOUT_MS = 1000;
@@ -25,6 +26,13 @@ interface ReplayContext {
   jointValues: JointValues;
   tcpPose: Pose | null;
   getObservation: () => InferenceObservation | null;
+}
+
+interface PlaybackSnapshot {
+  joint_values: JointValues;
+  tcp_pose: Pose;
+  gripper_opening_m: number | null;
+  observation: InferenceObservation | null;
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -52,17 +60,23 @@ export const useInferenceReplay = ({
   jointValues,
   tcpPose,
   getObservation,
-}: ReplayContext) => {
+  singleActionDebugEnabled,
+}: ReplayContext & { singleActionDebugEnabled: boolean }) => {
   const [status, setStatus] = useState<InferenceStatus>('idle');
   const [progress, setProgress] = useState('');
   const [error, setError] = useState<InferenceError | null>(null);
   const [playback, setPlayback] = useState<PlaybackChunk | null>(null);
+  const [reviewData, setReviewData] = useState<Record<string, unknown> | null>(null);
+  const reviewDataRef = useRef<Record<string, unknown> | null>(null);
   const statusRef = useRef(status);
   const contextRef = useRef<ReplayContext>({ description, jointValues, tcpPose, getObservation });
   const socketRef = useRef<WebSocket | null>(null);
   const workerRef = useRef<Worker | null>(null);
   const workerTimeoutRef = useRef<number | null>(null);
   const activeChunkRef = useRef<ActionChunk | null>(null);
+  const pendingPlaybackRef = useRef<PlaybackChunk | null>(null);
+  const latestIkRecordRef = useRef<IKActionDebugRecord | null>(null);
+  const lastObservationRef = useRef<InferenceObservation | null>(null);
   const activeActionIndexRef = useRef<number | null>(null);
   const activeJointAnglesRef = useRef<JointValues[]>([]);
   const playbackTokenRef = useRef(0);
@@ -110,9 +124,12 @@ export const useInferenceReplay = ({
       : activeJointAnglesRef.current;
     clearWorker();
     activeChunkRef.current = null;
+    pendingPlaybackRef.current = null;
     activeJointAnglesRef.current = [];
     if (mountedRef.current) {
       setPlayback(null);
+      reviewDataRef.current = null;
+      setReviewData(null);
       setError(nextError);
       setProgress('');
     }
@@ -134,6 +151,7 @@ export const useInferenceReplay = ({
       );
       return;
     }
+    lastObservationRef.current = observation;
     socket.send(JSON.stringify({ type: 'observation', ...observation }));
     if (mountedRef.current) setProgress('观测已发送，正在推理下一步动作');
     updateStatus('inferring');
@@ -181,7 +199,9 @@ export const useInferenceReplay = ({
     activeChunkRef.current = chunk;
     activeActionIndexRef.current = null;
     activeJointAnglesRef.current = [];
-    const selection = selectExecutionActions(chunk.actions);
+    const singleActionDebug = singleActionDebugEnabled;
+    const selection = selectExecutionActions(chunk.actions, singleActionDebug ? 1 : undefined);
+    latestIkRecordRef.current = null;
     if (mountedRef.current) {
       setError(null);
       setProgress('正在启动 IK Worker');
@@ -195,6 +215,11 @@ export const useInferenceReplay = ({
       action_layout: ['dx', 'dy', 'dz', 'rx', 'ry', 'rz', 'gripper_width'],
       action_units: ['m', 'm', 'm', 'rad', 'rad', 'rad', 'm'],
       action_pose_repr: chunk.action_pose_repr,
+      input_image_shape: chunk.input_image_shape,
+      policy_tensor_shapes: chunk.policy_tensor_shapes,
+      prediction_keys: chunk.prediction_keys,
+      action_pred_shape: chunk.action_pred_shape,
+      prediction: chunk.prediction,
       actions: chunk.actions,
     });
     publishDebugEvent('inference:execution_selection', {
@@ -240,6 +265,7 @@ export const useInferenceReplay = ({
         return;
       }
       if (response.type === 'ik_record') {
+        latestIkRecordRef.current = response.record;
         const socket = socketRef.current;
         if (socket?.readyState === WebSocket.OPEN) {
           const record: IKActionDebugRecord = response.record;
@@ -279,17 +305,164 @@ export const useInferenceReplay = ({
         actions: response.actions,
       };
       playbackTokenRef.current = nextPlayback.token;
+      if (singleActionDebug) pendingPlaybackRef.current = nextPlayback;
       if (mountedRef.current) {
-        setPlayback(nextPlayback);
-        setProgress('动作块 ' + chunk.frame_index + '：' + response.actions.length + ' 个目标');
+        setPlayback(singleActionDebug ? null : nextPlayback);
+        setProgress(
+          singleActionDebug
+            ? 'IK dry-run 已完成，请检查目标后手动执行这一条动作'
+            : '动作块 ' + chunk.frame_index + '：' + response.actions.length + ' 个目标',
+        );
       }
-      updateStatus('playing');
+      updateStatus(singleActionDebug ? 'review' : 'playing');
       publishDebugEvent('inference:ik_solved', {
         episode_index: chunk.episode_index,
         frame_index: chunk.frame_index,
         action_count: response.actions.length,
         actions: response.actions,
       });
+      if (singleActionDebug) {
+        const ikRecord = latestIkRecordRef.current;
+        const firstActionIndex = selection.selectedActionIndexes[0];
+        const firstPredictionAction = chunk.prediction[firstActionIndex];
+        const firstRobotAction = chunk.actions[firstActionIndex];
+        const targetJoints = response.actions[0]?.jointValues ?? {};
+        const seedJoints = ikRecord?.seed_joint_values ?? context.jointValues;
+        const armJoints =
+          context.description?.joints.filter(
+            (joint) => joint.type === 'revolute' || joint.type === 'continuous',
+          ) ?? [];
+        const jointDeltas = Object.fromEntries(
+          armJoints.map((joint) => [
+            joint.name,
+            (targetJoints[joint.name] ?? 0) - (seedJoints[joint.name] ?? 0),
+          ]),
+        );
+        const jointDeltaNorm = Math.hypot(...Object.values(jointDeltas));
+        const [maximumJointDeltaName, maximumJointDelta] = Object.entries(jointDeltas).reduce(
+          (maximum, current) => (Math.abs(current[1]) > Math.abs(maximum[1]) ? current : maximum),
+          ['', 0],
+        );
+        const jointLimits = Object.fromEntries(
+          armJoints.map((joint) => [
+            joint.name,
+            {
+              lower: joint.limit?.lower ?? null,
+              upper: joint.limit?.upper ?? null,
+            },
+          ]),
+        );
+        const currentTcp = ikRecord?.start_pose ?? context.tcpPose;
+        const targetTcp = ikRecord?.target_pose ?? null;
+        const tcpTranslationDelta =
+          currentTcp && targetTcp
+            ? targetTcp.position.map((value, index) => value - currentTcp.position[index])
+            : null;
+        const tcpTranslationDeltaNorm = tcpTranslationDelta
+          ? vectorLength(tcpTranslationDelta as [number, number, number])
+          : null;
+        const tcpRotationDelta =
+          currentTcp && targetTcp
+            ? poseErrorRotation(targetTcp.orientation, currentTcp.orientation)
+            : null;
+        const tcpRotationDeltaNorm = tcpRotationDelta ? vectorLength(tcpRotationDelta) : null;
+        const currentGripperOpening =
+          lastObservationRef.current?.robot0_gripper_width.at(-1)?.[0] ?? null;
+        const gripperJoints =
+          context.description?.joints.filter(
+            (joint) =>
+              joint.type === 'prismatic' && /gripper|finger/iu.test(joint.name + ' ' + joint.child),
+          ) ?? [];
+        const gripperJointLimits = Object.fromEntries(
+          gripperJoints.map((joint) => [
+            joint.name,
+            {
+              lower: joint.limit?.lower ?? 0,
+              upper: joint.limit?.upper ?? joint.limit?.lower ?? 0,
+            },
+          ]),
+        );
+        const maximumGripperOpening = gripperJoints.reduce((total, joint) => {
+          const lower = joint.limit?.lower ?? 0;
+          const upper = joint.limit?.upper ?? lower;
+          return total + Math.abs(upper - lower);
+        }, 0);
+        const targetGripperOpening = firstRobotAction
+          ? Math.max(0, Math.min(maximumGripperOpening, firstRobotAction[6]))
+          : null;
+        const nextReviewData: Record<string, unknown> = {
+          frame_index: chunk.frame_index,
+          camera_frame_index: lastObservationRef.current?.frame_index ?? null,
+          input_image_shape: chunk.input_image_shape,
+          policy_tensor_shapes: chunk.policy_tensor_shapes,
+          prediction_keys: chunk.prediction_keys,
+          action_pred_shape: chunk.action_pred_shape,
+          pose_frame: 'URDF robot base',
+          quaternion_order: 'x, y, z, w',
+          action_representation: '[position xyz, rotation_6d, gripper width]',
+          action_position_frame:
+            chunk.action_pose_repr === 'relative' ? 'current TCP local frame' : 'robot base frame',
+          rotation_6d_layout: 'R00, R01, R02, R10, R11, R12 (first two matrix rows)',
+          conversion_chain: [
+            'checkpoint action_pred row: xyz + rotation_6d + gripper width',
+            'UMI pose10d_to_mat: rotation_6d to rotation matrix; mat_to_pose: matrix to axis-angle 7D action',
+            'browser action decoder: relative TCP delta composed with current TCP pose',
+            'target TCP pose passed to IK in URDF robot base coordinates; quaternion order x, y, z, w',
+          ],
+          first_executable_action_index: firstActionIndex,
+          action_pred_10d: firstPredictionAction,
+          decoded_action_7d: firstRobotAction,
+          action_pose_repr: chunk.action_pose_repr,
+          current_tcp: currentTcp,
+          target_tcp: targetTcp,
+          tcp_translation_delta_m: tcpTranslationDelta,
+          tcp_translation_delta_norm_m: tcpTranslationDeltaNorm,
+          tcp_rotation_delta_axis_angle_rad: tcpRotationDelta,
+          tcp_rotation_delta_norm_rad: tcpRotationDeltaNorm,
+          current_joints: seedJoints,
+          ik_seed_joints: seedJoints,
+          target_joints: targetJoints,
+          joint_deltas_rad: jointDeltas,
+          joint_delta_norm_rad: jointDeltaNorm,
+          maximum_joint_delta_rad: Math.abs(maximumJointDelta),
+          maximum_joint_delta_joint: maximumJointDeltaName,
+          joint_limits_rad: jointLimits,
+          gripper_joint_limits_m: gripperJointLimits,
+          current_gripper_opening_m: currentGripperOpening,
+          target_gripper_opening_m: targetGripperOpening,
+          gripper_delta_m:
+            currentGripperOpening !== null && targetGripperOpening !== null
+              ? targetGripperOpening - currentGripperOpening
+              : null,
+          finite_values: [
+            ...firstPredictionAction,
+            ...firstRobotAction,
+            ...Object.values(targetJoints),
+          ].every(Number.isFinite),
+          all_arm_joints_within_limits: armJoints.every((joint) => {
+            const value = targetJoints[joint.name];
+            const lower = joint.limit?.lower;
+            const upper = joint.limit?.upper;
+            return (
+              Number.isFinite(value) &&
+              (lower === undefined || value >= lower) &&
+              (upper === undefined || value <= upper)
+            );
+          }),
+          ik_success: ikRecord?.status === 'success',
+          position_residual_m: ikRecord?.position_residual ?? null,
+          orientation_residual_rad: ikRecord?.orientation_residual ?? null,
+          ik_termination_reason: ikRecord?.termination_reason ?? null,
+          ik_record: ikRecord,
+        };
+        reviewDataRef.current = nextReviewData;
+        if (mountedRef.current) setReviewData(nextReviewData);
+        publishDebugEvent('inference:single_action_review', {
+          episode_index: chunk.episode_index,
+          frame_index: chunk.frame_index,
+          ...nextReviewData,
+        });
+      }
     };
 
     worker.onerror = (event: ErrorEvent) => {
@@ -368,6 +541,7 @@ export const useInferenceReplay = ({
       statusRef.current === 'loading' ||
       statusRef.current === 'inferring' ||
       statusRef.current === 'computing' ||
+      statusRef.current === 'review' ||
       statusRef.current === 'playing' ||
       statusRef.current === 'waiting'
     ) {
@@ -390,8 +564,11 @@ export const useInferenceReplay = ({
       setError(null);
       setProgress('正在连接推理服务');
       setPlayback(null);
+      reviewDataRef.current = null;
+      setReviewData(null);
     }
     activeChunkRef.current = null;
+    pendingPlaybackRef.current = null;
     activeJointAnglesRef.current = [];
     updateStatus('connecting');
     publishDebugEvent('inference:connect', { url: INFERENCE_SOCKET_URL });
@@ -533,6 +710,7 @@ export const useInferenceReplay = ({
           statusRef.current === 'loading' ||
           statusRef.current === 'inferring' ||
           statusRef.current === 'computing' ||
+          statusRef.current === 'review' ||
           statusRef.current === 'playing' ||
           statusRef.current === 'waiting'
         ) {
@@ -582,13 +760,16 @@ export const useInferenceReplay = ({
 
   const stop = () => {
     if (statusRef.current === 'idle' || statusRef.current === 'complete') return;
-    sendStop(activeJointAnglesRef.current);
+    sendStop(pendingPlaybackRef.current ? [] : activeJointAnglesRef.current);
+    pendingPlaybackRef.current = null;
     activeJointAnglesRef.current = [];
     clearWorker();
     activeChunkRef.current = null;
     activeActionIndexRef.current = null;
     if (mountedRef.current) {
       setPlayback(null);
+      reviewDataRef.current = null;
+      setReviewData(null);
       setProgress('推理已停止');
     }
     updateStatus('stopped');
@@ -596,11 +777,87 @@ export const useInferenceReplay = ({
     closeSocket(1000, 'user stopped');
   };
 
-  const completePlayback = (token: number) => {
+  const executePendingAction = () => {
+    const pendingPlayback = pendingPlaybackRef.current;
+    if (!pendingPlayback || statusRef.current !== 'review') return;
+    pendingPlaybackRef.current = null;
+    if (mountedRef.current) {
+      setPlayback(pendingPlayback);
+      setProgress('正在执行唯一一条已审核动作');
+    }
+    updateStatus('playing');
+    publishDebugEvent('inference:single_action_execute', {
+      episode_index: pendingPlayback.episodeIndex,
+      frame_index: pendingPlayback.frameIndex,
+      action_index: pendingPlayback.actions[0]?.actionIndex,
+    });
+  };
+
+  const completePlayback = (token: number, snapshot?: PlaybackSnapshot) => {
     const chunk = activeChunkRef.current;
     const socket = socketRef.current;
     if (!chunk || token !== playbackTokenRef.current || socket?.readyState !== WebSocket.OPEN) {
       return;
+    }
+    const currentReview = reviewDataRef.current;
+    if (singleActionDebugEnabled && currentReview && snapshot) {
+      const targetJoints = currentReview.target_joints as JointValues;
+      const armJointNames =
+        contextRef.current.description?.joints
+          .filter((joint) => joint.type === 'revolute' || joint.type === 'continuous')
+          .map((joint) => joint.name) ?? [];
+      const armJointErrors = Object.fromEntries(
+        armJointNames.map((jointName) => [
+          jointName,
+          (snapshot.joint_values[jointName] ?? 0) - (targetJoints[jointName] ?? 0),
+        ]),
+      );
+      const targetTcp = currentReview.target_tcp as Pose | null;
+      const tcpPositionError = targetTcp
+        ? snapshot.tcp_pose.position.map((value, index) => value - targetTcp.position[index])
+        : null;
+      const tcpOrientationError = targetTcp
+        ? poseErrorRotation(targetTcp.orientation, snapshot.tcp_pose.orientation)
+        : null;
+      const targetGripperOpening = currentReview.target_gripper_opening_m;
+      const postObservation = snapshot.observation;
+      const preActionCameraTimestamp = lastObservationRef.current?.camera_frame_timestamp_ms;
+      const postActionCameraTimestamp = postObservation?.camera_frame_timestamp_ms;
+      const actualAfterAction = {
+        observation_frame_index: postObservation?.frame_index ?? null,
+        camera_frame_timestamp_ms: postActionCameraTimestamp ?? null,
+        camera_frame_advanced:
+          typeof preActionCameraTimestamp === 'number' &&
+          typeof postActionCameraTimestamp === 'number' &&
+          postActionCameraTimestamp > preActionCameraTimestamp,
+        camera_image_generated: Boolean(postObservation?.camera0_rgb),
+        camera_image_shape: postObservation?.camera0_rgb ? currentReview.input_image_shape : null,
+        actual_joints: snapshot.joint_values,
+        actual_tcp: snapshot.tcp_pose,
+        actual_gripper_opening_m: snapshot.gripper_opening_m,
+        joint_target_error_rad: armJointErrors,
+        joint_target_error_norm_rad: Math.hypot(...Object.values(armJointErrors)),
+        tcp_position_error_m: tcpPositionError,
+        tcp_position_error_norm_m: tcpPositionError
+          ? vectorLength(tcpPositionError as [number, number, number])
+          : null,
+        tcp_orientation_error_axis_angle_rad: tcpOrientationError,
+        tcp_orientation_error_norm_rad: tcpOrientationError
+          ? vectorLength(tcpOrientationError)
+          : null,
+        gripper_target_error_m:
+          typeof targetGripperOpening === 'number' && snapshot.gripper_opening_m !== null
+            ? snapshot.gripper_opening_m - targetGripperOpening
+            : null,
+      };
+      const nextReview = { ...currentReview, actual_after_action: actualAfterAction };
+      reviewDataRef.current = nextReview;
+      if (mountedRef.current) setReviewData(nextReview);
+      publishDebugEvent('inference:single_action_complete', {
+        episode_index: chunk.episode_index,
+        frame_index: chunk.frame_index,
+        ...actualAfterAction,
+      });
     }
     socket.send(
       JSON.stringify({
@@ -613,13 +870,24 @@ export const useInferenceReplay = ({
     activeChunkRef.current = null;
     if (mountedRef.current) {
       setPlayback(null);
-      setProgress('单步动作已执行，点击“推理一步”继续');
+      setProgress(
+        singleActionDebugEnabled
+          ? '唯一一条动作已执行，已暂停等待人工验收'
+          : '单步动作已执行，点击“推理一步”继续',
+      );
     }
-    updateStatus('waiting');
+    updateStatus(singleActionDebugEnabled ? 'complete' : 'waiting');
     publishDebugEvent('inference:ack', {
       episode_index: chunk.episode_index,
       frame_index: chunk.frame_index,
     });
+    if (singleActionDebugEnabled) {
+      publishDebugEvent('inference:single_action_paused', {
+        episode_index: chunk.episode_index,
+        frame_index: chunk.frame_index,
+      });
+      closeSocket(1000, 'single action completed');
+    }
   };
 
   useEffect(() => {
@@ -648,8 +916,20 @@ export const useInferenceReplay = ({
     status === 'loading' ||
     status === 'inferring' ||
     status === 'computing' ||
+    status === 'review' ||
     status === 'playing' ||
     status === 'waiting';
 
-  return { status, progress, error, playback, isLocked, step, stop, completePlayback };
+  return {
+    status,
+    progress,
+    error,
+    playback,
+    isLocked,
+    step,
+    stop,
+    reviewData,
+    executePendingAction,
+    completePlayback,
+  };
 };

@@ -113,7 +113,7 @@ def serialize_action_chunk(chunk: dict) -> str:
             },
         )
 
-    # 精简消息：prediction 与 trajectory_summary 不下发给前端，仅保留回放所需字段。
+    # 下发完整策略预测和输入形状，供前端在单动作模式下审阅 IK 目标。
     message = {
         "type": "action_chunk",
         "request_id": chunk["request_id"],
@@ -122,6 +122,11 @@ def serialize_action_chunk(chunk: dict) -> str:
         "last_chunk": chunk["last_chunk"],
         "actions": chunk["actions"],
         "action_pose_repr": action_pose_repr,
+        "prediction": chunk["prediction"],
+        "prediction_keys": chunk["prediction_keys"],
+        "action_pred_shape": chunk["action_pred_shape"],
+        "policy_tensor_shapes": chunk["policy_tensor_shapes"],
+        "input_image_shape": chunk["input_image_shape"],
     }
     try:
         # allow_nan=False 拒绝非法浮点；紧凑分隔符减少传输体积。

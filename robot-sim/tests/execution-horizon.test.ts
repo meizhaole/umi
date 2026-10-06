@@ -154,6 +154,7 @@ describe('execution horizon', () => {
   it('action 8 的 IK failure 不阻止 0 到 5 求解和播放，ACK 后等待手动下一步', () => {
     const observation: InferenceObservation = {
       frame_index: 0,
+      camera_frame_timestamp_ms: 50,
       camera0_rgb: 'AAAA',
       robot0_eef_pos: [startPose.position, startPose.position],
       robot0_eef_rot_axis_angle: [
@@ -167,6 +168,7 @@ describe('execution horizon', () => {
       jointValues: seed,
       tcpPose: startPose,
       getObservation: () => observation,
+      singleActionDebugEnabled: false,
     };
     let replay!: ReturnType<typeof useInferenceReplay>;
     const Probe = () => {
@@ -194,6 +196,11 @@ describe('execution horizon', () => {
         last_chunk: false,
         actions: predictedActions,
         action_pose_repr: 'relative',
+        prediction: Array.from({ length: 16 }, () => [0, 0, 0, 1, 0, 0, 0, 1, 0, 0]),
+        prediction_keys: ['action', 'action_pred'],
+        action_pred_shape: [1, 16, 10],
+        policy_tensor_shapes: { camera0_rgb: [1, 1, 3, 224, 224] },
+        input_image_shape: [224, 224, 3],
       }),
     );
 
