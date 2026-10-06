@@ -46,6 +46,7 @@
 - [x] 为 UR5 CAD 接入固定跟随 GoPro 腕部相机与部署图像预处理
 - [x] 在支持 WebGL 的浏览器确认 GoPro 相机方向、夹爪构图与关节跟随
 - [x] 验证 UR5 CAD 相机帧到 UMI policy 的运行时数据与单帧推理
+- [x] 为 UR5_CAD 单独调整杯碟造型、初始位置与复位
 - [ ] 将本机训练 checkpoint 接入 Gazebo 回放启动参数
 - [ ] 接通 Gazebo 相机与 UMI 推理观测
 - [ ] 将实时 UMI 策略接入 ReBot RS 实机控制链路

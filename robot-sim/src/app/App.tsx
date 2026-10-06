@@ -181,6 +181,7 @@ declare global {
 
 export const App = () => {
   const [modelId, setModelId] = useState<RobotModelId>(DEFAULT_ROBOT_MODEL_ID);
+  const [cupSceneResetToken, setCupSceneResetToken] = useState(0);
   const [loadedRobot, setLoadedRobot] = useState<LoadedRobot | null>(null);
   const [loadError, setLoadError] = useState('');
   const [jointValues, setJointValues] = useState<JointValues>({});
@@ -1342,6 +1343,9 @@ export const App = () => {
                   setMode('position');
                   setJointValues(nextValues);
                   setCommands(loadedRobot.controller.getCommands());
+                  if (modelId === 'UR5_CAD') {
+                    setCupSceneResetToken((current) => current + 1);
+                  }
                 }}
                 type="button"
               >
@@ -1393,6 +1397,7 @@ export const App = () => {
                 onWrist3ExperimentComplete={handleWrist3ExperimentComplete}
                 onPhysicsReady={setPhysicsReady}
                 playback={inference.playback}
+                cupSceneResetToken={cupSceneResetToken}
                 inferenceActive={inference.isLocked}
                 positionExecutionOverride={
                   datasetReplayEnabled

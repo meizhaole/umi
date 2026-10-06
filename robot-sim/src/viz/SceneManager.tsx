@@ -9,6 +9,7 @@ import type { PlaybackChunk } from '../app/inferenceProtocol';
 import type { ControlMode, JointCommand, JointValues, RobotDescription } from '../core/types';
 import { PhysicsWorld } from '../sim/PhysicsWorld';
 import { OfficialCupArrangementScene, type CupBodyRef } from '../sim/tasks/CupArrangementScene';
+import { UR5CadCupArrangementScene } from '../sim/tasks/UR5CadCupArrangementScene';
 import {
   RobotBody,
   type Wrist3ExperimentTrace,
@@ -29,6 +30,7 @@ interface SceneManagerProps {
   mode: ControlMode;
   isRunning: boolean;
   playback: PlaybackChunk | null;
+  cupSceneResetToken: number;
   inferenceActive: boolean;
   positionExecutionOverride?: 'joint_motors' | 'kinematic_fk';
   datasetReplayActive?: boolean;
@@ -194,6 +196,7 @@ export const SceneManager = ({
   mode,
   isRunning,
   playback,
+  cupSceneResetToken,
   inferenceActive,
   positionExecutionOverride,
   datasetReplayActive = false,
@@ -317,10 +320,18 @@ export const SceneManager = ({
         timeStep={SIMULATION_CONFIG.fixedTimeStep}
       >
         <PhysicsWorld />
-        <OfficialCupArrangementScene
-          bodyRef={cupBodyRef}
-          onDragStateChange={handleCupDragStateChange}
-        />
+        {modelId === 'UR5_CAD' ? (
+          <UR5CadCupArrangementScene
+            key={cupSceneResetToken}
+            bodyRef={cupBodyRef}
+            onDragStateChange={handleCupDragStateChange}
+          />
+        ) : (
+          <OfficialCupArrangementScene
+            bodyRef={cupBodyRef}
+            onDragStateChange={handleCupDragStateChange}
+          />
+        )}
         <RobotBody
           commands={commands}
           description={description}
