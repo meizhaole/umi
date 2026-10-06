@@ -289,6 +289,12 @@
     <parent link="flange"/>
     <child link="tool0"/>
   </joint>
+  <link name="umi_tcp_link"/>
+  <joint name="tool0_to_umi_tcp_link" type="fixed">
+    <origin xyz="0 -0.003600 0.224785782" rpy="0 0 0"/>
+    <parent link="tool0"/>
+    <child link="umi_tcp_link"/>
+  </joint>
 
   <material name="cad_part_1"><color rgba="0.2158605 0.2158605 0.2158605 1"/></material>
   <material name="cad_parts_2_to_6"><color rgba="0.5271151 0.5271151 0.5271151 1"/></material>

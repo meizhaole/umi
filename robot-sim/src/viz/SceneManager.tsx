@@ -92,6 +92,22 @@ const DatasetPoseMarkers = ({ targetPose, actualPose }: DatasetPoseMarkersProps)
   );
 };
 
+const UmiTcpMarker = ({ pose }: { pose: Pose }) => {
+  const position = new Vector3(...pose.position).applyQuaternion(ROBOT_TO_SCENE).toArray();
+
+  return (
+    <mesh
+      ref={setDebugLayer}
+      name="ur5-cad-umi-tcp-marker"
+      position={position}
+      renderOrder={10}
+    >
+      <sphereGeometry args={[0.01, 20, 16]} />
+      <meshBasicMaterial color="#ff3b8d" depthTest={false} toneMapped={false} />
+    </mesh>
+  );
+};
+
 interface ActionPlaybackProps {
   playback: PlaybackChunk | null;
   jointValues: JointValues;
@@ -366,6 +382,7 @@ export const SceneManager = ({
           urdfXml={urdfXml}
         />
       </Suspense>
+      {modelId === 'UR5_CAD' ? <UmiTcpMarker pose={tcpPose} /> : null}
       {datasetReplayActive ? (
         <DatasetPoseMarkers
           targetPose={datasetReplayTargetPose}

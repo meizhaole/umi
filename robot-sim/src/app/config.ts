@@ -71,7 +71,7 @@ export const ROBOT_MODELS = [
       wrist_3_joint: 0,
     },
     gripperJointNames: ['left_jaw_joint', 'right_jaw_joint'],
-    tipLink: 'tool0',
+    tipLink: 'umi_tcp_link',
   },
 ] as const satisfies readonly RobotConfig[];
 
