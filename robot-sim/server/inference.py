@@ -113,6 +113,16 @@ async def inference(websocket: WebSocket) -> None:
                 await websocket.send_json({"type": "complete", "state": "stopped"})
                 return
 
+            if chunk.get("type") == "prediction_result":
+                await websocket.send_json(chunk)
+                LOGGER.info(
+                    "policy inference only 成功 frame_index=%s action_shape=%s dtype=%s",
+                    chunk["frame_index"],
+                    chunk["action_shape"],
+                    chunk["action_dtype"],
+                )
+                return
+
             # 把本次 request_id 合并进动作块，随后的 ACK/IK trace 都用它对齐。
             chunk = {**chunk, "request_id": request_id}
 

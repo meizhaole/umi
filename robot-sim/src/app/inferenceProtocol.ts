@@ -141,4 +141,20 @@ export interface InferenceObservation {
   robot0_eef_pos: number[][];
   robot0_eef_rot_axis_angle: number[][];
   robot0_gripper_width: number[][];
+  policy_inference_only?: boolean;
+  camera0_rgb_stats?: RgbImageStatistics;
 }
+
+export interface RgbImageStatistics {
+  width: number;
+  height: number;
+  byte_length: number;
+  dtype: 'uint8';
+  min: number;
+  max: number;
+  channels: Record<'r' | 'g' | 'b', { min: number; max: number; mean: number }>;
+}
+
+export const isPolicyInferenceOnlyEnabled = (): boolean =>
+  typeof window !== 'undefined' &&
+  new URLSearchParams(window.location.search).get('policyInferenceOnly') === '1';

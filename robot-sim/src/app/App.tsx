@@ -30,7 +30,11 @@ import { StatusBar } from '../ui/StatusBar';
 import { TaskPanel } from '../ui/TaskPanel';
 import { InferencePanel } from '../ui/InferencePanel';
 import { quaternionToRotationVector } from '../utils/math';
-import type { InferenceObservation } from './inferenceProtocol';
+import {
+  isPolicyInferenceOnlyEnabled,
+  type InferenceObservation,
+  type RgbImageStatistics,
+} from './inferenceProtocol';
 import type { SimCameraFrame } from '../sim/sensors/WristCameraCapture';
 import { CAMERA_IMAGE_SIZE } from '../sim/sensors/CameraSensor';
 import {
@@ -70,6 +74,40 @@ const WRIST3_AB_TARGET = 0.101814692820414;
 const WRIST3_AB_STEPS = Math.round(2 / SIMULATION_CONFIG.fixedTimeStep);
 const DATASET_REPLAY_EXECUTION_MODE: DatasetReplayExecutionMode =
   DEFAULT_DATASET_REPLAY_EXECUTION_MODE;
+
+const getRgbImageStatistics = (rgb: Uint8Array): RgbImageStatistics => {
+  const channelMin = [255, 255, 255];
+  const channelMax = [0, 0, 0];
+  const channelSums = [0, 0, 0];
+  let min = 255;
+  let max = 0;
+
+  for (let index = 0; index < rgb.length; index += 3) {
+    for (let channel = 0; channel < 3; channel += 1) {
+      const value = rgb[index + channel];
+      channelMin[channel] = Math.min(channelMin[channel], value);
+      channelMax[channel] = Math.max(channelMax[channel], value);
+      channelSums[channel] += value;
+      min = Math.min(min, value);
+      max = Math.max(max, value);
+    }
+  }
+
+  const pixelCount = rgb.length / 3;
+  return {
+    width: CAMERA_IMAGE_SIZE,
+    height: CAMERA_IMAGE_SIZE,
+    byte_length: rgb.byteLength,
+    dtype: 'uint8',
+    min,
+    max,
+    channels: {
+      r: { min: channelMin[0], max: channelMax[0], mean: channelSums[0] / pixelCount },
+      g: { min: channelMin[1], max: channelMax[1], mean: channelSums[1] / pixelCount },
+      b: { min: channelMin[2], max: channelMax[2], mean: channelSums[2] / pixelCount },
+    },
+  };
+};
 
 interface DatasetReplayStepRecord {
   frame_index: number;
@@ -421,6 +459,7 @@ export const App = () => {
     for (let offset = 0; offset < latest.rgb.length; offset += 0x8000) {
       binary += String.fromCharCode(...latest.rgb.subarray(offset, offset + 0x8000));
     }
+    const policyInferenceOnly = isPolicyInferenceOnlyEnabled();
     return {
       frame_index: observationIndexRef.current++,
       camera0_rgb: btoa(binary),
@@ -429,6 +468,12 @@ export const App = () => {
         quaternionToRotationVector(frame.eefPose.orientation),
       ),
       robot0_gripper_width: history.map((frame) => [frame.gripperWidth]),
+      ...(policyInferenceOnly
+        ? {
+            policy_inference_only: true,
+            camera0_rgb_stats: getRgbImageStatistics(latest.rgb),
+          }
+        : {}),
     };
   }, [drawCameraPreview]);
   const inference = useInferenceReplay({
@@ -1149,19 +1194,22 @@ export const App = () => {
             </div>
           </section>
 
-          {modelId !== 'UR5_CAD' ? (
+          {modelId !== 'UR5_CAD' || isPolicyInferenceOnlyEnabled() ? (
             <InferencePanel
               canStep={
                 Boolean(loadedRobot && physicsReady && !loadError) &&
                 !datasetReplayEnabled &&
                 !experimentRecording &&
+                !(isPolicyInferenceOnlyEnabled() && inference.status === 'complete') &&
                 (!inference.isLocked || inference.status === 'waiting')
               }
               error={inference.error}
               isLocked={inference.isLocked}
               onStep={() => {
-                if (mode !== 'position' && !inference.isLocked) setControlMode('position');
-                setIsRunning(true);
+                if (!isPolicyInferenceOnlyEnabled()) {
+                  if (mode !== 'position' && !inference.isLocked) setControlMode('position');
+                  setIsRunning(true);
+                }
                 inference.step();
               }}
               onStop={inference.stop}

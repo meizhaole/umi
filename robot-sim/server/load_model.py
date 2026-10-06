@@ -275,6 +275,18 @@ class ReplayWorker:
                 context=self.context,
             )
 
+        if chunk.get("type") == "prediction_result":
+            frame_index = chunk.get("frame_index")
+            if isinstance(frame_index, bool) or not isinstance(frame_index, int):
+                raise ReplayError(
+                    "invalid_worker_output",
+                    "parse_prediction_result",
+                    "prediction_result 缺少有效的 frame_index",
+                    context=self.context,
+                )
+            self.context = {"frame_index": frame_index}
+            return chunk
+
         # Python 里 bool 是 int 的子类（True == 1），所以必须显式排除，
         # 否则 True 会被当成合法的帧号混进来。
         episode_index = chunk.get("episode_index")

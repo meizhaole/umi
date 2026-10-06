@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { JointValues, Pose, RobotDescription } from '../core/types';
 import { publishDebugEvent } from './debugBus';
 import { selectExecutionActions } from './executionHorizon';
-import { isActionChunk } from './inferenceProtocol';
+import { isActionChunk, isPolicyInferenceOnlyEnabled } from './inferenceProtocol';
 import type {
   ActionChunk,
   IKActionDebugRecord,
@@ -141,6 +141,8 @@ export const useInferenceReplay = ({
       frame_index: observation.frame_index,
       image_bytes: Math.floor((observation.camera0_rgb.length * 3) / 4),
       image_shape: [224, 224, 3],
+      policy_inference_only: observation.policy_inference_only ?? false,
+      frontend_rgb: observation.camera0_rgb_stats,
       robot0_eef_pos_m: observation.robot0_eef_pos,
       robot0_eef_rot_axis_angle_rad: observation.robot0_eef_rot_axis_angle,
       robot0_gripper_width_m: observation.robot0_gripper_width,
@@ -340,6 +342,26 @@ export const useInferenceReplay = ({
     worker.postMessage(request);
   };
 
+  const handlePredictionResult = (result: Record<string, unknown>) => {
+    clearWorker();
+    activeChunkRef.current = null;
+    if (mountedRef.current) {
+      setPlayback(null);
+      const actionShape = Array.isArray(result.action_shape)
+        ? result.action_shape.join(' × ')
+        : '未知';
+      const actionDtype = typeof result.action_dtype === 'string' ? result.action_dtype : '未知';
+      const nanCount = typeof result.nan_count === 'number' ? result.nan_count : '未知';
+      const infCount = typeof result.inf_count === 'number' ? result.inf_count : '未知';
+      setProgress(
+        `policy inference succeeded · action ${actionShape} · ${actionDtype} · NaN ${nanCount} · Inf ${infCount}`,
+      );
+    }
+    updateStatus('complete');
+    publishDebugEvent('inference:prediction_result', result);
+    closeSocket(1000, 'policy inference only');
+  };
+
   const start = () => {
     if (
       statusRef.current === 'connecting' ||
@@ -376,25 +398,27 @@ export const useInferenceReplay = ({
 
     try {
       clearWorker();
-      const worker = new Worker(new URL('../workers/umiIk.worker.ts', import.meta.url), {
-        type: 'module',
-      });
-      workerRef.current = worker;
-      worker.onerror = (event: ErrorEvent) => {
-        if (workerRef.current !== worker) return;
-        const chunk = activeChunkRef.current;
-        fail(
-          {
-            code: 'IK_WORKER_ERROR',
-            stage: 'ik',
-            message: event.message || 'IK Worker 启动失败。',
-            ...(chunk
-              ? { episode_index: chunk.episode_index, frame_index: chunk.frame_index }
-              : {}),
-          },
-          socketRef.current?.readyState === WebSocket.OPEN,
-        );
-      };
+      if (!isPolicyInferenceOnlyEnabled()) {
+        const worker = new Worker(new URL('../workers/umiIk.worker.ts', import.meta.url), {
+          type: 'module',
+        });
+        workerRef.current = worker;
+        worker.onerror = (event: ErrorEvent) => {
+          if (workerRef.current !== worker) return;
+          const chunk = activeChunkRef.current;
+          fail(
+            {
+              code: 'IK_WORKER_ERROR',
+              stage: 'ik',
+              message: event.message || 'IK Worker 启动失败。',
+              ...(chunk
+                ? { episode_index: chunk.episode_index, frame_index: chunk.frame_index }
+                : {}),
+            },
+            socketRef.current?.readyState === WebSocket.OPEN,
+          );
+        };
+      }
       const socket = new WebSocket(INFERENCE_SOCKET_URL);
       socketRef.current = socket;
       socket.onopen = () => {
@@ -425,6 +449,10 @@ export const useInferenceReplay = ({
             },
             true,
           );
+          return;
+        }
+        if (message.type === 'prediction_result' && isPolicyInferenceOnlyEnabled()) {
+          handlePredictionResult(message);
           return;
         }
         if (
