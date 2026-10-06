@@ -84,6 +84,7 @@ def _read_ik_trace(message: dict, context: dict) -> Optional[dict]:
     if (
         not isinstance(request_id, str)
         or not request_id
+        or request_id != context.get("request_id")
         or isinstance(episode_index, bool)
         or not isinstance(episode_index, int)
         or episode_index != context["episode_index"]
@@ -184,6 +185,7 @@ async def wait_for_ack(
 ) -> tuple[bool, list[dict[str, float]]]:
     frame_index = chunk["frame_index"]
     context = {
+        "request_id": chunk["request_id"],
         "episode_index": chunk["episode_index"],
         "frame_index": frame_index,
     }
@@ -273,7 +275,8 @@ async def wait_for_ack(
             if record is None:
                 # 上下文不匹配的 trace 直接丢弃，但不中断等待。
                 LOGGER.warning(
-                    "忽略无效 IK trace frame_index=%s",
+                    "忽略无效 IK trace request_id=%s frame_index=%s",
+                    context.get("request_id"),
                     frame_index,
                 )
                 continue

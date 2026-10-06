@@ -154,7 +154,7 @@ describe('execution horizon', () => {
 
   it('action 8 的 IK failure 不阻止 0 到 5 求解和播放，ACK 后等待手动下一步', () => {
     const observation: InferenceObservation = {
-      frame_index: 0,
+      frame_index: 7,
       camera_frame_timestamp_ms: 50,
       camera0_rgb: 'AAAA',
       robot0_eef_pos: [startPose.position, startPose.position],
@@ -164,14 +164,18 @@ describe('execution horizon', () => {
       ],
       robot0_gripper_width: [[0], [0]],
     };
+    const liveTcpPose = {
+      position: [startPose.position[0] + 0.25, 0.5, -0.5] as [number, number, number],
+      orientation: [0, 0, Math.SQRT1_2, Math.SQRT1_2] as [number, number, number, number],
+    };
     const context = {
-      robotId: 'UR5_CAD' as const,
-      robotConfig: findRobotConfig('UR5_CAD'),
-      loadedRobotId: 'UR5_CAD' as const,
-      loadedRobotUrdfFile: findRobotConfig('UR5_CAD').file,
+      robotId: 'UR5' as const,
+      robotConfig: findRobotConfig('UR5'),
+      loadedRobotId: 'UR5' as const,
+      loadedRobotUrdfFile: findRobotConfig('UR5').file,
       description,
       jointValues: seed,
-      tcpPose: startPose,
+      tcpPose: liveTcpPose,
       getObservation: () => observation,
       singleActionDebugEnabled: false,
     };
@@ -196,7 +200,7 @@ describe('execution horizon', () => {
       socket.emitMessage({
         type: 'action_chunk',
         request_id: 'request-horizon',
-        episode_index: 2,
+        episode_index: 0,
         frame_index: 7,
         last_chunk: false,
         actions: predictedActions,
@@ -212,7 +216,9 @@ describe('execution horizon', () => {
     const worker = FakeWorker.workers[0];
     expect(worker.request).toMatchObject({
       request_id: 'request-horizon',
+      episode_index: 0,
       frame_index: 7,
+      startPose,
       predictionCount: 16,
       configuredExecutionHorizon: 6,
       executionCount: 6,
@@ -235,6 +241,7 @@ describe('execution horizon', () => {
     expect(resultRecords.every((record) => record.action_pose_repr === 'relative')).toBe(true);
     expect(resultRecords[0]).toMatchObject({
       request_id: 'request-horizon',
+      episode_index: 0,
       frame_index: 7,
       prediction_count: 16,
       configured_execution_horizon: 6,

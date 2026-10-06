@@ -6,6 +6,7 @@ import type {
   Pose,
   RobotDescription,
 } from '../core/types';
+import { quaternionFromAxisAngle } from '../utils/math';
 
 export interface ActionChunk {
   type: 'action_chunk';
@@ -185,6 +186,35 @@ export interface InferenceObservation {
   policy_inference_only?: boolean;
   camera0_rgb_stats?: RgbImageStatistics;
 }
+
+export const getObservationTcpPose = (observation: InferenceObservation): Pose | null => {
+  const position = observation.robot0_eef_pos.at(-1);
+  const rotationVector = observation.robot0_eef_rot_axis_angle.at(-1);
+  if (
+    !position ||
+    position.length !== 3 ||
+    !position.every(Number.isFinite) ||
+    !rotationVector ||
+    rotationVector.length !== 3 ||
+    !rotationVector.every(Number.isFinite)
+  ) {
+    return null;
+  }
+
+  const angle = Math.hypot(...rotationVector);
+  const orientation =
+    angle > 0
+      ? quaternionFromAxisAngle(
+          rotationVector.map((value) => value / angle) as [number, number, number],
+          angle,
+        )
+      : ([0, 0, 0, 1] as [number, number, number, number]);
+
+  return {
+    position: [...position] as [number, number, number],
+    orientation,
+  };
+};
 
 export interface RgbImageStatistics {
   width: number;

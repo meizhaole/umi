@@ -22,6 +22,11 @@ class FakeStdout:
 
 def read_worker_chunk(chunk):
     worker = ReplayWorker()
+    worker.context = {
+        "request_id": "request-relative",
+        "episode_index": 0,
+        "frame_index": 1,
+    }
     worker.process = SimpleNamespace(stdout=FakeStdout(json.dumps(chunk).encode("utf-8")))
     return asyncio.run(worker.read_chunk())
 
@@ -75,6 +80,27 @@ class ActionPoseRepresentationProtocolTest(unittest.TestCase):
             inference_protocol.serialize_action_chunk(chunk)
 
         self.assertEqual(raised.exception.code, "invalid_action_chunk")
+
+    def test_worker_chunk_must_match_the_observation_frame(self):
+        chunk = self.make_worker_chunk()
+        chunk["frame_index"] = 2
+
+        with self.assertRaises(ReplayError) as raised:
+            read_worker_chunk(chunk)
+
+        self.assertEqual(raised.exception.code, "worker_context_mismatch")
+
+    def test_prediction_result_must_match_the_observation_frame(self):
+        chunk = {
+            "type": "prediction_result",
+            "episode_index": 0,
+            "frame_index": 2,
+        }
+
+        with self.assertRaises(ReplayError) as raised:
+            read_worker_chunk(chunk)
+
+        self.assertEqual(raised.exception.code, "worker_context_mismatch")
 
 
 if __name__ == "__main__":

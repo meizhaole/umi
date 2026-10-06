@@ -3,7 +3,11 @@ import type { JointValues, Pose, RobotDescription } from '../core/types';
 import { findRobotConfig, type RobotConfig, type RobotModelId } from './config';
 import { publishDebugEvent } from './debugBus';
 import { EXECUTION_HORIZON, selectExecutionActions } from './executionHorizon';
-import { isActionChunk, isPolicyInferenceOnlyEnabled } from './inferenceProtocol';
+import {
+  getObservationTcpPose,
+  isActionChunk,
+  isPolicyInferenceOnlyEnabled,
+} from './inferenceProtocol';
 import type {
   ActionChunk,
   IKActionDebugRecord,
@@ -263,7 +267,10 @@ export const useInferenceReplay = ({
     const ikRecord = latestIkRecordRef.current;
     const actionPrediction = chunk.prediction[0] ?? [];
     const robotAction = chunk.actions[0] ?? [];
-    const currentTcp = ikRecord?.start_pose ?? context.tcpPose;
+    const observationTcpPose = lastObservationRef.current
+      ? getObservationTcpPose(lastObservationRef.current)
+      : null;
+    const currentTcp = ikRecord?.start_pose ?? observationTcpPose;
     const targetTcp =
       ikRecord?.target_pose ??
       (isRecord(error.target_pose) ? (error.target_pose as unknown as Pose) : null);
@@ -501,6 +508,40 @@ export const useInferenceReplay = ({
       );
       return;
     }
+    const observationSnapshot = lastObservationRef.current;
+    if (
+      !observationSnapshot ||
+      observationSnapshot.frame_index !== chunk.frame_index ||
+      episodeIndexRef.current !== chunk.episode_index
+    ) {
+      fail(
+        {
+          code: 'ACTION_CONTEXT_MISMATCH',
+          stage: 'protocol',
+          message: '动作块与当前 inference observation 的 episode/frame 不匹配。',
+          request_id: chunk.request_id,
+          episode_index: chunk.episode_index,
+          frame_index: chunk.frame_index,
+        },
+        true,
+      );
+      return;
+    }
+    const observationTcpPose = getObservationTcpPose(observationSnapshot);
+    if (!observationTcpPose) {
+      fail(
+        {
+          code: 'INVALID_OBSERVATION_TCP',
+          stage: 'ik',
+          message: '当前 observation 缺少有效的 EEF TCP pose。',
+          request_id: chunk.request_id,
+          episode_index: chunk.episode_index,
+          frame_index: chunk.frame_index,
+        },
+        true,
+      );
+      return;
+    }
     if (activeChunkRef.current) {
       fail(
         {
@@ -690,7 +731,7 @@ export const useInferenceReplay = ({
             },
           ]),
         );
-        const currentTcp = ikRecord?.start_pose ?? context.tcpPose;
+        const currentTcp = ikRecord?.start_pose ?? observationTcpPose;
         const targetTcp = ikRecord?.target_pose ?? null;
         const tcpTranslationDelta =
           currentTcp && targetTcp
@@ -706,7 +747,7 @@ export const useInferenceReplay = ({
         const tcpRotationDeltaNorm = tcpRotationDelta ? vectorLength(tcpRotationDelta) : null;
         const actionDryRunSummary = selection.selectedActionIndexes.map((actionIndex) => {
           const actionRecord = ikRecordsByAction.get(actionIndex);
-          const actionStartPose = actionRecord?.start_pose ?? context.tcpPose;
+          const actionStartPose = actionRecord?.start_pose ?? observationTcpPose;
           const actionTargetPose = actionRecord?.target_pose ?? null;
           const actionTranslationDelta =
             actionStartPose && actionTargetPose
@@ -993,7 +1034,7 @@ export const useInferenceReplay = ({
       frame_index: chunk.frame_index,
       description: context.description,
       gripperJointNames: context.robotConfig.gripperJointNames,
-      startPose: context.tcpPose,
+      startPose: observationTcpPose,
       initialJointValues: context.jointValues,
       actions: selection.actions,
       predictionCount: selection.predictionCount,

@@ -275,16 +275,42 @@ class ReplayWorker:
                 context=self.context,
             )
 
+        expected_context = self.context.copy()
         if chunk.get("type") == "prediction_result":
+            episode_index = chunk.get("episode_index")
             frame_index = chunk.get("frame_index")
-            if isinstance(frame_index, bool) or not isinstance(frame_index, int):
+            if (
+                isinstance(episode_index, bool)
+                or not isinstance(episode_index, int)
+                or isinstance(frame_index, bool)
+                or not isinstance(frame_index, int)
+            ):
                 raise ReplayError(
                     "invalid_worker_output",
                     "parse_prediction_result",
-                    "prediction_result 缺少有效的 frame_index",
-                    context=self.context,
+                    "prediction_result 缺少有效的 episode_index 或 frame_index",
+                    context=expected_context,
                 )
-            self.context = {"frame_index": frame_index}
+            if (
+                episode_index != expected_context.get("episode_index")
+                or frame_index != expected_context.get("frame_index")
+            ):
+                raise ReplayError(
+                    "worker_context_mismatch",
+                    "parse_prediction_result",
+                    "prediction_result 与当前 observation 不匹配",
+                    details=(
+                        f"expected episode/frame={expected_context.get('episode_index')}/"
+                        f"{expected_context.get('frame_index')}, got "
+                        f"{episode_index}/{frame_index}"
+                    ),
+                    context=expected_context,
+                )
+            self.context = {
+                **expected_context,
+                "episode_index": episode_index,
+                "frame_index": frame_index,
+            }
             return chunk
 
         # Python 里 bool 是 int 的子类（True == 1），所以必须显式排除，
@@ -304,8 +330,25 @@ class ReplayWorker:
                 context=self.context,
             )
 
-        # 校验通过后，把本块的位置写进上下文，供后续帧的错误上报使用。
+        if (
+            episode_index != expected_context.get("episode_index")
+            or frame_index != expected_context.get("frame_index")
+        ):
+            raise ReplayError(
+                "worker_context_mismatch",
+                "validate_action_chunk",
+                "worker 动作块与当前 observation 不匹配",
+                details=(
+                    f"expected episode/frame={expected_context.get('episode_index')}/"
+                    f"{expected_context.get('frame_index')}, got "
+                    f"{episode_index}/{frame_index}"
+                ),
+                context=expected_context,
+            )
+
+        # 保留 request_id，并更新当前帧上下文，供后续校验与错误回传使用。
         self.context = {
+            **expected_context,
             "episode_index": episode_index,
             "frame_index": frame_index,
         }

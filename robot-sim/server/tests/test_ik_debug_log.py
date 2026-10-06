@@ -73,8 +73,10 @@ class IkDebugLogTest(unittest.TestCase):
             "action_index": 8,
             "termination_reason": "no_joint_motion",
         }
+        stale_record = {**record, "request_id": "request-old"}
         websocket = FakeWebSocket(
             [
+                json.dumps({"type": "ik_trace", "record": stale_record}),
                 json.dumps({"type": "ik_trace", "record": record}),
                 json.dumps(
                     {
@@ -91,7 +93,12 @@ class IkDebugLogTest(unittest.TestCase):
                 result = await inference_protocol.wait_for_ack(
                     websocket,
                     None,
-                    {"episode_index": 0, "frame_index": 1, "last_chunk": True},
+                    {
+                        "request_id": "request-1",
+                        "episode_index": 0,
+                        "frame_index": 1,
+                        "last_chunk": True,
+                    },
                 )
                 return result, write_record.call_args_list
 
@@ -122,7 +129,12 @@ class IkDebugLogTest(unittest.TestCase):
                 result = await inference_protocol.wait_for_ack(
                     websocket,
                     None,
-                    {"episode_index": 0, "frame_index": 1, "last_chunk": True},
+                    {
+                        "request_id": "request-1",
+                        "episode_index": 0,
+                        "frame_index": 1,
+                        "last_chunk": True,
+                    },
                 )
                 return result, write_record.call_args_list
 

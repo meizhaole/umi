@@ -23,6 +23,7 @@ class FakeWebSocket:
 class SingleActionAckStateTest(unittest.IsolatedAsyncioTestCase):
     def make_chunk(self):
         return {
+            "request_id": "request-single-action",
             "episode_index": 0,
             "frame_index": 0,
             "last_chunk": True,

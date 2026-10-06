@@ -115,6 +115,7 @@ async def inference(websocket: WebSocket) -> None:
                 await websocket.send_json({"type": "complete", "state": "stopped"})
                 return
 
+            chunk = {**chunk, "request_id": request_id}
             if chunk.get("type") == "prediction_result":
                 await websocket.send_json(chunk)
                 LOGGER.info(
@@ -124,9 +125,6 @@ async def inference(websocket: WebSocket) -> None:
                     chunk["action_dtype"],
                 )
                 return
-
-            # 把本次 request_id 合并进动作块，随后的 ACK/IK trace 都用它对齐。
-            chunk = {**chunk, "request_id": request_id}
 
             # 保存完整预测序列，并输出三毫米阈值的轨迹统计。
             record_prediction(chunk)
