@@ -132,6 +132,7 @@ export const useInferenceReplay = ({
   const lastObservationRef = useRef<InferenceObservation | null>(null);
   const activeActionIndexRef = useRef<number | null>(null);
   const activeJointAnglesRef = useRef<JointValues[]>([]);
+  const reviewCompletionPendingRef = useRef(false);
   const playbackTokenRef = useRef(0);
   const mountedRef = useRef(true);
 
@@ -206,12 +207,15 @@ export const useInferenceReplay = ({
     }
   };
 
-  const persistReviewData = async (reviewData: Record<string, unknown>) => {
+  const persistReviewData = async (
+    reviewData: Record<string, unknown>,
+    persistencePayload: Record<string, unknown> = reviewData,
+  ): Promise<boolean> => {
     try {
       const response = await fetch('http://localhost:8000/api/single-action-review', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(reviewData),
+        body: JSON.stringify(persistencePayload),
       });
       let result: unknown = null;
       try {
@@ -228,9 +232,9 @@ export const useInferenceReplay = ({
         const detail = isRecord(result) && typeof result.detail === 'string' ? result.detail : '';
         throw new Error(detail || `HTTP ${response.status}`);
       }
-      if (reviewDataRef.current !== reviewData) return;
+      if (reviewDataRef.current !== reviewData) return false;
       const savedReview = {
-        ...reviewData,
+        ...persistencePayload,
         persistence_status: 'saved',
         persistence_path: result.path,
       };
@@ -238,10 +242,15 @@ export const useInferenceReplay = ({
       if (mountedRef.current) {
         setReviewData(savedReview);
         setError(null);
-        setProgress('审阅 JSON 已保存，请确认后再执行单动作');
+        setProgress(
+          persistencePayload.review_status === 'COMPLETED'
+            ? '执行后状态与完成复核已保存'
+            : '审阅 JSON 已保存，请确认后再执行单动作',
+        );
       }
+      return true;
     } catch (caught) {
-      if (reviewDataRef.current !== reviewData) return;
+      if (reviewDataRef.current !== reviewData) return false;
       const message = caught instanceof Error ? caught.message : String(caught);
       const failedReview = {
         ...reviewData,
@@ -258,6 +267,7 @@ export const useInferenceReplay = ({
         });
         setProgress('审阅 JSON 未保存，已禁止执行动作');
       }
+      return false;
     }
   };
 
@@ -1091,6 +1101,7 @@ export const useInferenceReplay = ({
   };
 
   const start = () => {
+    if (reviewCompletionPendingRef.current) return;
     if (
       statusRef.current === 'connecting' ||
       statusRef.current === 'loading' ||
@@ -1340,7 +1351,13 @@ export const useInferenceReplay = ({
   };
 
   const stop = () => {
-    if (statusRef.current === 'idle' || statusRef.current === 'complete') return;
+    if (
+      statusRef.current === 'idle' ||
+      statusRef.current === 'complete' ||
+      reviewCompletionPendingRef.current
+    ) {
+      return;
+    }
     sendStop(pendingPlaybackRef.current ? [] : activeJointAnglesRef.current);
     pendingPlaybackRef.current = null;
     activeJointAnglesRef.current = [];
@@ -1399,6 +1416,8 @@ export const useInferenceReplay = ({
       return;
     }
     const currentReview = reviewDataRef.current;
+    let completionPersistence: Promise<boolean> | null = null;
+    const actualAfterActionMissing = singleActionDebugEnabled && (!currentReview || !snapshot);
     if (singleActionDebugEnabled && currentReview && snapshot) {
       const targetJoints = currentReview.target_joints as JointValues;
       const armJointNames =
@@ -1454,9 +1473,14 @@ export const useInferenceReplay = ({
         actual_after_action: actualAfterAction,
         persistence_status: 'saving',
       };
+      const completedReview = {
+        ...nextReview,
+        review_status: 'COMPLETED',
+      };
       reviewDataRef.current = nextReview;
       if (mountedRef.current) setReviewData(nextReview);
-      void persistReviewData(nextReview);
+      reviewCompletionPendingRef.current = true;
+      completionPersistence = persistReviewData(nextReview, completedReview);
       publishDebugEvent('inference:single_action_complete', {
         episode_index: chunk.episode_index,
         frame_index: chunk.frame_index,
@@ -1475,12 +1499,14 @@ export const useInferenceReplay = ({
     if (mountedRef.current) {
       setPlayback(null);
       setProgress(
-        singleActionDebugEnabled
-          ? '唯一一条动作已执行，已暂停等待人工验收'
-          : '单步动作已执行，点击“推理一步”继续',
+        actualAfterActionMissing
+          ? '唯一一条动作已执行，但执行后状态未采集，复核未完成'
+          : singleActionDebugEnabled
+            ? '唯一一条动作已执行，正在保存执行后状态'
+            : '单步动作已执行，点击“推理一步”继续',
       );
     }
-    updateStatus(singleActionDebugEnabled ? 'complete' : 'waiting');
+    updateStatus(singleActionDebugEnabled ? 'review' : 'waiting');
     publishDebugEvent('inference:ack', {
       episode_index: chunk.episode_index,
       frame_index: chunk.frame_index,
@@ -1491,6 +1517,24 @@ export const useInferenceReplay = ({
         frame_index: chunk.frame_index,
       });
       closeSocket(1000, 'single action completed');
+      if (actualAfterActionMissing) {
+        if (mountedRef.current) {
+          setError({
+            code: 'ACTUAL_AFTER_ACTION_MISSING',
+            stage: 'review',
+            message: '执行后状态未采集，审阅状态保持未完成。',
+            episode_index: chunk.episode_index,
+            frame_index: chunk.frame_index,
+          });
+        }
+        updateStatus('error');
+      } else if (completionPersistence) {
+        void completionPersistence.then((saved) => {
+          reviewCompletionPendingRef.current = false;
+          if (!mountedRef.current) return;
+          updateStatus(saved ? 'complete' : 'error');
+        });
+      }
     }
   };
 
@@ -1529,6 +1573,7 @@ export const useInferenceReplay = ({
     status === 'review' &&
     isUr5CadContext(contextRef.current) &&
     reviewData?.safety_verdict === 'READY_FOR_HUMAN_APPROVAL' &&
+    reviewData?.review_status === 'WAITING_FOR_HUMAN_APPROVAL' &&
     reviewData?.persistence_status === 'saved';
 
   return {

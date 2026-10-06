@@ -47,6 +47,26 @@ def create_app() -> FastAPI:
                 detail="Single-action validation is only available for UR5_CAD.",
             )
 
+        if review.get("review_status") == "COMPLETED":
+            actual_after_action = review.get("actual_after_action")
+            actual_tcp = (
+                actual_after_action.get("actual_tcp")
+                if isinstance(actual_after_action, dict)
+                else None
+            )
+            if (
+                not isinstance(actual_after_action, dict)
+                or not isinstance(actual_after_action.get("actual_joints"), dict)
+                or not actual_after_action.get("actual_joints")
+                or not isinstance(actual_tcp, dict)
+                or not isinstance(actual_tcp.get("position"), list)
+                or not isinstance(actual_tcp.get("orientation"), list)
+            ):
+                raise HTTPException(
+                    status_code=422,
+                    detail="A completed review requires actual joints and TCP state.",
+                )
+
         try:
             persisted_review = {
                 **review,

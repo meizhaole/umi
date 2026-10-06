@@ -117,6 +117,87 @@ class FakeWorker {
   terminate() {}
 }
 
+const createSingleActionReviewHarness = async (requestId: string) => {
+  const observation: InferenceObservation = {
+    frame_index: 7,
+    camera_frame_timestamp_ms: 50,
+    camera0_rgb: 'AAAA',
+    robot0_eef_pos: [cadStartPose.position, cadStartPose.position],
+    robot0_eef_rot_axis_angle: [cadStartRotation, cadStartRotation],
+    robot0_gripper_width: [[0], [0]],
+  };
+  const context = {
+    robotId: 'UR5_CAD' as const,
+    robotConfig: cadConfig,
+    loadedRobotId: 'UR5_CAD' as const,
+    loadedRobotUrdfFile: cadConfig.file,
+    description: cadDescription,
+    jointValues: cadSeed,
+    tcpPose: cadStartPose,
+    getObservation: () => observation,
+    singleActionDebugEnabled: true,
+  };
+  let replay!: ReturnType<typeof useInferenceReplay>;
+  const Probe = () => {
+    replay = useInferenceReplay(context);
+    return null;
+  };
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  const root = createRoot(container);
+
+  await act(async () => {
+    root.render(createElement(Probe));
+  });
+  act(() => replay.step());
+  const socket = FakeWebSocket.sockets[0];
+  socket.readyState = FakeWebSocket.OPEN;
+  act(() => socket.emitMessage({ type: 'status', state: 'ready' }));
+
+  const prediction = Array.from({ length: 16 }, () => [0.001, 0, 0, 1, 0, 0, 0, 1, 0, 0.06]);
+  const actions = Array.from({ length: 16 }, () => [0.001, 0, 0, 0, 0, 0, 0.06]);
+  await act(async () => {
+    socket.emitMessage({
+      type: 'action_chunk',
+      request_id: requestId,
+      episode_index: 0,
+      frame_index: 7,
+      last_chunk: false,
+      actions,
+      action_pose_repr: 'relative',
+      prediction,
+      prediction_keys: ['action', 'action_pred'],
+      action_pred_shape: [1, 16, 10],
+      policy_tensor_shapes: { camera0_rgb: [1, 1, 3, 224, 224] },
+      input_image_shape: [224, 224, 3],
+    });
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 0));
+  });
+
+  return {
+    get replay() {
+      return replay;
+    },
+    socket,
+    root,
+    container,
+  };
+};
+
+const createAfterActionSnapshot = () => ({
+  joint_values: cadSeed,
+  tcp_pose: cadStartPose,
+  gripper_opening_m: 0.06,
+  observation: {
+    frame_index: 8,
+    camera_frame_timestamp_ms: 100,
+    camera0_rgb: 'AAAA',
+    robot0_eef_pos: [cadStartPose.position, cadStartPose.position],
+    robot0_eef_rot_axis_angle: [cadStartRotation, cadStartRotation],
+    robot0_gripper_width: [[0.06], [0.06]],
+  } satisfies InferenceObservation,
+});
+
 describe('execution horizon', () => {
   beforeEach(() => {
     FakeWebSocket.sockets = [];
@@ -362,6 +443,7 @@ describe('execution horizon', () => {
 
       results.push({
         requestId,
+        status: replay.status,
         reviewData: replay.reviewData,
         canExecuteAction: replay.canExecuteAction,
         playback: replay.playback,
@@ -383,6 +465,7 @@ describe('execution horizon', () => {
     });
     expect(results[1]).toMatchObject({
       requestId: 'request-nonzero-target',
+      status: 'review',
       reviewData: {
         arm_motion_classification: 'NONZERO_IK_TARGET',
         safety_verdict: 'READY_FOR_HUMAN_APPROVAL',
@@ -392,5 +475,198 @@ describe('execution horizon', () => {
       canExecuteAction: true,
       playback: null,
     });
+  });
+
+  it('执行后只有实际状态保存成功才将 review 标记为 COMPLETED', async () => {
+    const postedReviews: Record<string, unknown>[] = [];
+    let resolveCompletionSave!: (response: {
+      ok: boolean;
+      status: number;
+      json: () => Promise<{ saved?: boolean; path?: string; detail?: string }>;
+    }) => void;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((_url: string, init: RequestInit) => {
+        const review = JSON.parse(init.body as string) as Record<string, unknown>;
+        postedReviews.push(review);
+        if (review.actual_after_action) {
+          return new Promise((resolvePromise) => {
+            resolveCompletionSave = resolvePromise;
+          });
+        }
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ saved: true, path: '/tmp/single-action-review.json' }),
+        });
+      }),
+    );
+    const harness = await createSingleActionReviewHarness('request-review-completion');
+
+    await act(async () => {
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 0));
+    });
+    expect(harness.replay.reviewData).toMatchObject({
+      review_status: 'WAITING_FOR_HUMAN_APPROVAL',
+      persistence_status: 'saved',
+    });
+    let executed = false;
+    act(() => {
+      executed = harness.replay.executePendingAction();
+    });
+    expect(executed).toBe(true);
+
+    expect(harness.replay.playback).toBeTruthy();
+    const token = harness.replay.playback?.token as number;
+    act(() => harness.replay.completePlayback(token, createAfterActionSnapshot()));
+
+    expect(postedReviews).toHaveLength(2);
+    expect(postedReviews[1]).toMatchObject({
+      request_id: 'request-review-completion',
+      review_status: 'COMPLETED',
+      actual_after_action: { observation_frame_index: 8 },
+    });
+    expect(harness.replay.reviewData).toMatchObject({
+      review_status: 'WAITING_FOR_HUMAN_APPROVAL',
+      persistence_status: 'saving',
+      actual_after_action: { observation_frame_index: 8 },
+    });
+    expect(
+      harness.socket.sent
+        .map((message) => JSON.parse(message).type)
+        .filter((type) => type === 'ack'),
+    ).toHaveLength(1);
+    act(() => harness.replay.step());
+    expect(FakeWebSocket.sockets).toHaveLength(1);
+
+    await act(async () => {
+      resolveCompletionSave({
+        ok: true,
+        status: 200,
+        json: async () => ({ saved: true, path: '/tmp/single-action-review.json' }),
+      });
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 0));
+    });
+
+    expect(harness.replay.status).toBe('complete');
+    expect(harness.replay.reviewData).toMatchObject({
+      review_status: 'COMPLETED',
+      persistence_status: 'saved',
+      actual_after_action: { observation_frame_index: 8 },
+    });
+    expect(FakeWebSocket.sockets).toHaveLength(1);
+    expect(
+      harness.socket.sent
+        .map((message) => JSON.parse(message).type)
+        .filter((messageType) => messageType === 'observation'),
+    ).toHaveLength(1);
+    expect(
+      harness.socket.sent
+        .map((message) => JSON.parse(message).type)
+        .filter((messageType) => messageType === 'ack'),
+    ).toHaveLength(1);
+    expect(FakeWorker.workers).toHaveLength(1);
+
+    act(() => harness.root.unmount());
+    harness.container.remove();
+  });
+
+  it('执行后状态快照缺失时不保存为 COMPLETED', async () => {
+    const postedReviews: Record<string, unknown>[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string, init: RequestInit) => {
+        postedReviews.push(JSON.parse(init.body as string) as Record<string, unknown>);
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ saved: true, path: '/tmp/single-action-review.json' }),
+        };
+      }),
+    );
+    const harness = await createSingleActionReviewHarness('request-missing-after-state');
+
+    await act(async () => {
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 0));
+    });
+    let executed = false;
+    act(() => {
+      executed = harness.replay.executePendingAction();
+    });
+    expect(executed).toBe(true);
+    const token = harness.replay.playback?.token as number;
+
+    act(() => harness.replay.completePlayback(token));
+
+    expect(harness.replay.status).toBe('error');
+    expect(harness.replay.error?.code).toBe('ACTUAL_AFTER_ACTION_MISSING');
+    expect(harness.replay.reviewData).toMatchObject({
+      review_status: 'WAITING_FOR_HUMAN_APPROVAL',
+      persistence_status: 'saved',
+    });
+    expect(harness.replay.reviewData).not.toHaveProperty('actual_after_action');
+    expect(postedReviews).toHaveLength(1);
+    expect(
+      harness.socket.sent
+        .map((message) => JSON.parse(message).type)
+        .filter((type) => type === 'ack'),
+    ).toHaveLength(1);
+
+    act(() => harness.root.unmount());
+    harness.container.remove();
+  });
+
+  it('执行后状态保存失败时保持未完成并报告错误', async () => {
+    const postedReviews: Record<string, unknown>[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string, init: RequestInit) => {
+        const review = JSON.parse(init.body as string) as Record<string, unknown>;
+        postedReviews.push(review);
+        return review.actual_after_action
+          ? {
+              ok: false,
+              status: 500,
+              json: async () => ({ detail: 'disk write failed' }),
+            }
+          : {
+              ok: true,
+              status: 200,
+              json: async () => ({ saved: true, path: '/tmp/single-action-review.json' }),
+            };
+      }),
+    );
+    const harness = await createSingleActionReviewHarness('request-save-failure');
+
+    await act(async () => {
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 0));
+    });
+    let executed = false;
+    act(() => {
+      executed = harness.replay.executePendingAction();
+    });
+    expect(executed).toBe(true);
+    const token = harness.replay.playback?.token as number;
+
+    act(() => harness.replay.completePlayback(token, createAfterActionSnapshot()));
+    await act(async () => {
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 0));
+    });
+
+    expect(postedReviews).toHaveLength(2);
+    expect(postedReviews[1]).toMatchObject({
+      review_status: 'COMPLETED',
+      actual_after_action: { observation_frame_index: 8 },
+    });
+    expect(harness.replay.status).toBe('error');
+    expect(harness.replay.reviewData).toMatchObject({
+      review_status: 'WAITING_FOR_HUMAN_APPROVAL',
+      persistence_status: 'failed',
+      persistence_error: 'disk write failed',
+      actual_after_action: { observation_frame_index: 8 },
+    });
+
+    act(() => harness.root.unmount());
+    harness.container.remove();
   });
 });
