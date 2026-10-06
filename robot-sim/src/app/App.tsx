@@ -54,6 +54,8 @@ import { Wrist3PhysicsDebugPanel } from '../ui/Wrist3PhysicsDebugPanel';
 import type { Wrist3ExperimentTrace, Wrist3PhysicsDebugState } from '../sim/RobotBody';
 
 interface LoadedRobot {
+  robotId: RobotModelId;
+  urdfFile: string;
   description: RobotDescription;
   urdfXml: string;
   controller: JointController;
@@ -238,6 +240,15 @@ export const App = () => {
   const playbackCompletionTokenRef = useRef<number | null>(null);
 
   const currentModel = findRobotConfig(modelId);
+  const ur5CadConfig = findRobotConfig('UR5_CAD');
+  const singleActionRobotSelected =
+    modelId === 'UR5_CAD' &&
+    currentModel.id === 'UR5_CAD' &&
+    currentModel.file === ur5CadConfig.file;
+  const singleActionRobotReady =
+    singleActionRobotSelected &&
+    loadedRobot?.robotId === 'UR5_CAD' &&
+    loadedRobot.urdfFile === ur5CadConfig.file;
   const hasWrist3Joint =
     modelId !== 'UR5_CAD' &&
     loadedRobot?.description.joints.some((joint) => joint.name === 'wrist_3_joint');
@@ -310,6 +321,8 @@ export const App = () => {
         if (!active) return;
 
         setLoadedRobot({
+          robotId: modelId,
+          urdfFile: currentModel.file,
           description,
           urdfXml,
           controller: new JointController(model),
@@ -465,11 +478,12 @@ export const App = () => {
     for (let offset = 0; offset < latest.rgb.length; offset += 0x8000) {
       binary += String.fromCharCode(...latest.rgb.subarray(offset, offset + 0x8000));
     }
-    const policyInferenceOnly = isPolicyInferenceOnlyEnabled();
+    const policyInferenceOnly = isPolicyInferenceOnlyEnabled() && !singleActionDebugEnabled;
     return {
       frame_index: observationIndexRef.current++,
       camera_frame_timestamp_ms: latest.timestamp,
       camera0_rgb: btoa(binary),
+      camera_image_shape: [CAMERA_IMAGE_SIZE, CAMERA_IMAGE_SIZE, 3],
       robot0_eef_pos: history.map((frame) => [...frame.eefPose.position]),
       robot0_eef_rot_axis_angle: history.map((frame) =>
         quaternionToRotationVector(frame.eefPose.orientation),
@@ -482,8 +496,12 @@ export const App = () => {
           }
         : {}),
     };
-  }, [drawCameraPreview]);
+  }, [drawCameraPreview, singleActionDebugEnabled]);
   const inference = useInferenceReplay({
+    robotId: modelId,
+    robotConfig: currentModel,
+    loadedRobotId: loadedRobot?.robotId ?? null,
+    loadedRobotUrdfFile: loadedRobot?.urdfFile ?? null,
     description: loadedRobot?.description ?? null,
     jointValues,
     tcpPose,
@@ -491,8 +509,15 @@ export const App = () => {
     singleActionDebugEnabled,
   });
   useEffect(() => {
-    if (singleActionDebugEnabled && inference.status === 'complete') setIsRunning(false);
-  }, [inference.status, singleActionDebugEnabled]);
+    if (
+      singleActionDebugEnabled &&
+      (inference.status === 'review' ||
+        inference.status === 'complete' ||
+        inference.status === 'error')
+    ) {
+      setIsRunning(false);
+    }
+  }, [inference.reviewData, inference.status, singleActionDebugEnabled]);
 
   const completeInferencePlayback = (token: number) => {
     if (playbackCompletionTokenRef.current === token) return;
@@ -1239,21 +1264,37 @@ export const App = () => {
             </button>
           ) : null}
 
+          {singleActionDebugEnabled && !singleActionRobotSelected ? (
+            <div className="inference-error" role="alert">
+              Single-action validation is only available for UR5_CAD.
+            </div>
+          ) : null}
+
           {modelId !== 'UR5_CAD' || isPolicyInferenceOnlyEnabled() || singleActionDebugEnabled ? (
             <InferencePanel
               canStep={
                 Boolean(loadedRobot && physicsReady && !loadError) &&
+                (!singleActionDebugEnabled || singleActionRobotReady) &&
+                !(singleActionDebugEnabled && inference.reviewData !== null) &&
                 !datasetReplayEnabled &&
                 !experimentRecording &&
-                !(isPolicyInferenceOnlyEnabled() && inference.status === 'complete') &&
+                !(
+                  isPolicyInferenceOnlyEnabled() &&
+                  !singleActionDebugEnabled &&
+                  inference.status === 'complete'
+                ) &&
                 !(singleActionDebugEnabled && inference.status === 'complete') &&
                 (!inference.isLocked || inference.status === 'waiting')
               }
+              canExecuteAction={inference.canExecuteAction}
               error={inference.error}
               isLocked={inference.isLocked}
-              onExecuteAction={inference.executePendingAction}
+              singleActionDebug={singleActionDebugEnabled}
+              onExecuteAction={() => {
+                if (inference.executePendingAction()) setIsRunning(true);
+              }}
               onStep={() => {
-                if (!isPolicyInferenceOnlyEnabled()) {
+                if (!isPolicyInferenceOnlyEnabled() || singleActionDebugEnabled) {
                   if (mode !== 'position' && !inference.isLocked) setControlMode('position');
                   setIsRunning(true);
                 }

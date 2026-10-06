@@ -8,6 +8,7 @@ import type {
   IkWorkerRequest,
   IkWorkerResponse,
 } from '../src/app/inferenceProtocol';
+import { findRobotConfig } from '../src/app/config';
 import { selectExecutionActions } from '../src/app/executionHorizon';
 import { useInferenceReplay } from '../src/app/useInferenceReplay';
 import type { InferenceObservation } from '../src/app/inferenceProtocol';
@@ -164,6 +165,10 @@ describe('execution horizon', () => {
       robot0_gripper_width: [[0], [0]],
     };
     const context = {
+      robotId: 'UR5_CAD' as const,
+      robotConfig: findRobotConfig('UR5_CAD'),
+      loadedRobotId: 'UR5_CAD' as const,
+      loadedRobotUrdfFile: findRobotConfig('UR5_CAD').file,
       description,
       jointValues: seed,
       tcpPose: startPose,

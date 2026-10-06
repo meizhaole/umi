@@ -165,6 +165,12 @@ export interface InferenceObservation {
   frame_index: number;
   camera_frame_timestamp_ms: number;
   camera0_rgb: string;
+  camera_image_shape?: number[];
+  robot_id?: string;
+  robot_config_id?: string;
+  robot_config_file?: string;
+  urdf_name?: string;
+  single_action_validation?: boolean;
   robot0_eef_pos: number[][];
   robot0_eef_rot_axis_angle: number[][];
   robot0_gripper_width: number[][];

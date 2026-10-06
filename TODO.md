@@ -47,6 +47,7 @@
 - [x] 在支持 WebGL 的浏览器确认 GoPro 相机方向、夹爪构图与关节跟随
 - [x] 验证 UR5 CAD 相机帧到 UMI policy 的运行时数据与单帧推理
 - [x] 为 UR5_CAD 单独调整杯碟造型、初始位置与复位
+- [x] 为 UR5_CAD 单动作审阅增加机器人门禁与 JSON 持久化
 - [ ] 完成 UR5_CAD 当前新场景单动作闭环验证并暂停待人工验收
 - [ ] 将本机训练 checkpoint 接入 Gazebo 回放启动参数
 - [ ] 接通 Gazebo 相机与 UMI 推理观测

@@ -6,7 +6,9 @@ interface InferencePanelProps {
   error: InferenceError | null;
   isLocked: boolean;
   canStep: boolean;
+  canExecuteAction: boolean;
   onStep: () => void;
+  singleActionDebug: boolean;
   singleActionReview: boolean;
   reviewData: Record<string, unknown> | null;
   onExecuteAction: () => void;
@@ -33,7 +35,9 @@ export const InferencePanel = ({
   error,
   isLocked,
   canStep,
+  canExecuteAction,
   onStep,
+  singleActionDebug,
   singleActionReview,
   reviewData,
   onExecuteAction,
@@ -52,14 +56,19 @@ export const InferencePanel = ({
     </p>
     <div className="inference-actions">
       <button className="primary-button" disabled={!canStep} onClick={onStep} type="button">
-        推理一步
+        {singleActionDebug ? '单动作验证（策略推理与 IK dry-run）' : '推理一步'}
       </button>
       {reviewData ? (
         <pre className="inference-review">{JSON.stringify(reviewData, null, 2)}</pre>
       ) : null}
       {singleActionReview ? (
-        <button className="primary-button" onClick={onExecuteAction} type="button">
-          执行这一条动作
+        <button
+          className="primary-button"
+          disabled={!canExecuteAction}
+          onClick={onExecuteAction}
+          type="button"
+        >
+          执行单动作（人工确认）
         </button>
       ) : null}
       <button className="secondary-button" disabled={!isLocked} onClick={onStop} type="button">
