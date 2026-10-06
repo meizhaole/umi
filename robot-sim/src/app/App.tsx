@@ -77,6 +77,7 @@ const WRIST3_AB_TARGET = 0.101814692820414;
 const WRIST3_AB_STEPS = Math.round(2 / SIMULATION_CONFIG.fixedTimeStep);
 const DATASET_REPLAY_EXECUTION_MODE: DatasetReplayExecutionMode =
   DEFAULT_DATASET_REPLAY_EXECUTION_MODE;
+type IndexedSimCameraFrame = SimCameraFrame & { camera_frame_index: number };
 
 const getRgbImageStatistics = (rgb: Uint8Array): RgbImageStatistics => {
   const channelMin = [255, 255, 255];
@@ -231,12 +232,13 @@ export const App = () => {
     samples: [],
   });
   const [cameraPreviewReady, setCameraPreviewReady] = useState(false);
-  const cameraFramesRef = useRef<SimCameraFrame[]>([]);
+  const cameraFramesRef = useRef<IndexedSimCameraFrame[]>([]);
   const cameraPreviewCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const cameraPreviewImageDataRef = useRef<ImageData | null>(null);
   const cameraPreviewLastDrawRef = useRef(0);
   const cameraPreviewReadyRef = useRef(false);
   const observationIndexRef = useRef(0);
+  const cameraFrameIndexRef = useRef(0);
   const playbackCompletionTokenRef = useRef<number | null>(null);
 
   const currentModel = findRobotConfig(modelId);
@@ -307,6 +309,7 @@ export const App = () => {
     cameraPreviewImageDataRef.current = null;
     cameraPreviewLastDrawRef.current = 0;
     cameraFramesRef.current = [];
+    cameraFrameIndexRef.current = 0;
 
     const loadRobot = async () => {
       try {
@@ -459,7 +462,11 @@ export const App = () => {
   }, []);
   const handleCameraFrame = useCallback(
     (frame: SimCameraFrame) => {
-      cameraFramesRef.current = [...cameraFramesRef.current.slice(-1), frame];
+      const indexedFrame = {
+        ...frame,
+        camera_frame_index: cameraFrameIndexRef.current++,
+      };
+      cameraFramesRef.current = [...cameraFramesRef.current.slice(-1), indexedFrame];
 
       if (performance.now() - cameraPreviewLastDrawRef.current < CAMERA_PREVIEW_INTERVAL_MS) {
         return;
@@ -481,6 +488,7 @@ export const App = () => {
     const policyInferenceOnly = isPolicyInferenceOnlyEnabled() && !singleActionDebugEnabled;
     return {
       frame_index: observationIndexRef.current++,
+      camera_frame_index: latest.camera_frame_index,
       camera_frame_timestamp_ms: latest.timestamp,
       camera0_rgb: btoa(binary),
       camera_image_shape: [CAMERA_IMAGE_SIZE, CAMERA_IMAGE_SIZE, 3],
@@ -509,15 +517,22 @@ export const App = () => {
     singleActionDebugEnabled,
   });
   useEffect(() => {
+    const autoLoopRunning =
+      inference.autoLoop.phase === 'CAPTURING' ||
+      inference.autoLoop.phase === 'INFERENCING' ||
+      inference.autoLoop.phase === 'EXECUTING' ||
+      inference.autoLoop.phase === 'SAVING' ||
+      (inference.autoLoop.phase === 'STOPPED' && inference.status === 'playing');
     if (
       singleActionDebugEnabled &&
-      (inference.status === 'review' ||
-        inference.status === 'complete' ||
-        inference.status === 'error')
+      ((inference.status === 'review' && !autoLoopRunning) ||
+        (inference.status === 'complete' && !autoLoopRunning) ||
+        inference.status === 'error' ||
+        (inference.status === 'stopped' && inference.autoLoop.phase === 'STOPPED'))
     ) {
       setIsRunning(false);
     }
-  }, [inference.reviewData, inference.status, singleActionDebugEnabled]);
+  }, [inference.autoLoop.phase, inference.reviewData, inference.status, singleActionDebugEnabled]);
 
   const completeInferencePlayback = (token: number) => {
     if (playbackCompletionTokenRef.current === token) return;
@@ -527,18 +542,22 @@ export const App = () => {
         inference.completePlayback(token);
         return;
       }
-      const actualJoints = loadedRobot.model.getJointValues();
-      const actualTcp = loadedRobot.kinematics.forwardKinematics(
-        actualJoints,
-        loadedRobot.description.tipLink,
-      );
-      const postActionObservation = getObservation();
-      inference.completePlayback(token, {
-        joint_values: actualJoints,
-        tcp_pose: actualTcp,
-        gripper_opening_m: postActionObservation?.robot0_gripper_width.at(-1)?.[0] ?? null,
-        observation: postActionObservation,
-      });
+      try {
+        const actualJoints = loadedRobot.model.getJointValues();
+        const actualTcp = loadedRobot.kinematics.forwardKinematics(
+          actualJoints,
+          loadedRobot.description.tipLink,
+        );
+        const postActionObservation = getObservation();
+        inference.completePlayback(token, {
+          joint_values: actualJoints,
+          tcp_pose: actualTcp,
+          gripper_opening_m: postActionObservation?.robot0_gripper_width.at(-1)?.[0] ?? null,
+          observation: postActionObservation,
+        });
+      } catch (caught) {
+        inference.failPlayback(token, caught);
+      }
     }, 100);
   };
 
@@ -1168,14 +1187,19 @@ export const App = () => {
 
   const applyReplayStep = (values: JointValues, isFinal: boolean) => {
     if (!loadedRobot) return;
-    loadedRobot.model.setJointValues(values);
-    const nextValues = loadedRobot.model.getJointValues();
-    loadedRobot.model.getControllableJoints().forEach((joint) => {
-      loadedRobot.controller.setCommand(joint.name, nextValues[joint.name]);
-    });
-    setJointValues(nextValues);
-    setCommands(loadedRobot.controller.getCommands());
-    if (isFinal) publishDebugEvent('inference:action_applied', { joints: nextValues });
+    try {
+      loadedRobot.model.setJointValues(values);
+      const nextValues = loadedRobot.model.getJointValues();
+      loadedRobot.model.getControllableJoints().forEach((joint) => {
+        loadedRobot.controller.setCommand(joint.name, nextValues[joint.name]);
+      });
+      setJointValues(nextValues);
+      setCommands(loadedRobot.controller.getCommands());
+      if (isFinal) publishDebugEvent('inference:action_applied', { joints: nextValues });
+    } catch (caught) {
+      const token = inference.playback?.token;
+      if (token !== undefined) inference.failPlayback(token, caught);
+    }
   };
 
   const setTargetCoordinate = (field: 'position' | 'orientation', index: number, value: number) => {
@@ -1285,6 +1309,15 @@ export const App = () => {
                 )
               }
               canExecuteAction={inference.canExecuteAction}
+              autoLoop={inference.autoLoop}
+              canStartAutoLoop={
+                inference.canStartAutoLoop &&
+                Boolean(loadedRobot && physicsReady && !loadError) &&
+                singleActionRobotReady &&
+                !datasetReplayEnabled &&
+                !experimentRecording
+              }
+              canStopAutoLoop={inference.canStopAutoLoop}
               error={inference.error}
               isLocked={inference.isLocked}
               singleActionDebug={singleActionDebugEnabled}
@@ -1299,6 +1332,12 @@ export const App = () => {
                 inference.step();
               }}
               onStop={inference.stop}
+              onStartAutoLoop={() => {
+                if (mode !== 'position' && !inference.isLocked) setControlMode('position');
+                setIsRunning(true);
+                inference.startAutoLoop();
+              }}
+              onStopAutoLoop={inference.stopAutoLoop}
               progress={inference.progress}
               reviewData={inference.reviewData}
               singleActionReview={singleActionDebugEnabled && inference.status === 'review'}

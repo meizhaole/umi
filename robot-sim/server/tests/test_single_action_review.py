@@ -48,7 +48,7 @@ class SingleActionReviewPersistenceTest(unittest.TestCase):
             "review_status": review_status,
         }
 
-    def post_review(self, review):
+    def post_review(self, review, path="/api/single-action-review"):
         request_body = json.dumps(review).encode("utf-8")
         messages = []
         received_request = False
@@ -69,7 +69,7 @@ class SingleActionReviewPersistenceTest(unittest.TestCase):
             "http_version": "1.1",
             "method": "POST",
             "scheme": "http",
-            "path": "/api/single-action-review",
+            "path": path,
             "raw_path": b"/api/single-action-review",
             "query_string": b"",
             "headers": [(b"content-type", b"application/json")],
@@ -143,6 +143,67 @@ class SingleActionReviewPersistenceTest(unittest.TestCase):
             "safety_verdict",
         ):
             self.assertEqual(saved_review[field], review[field])
+
+    def test_auto_loop_reviews_are_saved_as_separate_step_files(self):
+        auto_loop_dir = Path(self.temp_dir.name) / "ur5-cad-auto-loop"
+        with patch.object(main, "AUTO_LOOP_REVIEW_DIR", auto_loop_dir, create=True):
+            saved_reviews = []
+            for step in (1, 2):
+                review = self.make_review("COMPLETED")
+                review.update(
+                    {
+                        "auto_loop_run_id": "run-0123456789abcdef",
+                        "auto_loop_step": step,
+                        "request_id": f"request-step-{step}",
+                        "actual_after_action": {
+                            "actual_joints": {"shoulder_pan_joint": 0.001},
+                            "actual_tcp": {
+                                "position": [0.001, 0, 0],
+                                "orientation": [0, 0, 0, 1],
+                            },
+                            "actual_gripper_opening_m": 0.06,
+                        },
+                    }
+                )
+
+                status, result = self.post_review(
+                    review,
+                    "/api/ur5-cad-auto-loop-review",
+                )
+
+                self.assertEqual(status, 200)
+                saved_reviews.append(json.loads(Path(result["path"]).read_text(encoding="utf-8")))
+
+        self.assertEqual(
+            [saved_review["auto_loop_step"] for saved_review in saved_reviews],
+            [1, 2],
+        )
+        self.assertEqual(
+            [Path(saved_review["persistence_path"]).name for saved_review in saved_reviews],
+            ["run-0123456789abcdef-step-1.json", "run-0123456789abcdef-step-2.json"],
+        )
+        self.assertNotEqual(
+            saved_reviews[0]["request_id"],
+            saved_reviews[1]["request_id"],
+        )
+
+    def test_auto_loop_review_rejects_invalid_run_id_and_step(self):
+        for run_id, step in (("../outside", 1), ("run-safe", 4)):
+            with self.subTest(run_id=run_id, step=step):
+                review = self.make_review("WAITING_FOR_HUMAN_APPROVAL")
+                review.update(
+                    {
+                        "auto_loop_run_id": run_id,
+                        "auto_loop_step": step,
+                    }
+                )
+
+                status, _ = self.post_review(
+                    review,
+                    "/api/ur5-cad-auto-loop-review",
+                )
+
+                self.assertEqual(status, 422)
 
 
 if __name__ == "__main__":

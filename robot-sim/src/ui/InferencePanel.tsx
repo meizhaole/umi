@@ -1,4 +1,5 @@
 import type { InferenceError, InferenceStatus } from '../app/inferenceProtocol';
+import type { AutoLoopState } from '../app/useInferenceReplay';
 
 interface InferencePanelProps {
   status: InferenceStatus;
@@ -13,6 +14,11 @@ interface InferencePanelProps {
   reviewData: Record<string, unknown> | null;
   onExecuteAction: () => void;
   onStop: () => void;
+  autoLoop: AutoLoopState;
+  canStartAutoLoop: boolean;
+  canStopAutoLoop: boolean;
+  onStartAutoLoop: () => void;
+  onStopAutoLoop: () => void;
 }
 
 const STATUS_LABELS: Record<InferenceStatus, string> = {
@@ -42,6 +48,11 @@ export const InferencePanel = ({
   reviewData,
   onExecuteAction,
   onStop,
+  autoLoop,
+  canStartAutoLoop,
+  canStopAutoLoop,
+  onStartAutoLoop,
+  onStopAutoLoop,
 }: InferencePanelProps) => (
   <section className="panel inference-panel">
     <div className="panel-heading">
@@ -58,6 +69,29 @@ export const InferencePanel = ({
       <button className="primary-button" disabled={!canStep} onClick={onStep} type="button">
         {singleActionDebug ? '单动作验证（策略推理与 IK dry-run）' : '推理一步'}
       </button>
+      {singleActionDebug ? (
+        <>
+          <button
+            className="primary-button"
+            disabled={!canStartAutoLoop}
+            onClick={onStartAutoLoop}
+            type="button"
+          >
+            自动闭环 3 步
+          </button>
+          <p className="inference-progress" aria-live="polite">
+            自动闭环：{autoLoop.step || 0} / {autoLoop.maxSteps} · {autoLoop.phase}
+          </p>
+          <button
+            className="secondary-button"
+            disabled={!canStopAutoLoop}
+            onClick={onStopAutoLoop}
+            type="button"
+          >
+            停止自动闭环
+          </button>
+        </>
+      ) : null}
       {reviewData ? (
         <pre className="inference-review">{JSON.stringify(reviewData, null, 2)}</pre>
       ) : null}

@@ -173,6 +173,7 @@ export type InferenceStatus =
 
 export interface InferenceObservation {
   frame_index: number;
+  camera_frame_index?: number;
   camera_frame_timestamp_ms: number;
   camera0_rgb: string;
   camera_image_shape?: number[];

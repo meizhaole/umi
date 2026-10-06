@@ -23,6 +23,26 @@ import { getGripperJoints, mapGripperOpeningToJoints } from './gripperMapping';
 
 const INFERENCE_SOCKET_URL = 'ws://localhost:8000/ws/inference';
 const IK_TIMEOUT_MS = 1000;
+export const AUTO_LOOP_MAX_STEPS = 3;
+
+export type AutoLoopPhase =
+  'IDLE' | 'CAPTURING' | 'INFERENCING' | 'EXECUTING' | 'SAVING' | 'COMPLETED' | 'STOPPED' | 'ERROR';
+
+export interface AutoLoopState {
+  runId: string | null;
+  step: number;
+  maxSteps: number;
+  completedSteps: number;
+  phase: AutoLoopPhase;
+}
+
+interface AutoLoopRuntime extends AutoLoopState {
+  stopRequested: boolean;
+  episodeIndex: number | null;
+  lastObservationFrameIndex: number | null;
+  lastCameraFrameIndex: number | null;
+  lastCameraTimestamp: number | null;
+}
 
 const isIkTraceEnabled = (): boolean =>
   new URLSearchParams(window.location.search).get('ikTrace') === '1';
@@ -110,6 +130,13 @@ export const useInferenceReplay = ({
   const [error, setError] = useState<InferenceError | null>(null);
   const [playback, setPlayback] = useState<PlaybackChunk | null>(null);
   const [reviewData, setReviewData] = useState<Record<string, unknown> | null>(null);
+  const [autoLoop, setAutoLoop] = useState<AutoLoopState>({
+    runId: null,
+    step: 0,
+    maxSteps: AUTO_LOOP_MAX_STEPS,
+    completedSteps: 0,
+    phase: 'IDLE',
+  });
   const reviewDataRef = useRef<Record<string, unknown> | null>(null);
   const statusRef = useRef(status);
   const contextRef = useRef<ReplayContext>({
@@ -135,6 +162,7 @@ export const useInferenceReplay = ({
   const reviewCompletionPendingRef = useRef(false);
   const playbackTokenRef = useRef(0);
   const mountedRef = useRef(true);
+  const autoLoopRef = useRef<AutoLoopRuntime | null>(null);
 
   contextRef.current = {
     robotId,
@@ -150,6 +178,26 @@ export const useInferenceReplay = ({
   const updateStatus = (nextStatus: InferenceStatus) => {
     statusRef.current = nextStatus;
     if (mountedRef.current) setStatus(nextStatus);
+  };
+
+  const updateAutoLoop = (
+    runtime: AutoLoopRuntime,
+    phase: AutoLoopPhase,
+    step = runtime.step,
+    completedSteps = runtime.completedSteps,
+  ) => {
+    runtime.phase = phase;
+    runtime.step = step;
+    runtime.completedSteps = completedSteps;
+    if (mountedRef.current) {
+      setAutoLoop({
+        runId: runtime.runId,
+        step,
+        maxSteps: runtime.maxSteps,
+        completedSteps,
+        phase,
+      });
+    }
   };
 
   const clearWorker = (terminate = true) => {
@@ -177,6 +225,11 @@ export const useInferenceReplay = ({
   };
 
   const fail = (nextError: InferenceError, notifyServer: boolean, preserveReviewData = false) => {
+    const activeAutoLoop = autoLoopRef.current;
+    if (activeAutoLoop) {
+      autoLoopRef.current = null;
+      updateAutoLoop(activeAutoLoop, 'ERROR');
+    }
     const jointValues = isRecord(nextError.joint_values)
       ? [
           selectJointAngles(
@@ -212,7 +265,11 @@ export const useInferenceReplay = ({
     persistencePayload: Record<string, unknown> = reviewData,
   ): Promise<boolean> => {
     try {
-      const response = await fetch('http://localhost:8000/api/single-action-review', {
+      const endpoint =
+        typeof persistencePayload.auto_loop_run_id === 'string'
+          ? '/api/ur5-cad-auto-loop-review'
+          : '/api/single-action-review';
+      const response = await fetch(`http://localhost:8000${endpoint}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(persistencePayload),
@@ -248,6 +305,56 @@ export const useInferenceReplay = ({
             : '审阅 JSON 已保存，请确认后再执行单动作',
         );
       }
+      const activeAutoLoop = autoLoopRef.current;
+      if (activeAutoLoop && persistencePayload.auto_loop_run_id === activeAutoLoop.runId) {
+        const isReadyForExecution =
+          persistencePayload.review_status === 'WAITING_FOR_HUMAN_APPROVAL' &&
+          persistencePayload.safety_verdict === 'READY_FOR_HUMAN_APPROVAL';
+        if (
+          persistencePayload.auto_loop_step !== activeAutoLoop.step ||
+          (persistencePayload.review_status === 'WAITING_FOR_HUMAN_APPROVAL' &&
+            !isReadyForExecution) ||
+          (persistencePayload.review_status !== 'WAITING_FOR_HUMAN_APPROVAL' &&
+            persistencePayload.review_status !== 'COMPLETED')
+        ) {
+          fail(
+            {
+              code: 'AUTO_LOOP_SAFETY_BLOCKED',
+              stage: 'review',
+              message: '自动闭环的 review 未满足单动作安全审批条件。',
+              request_id: persistencePayload.request_id,
+              ...(typeof persistencePayload.episode_index === 'number'
+                ? { episode_index: persistencePayload.episode_index }
+                : {}),
+              ...(typeof persistencePayload.frame_index === 'number'
+                ? { frame_index: persistencePayload.frame_index }
+                : {}),
+            },
+            true,
+            true,
+          );
+          return false;
+        }
+        if (isReadyForExecution && !executePendingActionInternal(true)) {
+          fail(
+            {
+              code: 'AUTO_LOOP_EXECUTION_NOT_READY',
+              stage: 'execution',
+              message: '自动闭环未能通过现有单动作执行门禁。',
+              request_id: persistencePayload.request_id,
+              ...(typeof persistencePayload.episode_index === 'number'
+                ? { episode_index: persistencePayload.episode_index }
+                : {}),
+              ...(typeof persistencePayload.frame_index === 'number'
+                ? { frame_index: persistencePayload.frame_index }
+                : {}),
+            },
+            true,
+            true,
+          );
+          return false;
+        }
+      }
       return true;
     } catch (caught) {
       if (reviewDataRef.current !== reviewData) return false;
@@ -267,8 +374,38 @@ export const useInferenceReplay = ({
         });
         setProgress('审阅 JSON 未保存，已禁止执行动作');
       }
+      if (autoLoopRef.current && reviewData.auto_loop_run_id === autoLoopRef.current.runId) {
+        fail(
+          {
+            code: 'AUTO_LOOP_REVIEW_PERSISTENCE_FAILED',
+            stage: 'review',
+            message: `自动闭环 review 保存失败：${message}`,
+            request_id: reviewData.request_id,
+            ...(typeof reviewData.episode_index === 'number'
+              ? { episode_index: reviewData.episode_index }
+              : {}),
+            ...(typeof reviewData.frame_index === 'number'
+              ? { frame_index: reviewData.frame_index }
+              : {}),
+          },
+          false,
+          true,
+        );
+      }
       return false;
     }
+  };
+
+  const autoLoopReviewFields = (chunk: ActionChunk): Record<string, unknown> => {
+    const activeAutoLoop = autoLoopRef.current;
+    return activeAutoLoop
+      ? {
+          auto_loop_run_id: activeAutoLoop.runId,
+          auto_loop_step: activeAutoLoop.step,
+          action_pred: chunk.prediction,
+          selected_action_index: 0,
+        }
+      : {};
   };
 
   const saveFailedIkReview = (chunk: ActionChunk, error: InferenceError): boolean => {
@@ -367,6 +504,7 @@ export const useInferenceReplay = ({
       action_index: 0,
       robot_config: context.robotConfig,
       robot_config_file: context.robotConfig.file,
+      ...autoLoopReviewFields(chunk),
       urdf: {
         file: context.loadedRobotUrdfFile,
         name: context.description?.name ?? null,
@@ -376,7 +514,7 @@ export const useInferenceReplay = ({
       frame_index: chunk.frame_index,
       observation_tcp_snapshot: observationTcpPose,
       action_start_pose: currentTcp,
-      camera_frame_index: lastObservationRef.current?.frame_index ?? null,
+      camera_frame_index: lastObservationRef.current?.camera_frame_index ?? null,
       camera_frame_timestamp_ms: lastObservationRef.current?.camera_frame_timestamp_ms ?? null,
       input_image_shape: chunk.input_image_shape,
       policy_input_shape: chunk.input_image_shape,
@@ -463,6 +601,41 @@ export const useInferenceReplay = ({
         true,
       );
       return;
+    }
+    const activeAutoLoop = autoLoopRef.current;
+    if (activeAutoLoop) {
+      const cameraFrameIndex = observation.camera_frame_index;
+      if (
+        !Number.isInteger(observation.frame_index) ||
+        !Number.isInteger(cameraFrameIndex) ||
+        !Number.isFinite(observation.camera_frame_timestamp_ms) ||
+        !observation.camera0_rgb ||
+        (activeAutoLoop.lastObservationFrameIndex !== null &&
+          observation.frame_index <= activeAutoLoop.lastObservationFrameIndex) ||
+        (activeAutoLoop.lastCameraFrameIndex !== null &&
+          (cameraFrameIndex as number) <= activeAutoLoop.lastCameraFrameIndex) ||
+        (activeAutoLoop.lastCameraTimestamp !== null &&
+          observation.camera_frame_timestamp_ms <= activeAutoLoop.lastCameraTimestamp) ||
+        (activeAutoLoop.episodeIndex !== null &&
+          episodeIndexRef.current !== activeAutoLoop.episodeIndex)
+      ) {
+        fail(
+          {
+            code: 'AUTO_LOOP_STALE_CAMERA_FRAME',
+            stage: 'observation',
+            message: '自动闭环要求 observation 与相机帧均向前推进。',
+            episode_index: episodeIndexRef.current,
+            frame_index: observation.frame_index,
+          },
+          true,
+        );
+        return;
+      }
+      activeAutoLoop.episodeIndex ??= episodeIndexRef.current;
+      activeAutoLoop.lastObservationFrameIndex = observation.frame_index;
+      activeAutoLoop.lastCameraFrameIndex = cameraFrameIndex as number;
+      activeAutoLoop.lastCameraTimestamp = observation.camera_frame_timestamp_ms;
+      updateAutoLoop(activeAutoLoop, 'INFERENCING');
     }
     const policyObservation = singleActionDebugEnabled
       ? {
@@ -928,6 +1101,7 @@ export const useInferenceReplay = ({
           request_id: chunk.request_id,
           episode_index: chunk.episode_index,
           action_index: firstActionIndex,
+          ...autoLoopReviewFields(chunk),
           robot_config: context.robotConfig,
           robot_config_file: context.robotConfig.file,
           urdf: {
@@ -940,7 +1114,7 @@ export const useInferenceReplay = ({
           frame_index: chunk.frame_index,
           observation_tcp_snapshot: observationTcpPose,
           action_start_pose: ikRecord?.start_pose ?? observationTcpPose,
-          camera_frame_index: lastObservationRef.current?.frame_index ?? null,
+          camera_frame_index: lastObservationRef.current?.camera_frame_index ?? null,
           camera_frame_timestamp_ms: lastObservationRef.current?.camera_frame_timestamp_ms ?? null,
           input_image_shape: chunk.input_image_shape,
           policy_input_shape: chunk.input_image_shape,
@@ -1254,6 +1428,17 @@ export const useInferenceReplay = ({
           return;
         }
         if (message.type === 'complete') {
+          if (autoLoopRef.current) {
+            fail(
+              {
+                code: 'AUTO_LOOP_WEBSOCKET_COMPLETED_EARLY',
+                stage: 'connection',
+                message: '推理服务在自动闭环达到步数上限前结束了连接。',
+              },
+              false,
+            );
+            return;
+          }
           clearWorker();
           activeChunkRef.current = null;
           activeActionIndexRef.current = null;
@@ -1285,6 +1470,17 @@ export const useInferenceReplay = ({
       };
       socket.onerror = () => {
         if (socketRef.current !== socket) return;
+        if (autoLoopRef.current) {
+          fail(
+            {
+              code: 'AUTO_LOOP_WEBSOCKET_ERROR',
+              stage: 'connection',
+              message: '自动闭环推理连接发生错误。',
+            },
+            false,
+          );
+          return;
+        }
         fail(
           {
             code: 'WEBSOCKET_ERROR',
@@ -1297,6 +1493,17 @@ export const useInferenceReplay = ({
       socket.onclose = (event: CloseEvent) => {
         if (socketRef.current !== socket) return;
         socketRef.current = null;
+        if (autoLoopRef.current) {
+          fail(
+            {
+              code: 'AUTO_LOOP_WEBSOCKET_CLOSED',
+              stage: 'connection',
+              message: '自动闭环推理连接意外断开。',
+            },
+            false,
+          );
+          return;
+        }
         if (
           statusRef.current === 'connecting' ||
           statusRef.current === 'loading' ||
@@ -1329,7 +1536,7 @@ export const useInferenceReplay = ({
     }
   };
 
-  const step = () => {
+  function stepSingleAction(): void {
     const activeSocket = socketRef.current;
     if (
       singleActionDebugEnabled &&
@@ -1363,9 +1570,55 @@ export const useInferenceReplay = ({
       return;
     }
     sendObservation(socket);
+  }
+
+  const step = () => {
+    if (autoLoopRef.current) return;
+    stepSingleAction();
   };
 
-  const stop = () => {
+  function startAutoLoop(): boolean {
+    const context = contextRef.current;
+    const statusCanStart =
+      statusRef.current === 'idle' ||
+      statusRef.current === 'stopped' ||
+      statusRef.current === 'error' ||
+      (statusRef.current === 'complete' &&
+        reviewDataRef.current?.review_status === 'COMPLETED' &&
+        reviewDataRef.current.persistence_status === 'saved');
+    if (
+      !singleActionDebugEnabled ||
+      autoLoopRef.current ||
+      !statusCanStart ||
+      reviewCompletionPendingRef.current ||
+      !isUr5CadContext(context)
+    ) {
+      return false;
+    }
+
+    const runtime: AutoLoopRuntime = {
+      runId: crypto.randomUUID(),
+      step: 1,
+      maxSteps: AUTO_LOOP_MAX_STEPS,
+      completedSteps: 0,
+      phase: 'CAPTURING',
+      stopRequested: false,
+      episodeIndex: null,
+      lastObservationFrameIndex: null,
+      lastCameraFrameIndex: null,
+      lastCameraTimestamp: null,
+    };
+    autoLoopRef.current = runtime;
+    updateAutoLoop(runtime, 'CAPTURING');
+    if (mountedRef.current) {
+      setError(null);
+      setProgress('自动闭环准备采集第 1 / 3 步观测');
+    }
+    stepSingleAction();
+    return autoLoopRef.current === runtime;
+  }
+
+  const stopCurrentAction = () => {
     if (
       statusRef.current === 'idle' ||
       statusRef.current === 'complete' ||
@@ -1390,9 +1643,32 @@ export const useInferenceReplay = ({
     closeSocket(1000, 'user stopped');
   };
 
-  const executePendingAction = (): boolean => {
+  const stopAutoLoop = () => {
+    const activeAutoLoop = autoLoopRef.current;
+    if (!activeAutoLoop) return;
+    activeAutoLoop.stopRequested = true;
+    updateAutoLoop(activeAutoLoop, 'STOPPED');
+    if (statusRef.current === 'playing' || reviewCompletionPendingRef.current) {
+      if (mountedRef.current) setProgress('已停止后续闭环，当前动作完成并保存后结束');
+      return;
+    }
+    autoLoopRef.current = null;
+    stopCurrentAction();
+  };
+
+  const stop = () => {
+    if (autoLoopRef.current) {
+      stopAutoLoop();
+      return;
+    }
+    stopCurrentAction();
+  };
+
+  function executePendingActionInternal(autoLoopExecution = false): boolean {
     const pendingPlayback = pendingPlaybackRef.current;
     if (!pendingPlayback || statusRef.current !== 'review') return false;
+    if (autoLoopRef.current && !autoLoopExecution) return false;
+    if (autoLoopExecution && !autoLoopRef.current) return false;
     if (!isUr5CadContext(contextRef.current)) {
       fail(
         {
@@ -1415,6 +1691,7 @@ export const useInferenceReplay = ({
       setPlayback(pendingPlayback);
       setProgress('正在执行唯一一条已审核动作');
     }
+    if (autoLoopRef.current) updateAutoLoop(autoLoopRef.current, 'EXECUTING');
     updateStatus('playing');
     publishDebugEvent('inference:single_action_execute', {
       episode_index: pendingPlayback.episodeIndex,
@@ -1422,6 +1699,23 @@ export const useInferenceReplay = ({
       action_index: pendingPlayback.actions[0]?.actionIndex,
     });
     return true;
+  }
+
+  const executePendingAction = (): boolean => executePendingActionInternal(false);
+
+  const failPlayback = (token: number, caught: unknown) => {
+    if (token !== playbackTokenRef.current || !activeChunkRef.current) return;
+    fail(
+      {
+        code: 'PLAYBACK_EXECUTION_FAILED',
+        stage: 'execution',
+        message: caught instanceof Error ? caught.message : String(caught),
+        episode_index: activeChunkRef.current.episode_index,
+        frame_index: activeChunkRef.current.frame_index,
+      },
+      true,
+      true,
+    );
   };
 
   const completePlayback = (token: number, snapshot?: PlaybackSnapshot) => {
@@ -1431,8 +1725,23 @@ export const useInferenceReplay = ({
       return;
     }
     const currentReview = reviewDataRef.current;
+    const activeAutoLoop = autoLoopRef.current;
     let completionPersistence: Promise<boolean> | null = null;
     const actualAfterActionMissing = singleActionDebugEnabled && (!currentReview || !snapshot);
+    if (activeAutoLoop && actualAfterActionMissing) {
+      fail(
+        {
+          code: 'AUTO_LOOP_ACTUAL_AFTER_ACTION_MISSING',
+          stage: 'review',
+          message: '自动闭环未能采集执行后的真实关节、TCP、夹爪和相机状态。',
+          episode_index: chunk.episode_index,
+          frame_index: chunk.frame_index,
+        },
+        true,
+        true,
+      );
+      return;
+    }
     if (singleActionDebugEnabled && currentReview && snapshot) {
       const targetJoints = currentReview.target_joints as JointValues;
       const armJointNames =
@@ -1454,15 +1763,74 @@ export const useInferenceReplay = ({
         : null;
       const targetGripperOpening = currentReview.target_gripper_opening_m;
       const postObservation = snapshot.observation;
-      const preActionCameraTimestamp = lastObservationRef.current?.camera_frame_timestamp_ms;
+      const preActionObservation = lastObservationRef.current;
+      const preActionCameraTimestamp = preActionObservation?.camera_frame_timestamp_ms;
       const postActionCameraTimestamp = postObservation?.camera_frame_timestamp_ms;
+      const cameraFrameIndexAdvanced =
+        preActionObservation?.camera_frame_index === undefined &&
+        postObservation?.camera_frame_index === undefined
+          ? true
+          : typeof preActionObservation?.camera_frame_index === 'number' &&
+            typeof postObservation?.camera_frame_index === 'number' &&
+            postObservation.camera_frame_index > preActionObservation.camera_frame_index;
+      const cameraFrameAdvanced =
+        cameraFrameIndexAdvanced &&
+        typeof preActionCameraTimestamp === 'number' &&
+        typeof postActionCameraTimestamp === 'number' &&
+        postActionCameraTimestamp > preActionCameraTimestamp;
+      if (activeAutoLoop && !cameraFrameAdvanced) {
+        fail(
+          {
+            code: 'AUTO_LOOP_STALE_CAMERA_FRAME',
+            stage: 'observation',
+            message: '执行后相机帧没有推进，自动闭环已停止。',
+            request_id: chunk.request_id,
+            episode_index: chunk.episode_index,
+            frame_index: postObservation?.frame_index ?? chunk.frame_index,
+          },
+          true,
+          true,
+        );
+        return;
+      }
+      const actualAfterActionValid = Boolean(
+        postObservation &&
+        Number.isInteger(postObservation.frame_index) &&
+        Number.isInteger(postObservation.camera_frame_index) &&
+        postObservation.camera0_rgb &&
+        Object.keys(snapshot.joint_values).length > 0 &&
+        Object.values(snapshot.joint_values).every(Number.isFinite) &&
+        [...snapshot.tcp_pose.position, ...snapshot.tcp_pose.orientation].every(Number.isFinite) &&
+        typeof snapshot.gripper_opening_m === 'number' &&
+        Number.isFinite(snapshot.gripper_opening_m) &&
+        Number.isFinite(postObservation.robot0_gripper_width.at(-1)?.[0]),
+      );
+      if (activeAutoLoop && !actualAfterActionValid) {
+        fail(
+          {
+            code: 'AUTO_LOOP_ACTUAL_AFTER_ACTION_MISSING',
+            stage: 'review',
+            message: '自动闭环执行后状态不完整，无法完成当前 review。',
+            request_id: chunk.request_id,
+            episode_index: chunk.episode_index,
+            frame_index: chunk.frame_index,
+          },
+          true,
+          true,
+        );
+        return;
+      }
+      if (activeAutoLoop && postObservation) {
+        activeAutoLoop.lastObservationFrameIndex = postObservation.frame_index;
+        activeAutoLoop.lastCameraFrameIndex = postObservation.camera_frame_index as number;
+        activeAutoLoop.lastCameraTimestamp = postObservation.camera_frame_timestamp_ms;
+        updateAutoLoop(activeAutoLoop, 'SAVING');
+      }
       const actualAfterAction = {
         observation_frame_index: postObservation?.frame_index ?? null,
+        camera_frame_index: postObservation?.camera_frame_index ?? null,
         camera_frame_timestamp_ms: postActionCameraTimestamp ?? null,
-        camera_frame_advanced:
-          typeof preActionCameraTimestamp === 'number' &&
-          typeof postActionCameraTimestamp === 'number' &&
-          postActionCameraTimestamp > preActionCameraTimestamp,
+        camera_frame_advanced: cameraFrameAdvanced,
         camera_image_generated: Boolean(postObservation?.camera0_rgb),
         camera_image_shape: postObservation?.camera_image_shape ?? null,
         actual_joints: snapshot.joint_values,
@@ -1547,6 +1915,77 @@ export const useInferenceReplay = ({
         void completionPersistence.then((saved) => {
           reviewCompletionPendingRef.current = false;
           if (!mountedRef.current) return;
+          const currentAutoLoop = autoLoopRef.current;
+          if (
+            currentAutoLoop &&
+            currentAutoLoop.runId === currentReview?.auto_loop_run_id &&
+            currentAutoLoop.step === currentReview.auto_loop_step
+          ) {
+            if (!saved) {
+              fail(
+                {
+                  code: 'AUTO_LOOP_REVIEW_PERSISTENCE_FAILED',
+                  stage: 'review',
+                  message: '当前 auto-loop review 未成功保存，不能进入下一步。',
+                  request_id: chunk.request_id,
+                  episode_index: chunk.episode_index,
+                  frame_index: chunk.frame_index,
+                },
+                false,
+                true,
+              );
+              return;
+            }
+            currentAutoLoop.completedSteps = currentAutoLoop.step;
+            updateStatus('complete');
+            if (currentAutoLoop.stopRequested) {
+              autoLoopRef.current = null;
+              updateAutoLoop(
+                currentAutoLoop,
+                'STOPPED',
+                currentAutoLoop.step,
+                currentAutoLoop.completedSteps,
+              );
+              if (mountedRef.current) setProgress('自动闭环已停止，当前动作与 review 已完成保存');
+              closeSocket(1000, 'auto loop stopped');
+              return;
+            }
+            if (currentAutoLoop.completedSteps >= currentAutoLoop.maxSteps) {
+              autoLoopRef.current = null;
+              updateAutoLoop(
+                currentAutoLoop,
+                'COMPLETED',
+                currentAutoLoop.step,
+                currentAutoLoop.completedSteps,
+              );
+              if (mountedRef.current) setProgress('三步自动闭环已完成');
+              closeSocket(1000, 'auto loop completed');
+              return;
+            }
+            if (socketRef.current !== socket || socket.readyState !== WebSocket.OPEN) {
+              fail(
+                {
+                  code: 'AUTO_LOOP_WEBSOCKET_CLOSED',
+                  stage: 'connection',
+                  message: '当前动作保存后推理连接已关闭，自动闭环不能继续。',
+                  request_id: chunk.request_id,
+                  episode_index: chunk.episode_index,
+                  frame_index: chunk.frame_index,
+                },
+                false,
+                true,
+              );
+              return;
+            }
+            updateAutoLoop(
+              currentAutoLoop,
+              'CAPTURING',
+              currentAutoLoop.completedSteps + 1,
+              currentAutoLoop.completedSteps,
+            );
+            stepSingleAction();
+            return;
+          }
           updateStatus(saved ? 'complete' : 'error');
           if (!saved) closeSocket(4000, 'single action review persistence failed');
         });
@@ -1588,12 +2027,24 @@ export const useInferenceReplay = ({
     reviewData?.review_status === 'COMPLETED' && reviewData.persistence_status === 'saved';
   const canStart =
     (!isLocked || status === 'waiting') &&
+    !autoLoopRef.current &&
     !reviewCompletionPendingRef.current &&
     (!singleActionDebugEnabled ||
       (reviewData === null ? status !== 'complete' : status === 'complete' && hasCompletedReview));
 
+  const canStartAutoLoop =
+    singleActionDebugEnabled &&
+    isUr5CadContext(contextRef.current) &&
+    !autoLoopRef.current &&
+    !reviewCompletionPendingRef.current &&
+    (status === 'idle' ||
+      status === 'stopped' ||
+      status === 'error' ||
+      (status === 'complete' && hasCompletedReview));
+
   const canExecuteAction =
     singleActionDebugEnabled &&
+    !autoLoopRef.current &&
     status === 'review' &&
     isUr5CadContext(contextRef.current) &&
     reviewData?.safety_verdict === 'READY_FOR_HUMAN_APPROVAL' &&
@@ -1607,11 +2058,17 @@ export const useInferenceReplay = ({
     playback,
     isLocked,
     canStart,
+    canStartAutoLoop,
+    canStopAutoLoop: autoLoopRef.current !== null,
     canExecuteAction,
     step,
     stop,
+    autoLoop,
+    startAutoLoop,
+    stopAutoLoop,
     reviewData,
     executePendingAction,
+    failPlayback,
     completePlayback,
   };
 };
