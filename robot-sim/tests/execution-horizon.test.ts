@@ -118,7 +118,7 @@ class FakeWorker {
 }
 
 const createSingleActionReviewHarness = async (requestId: string) => {
-  const observation: InferenceObservation = {
+  let observation: InferenceObservation = {
     frame_index: 7,
     camera_frame_timestamp_ms: 50,
     camera0_rgb: 'AAAA',
@@ -177,6 +177,9 @@ const createSingleActionReviewHarness = async (requestId: string) => {
   return {
     get replay() {
       return replay;
+    },
+    setObservation(nextObservation: InferenceObservation) {
+      observation = nextObservation;
     },
     socket,
     root,
@@ -531,6 +534,7 @@ describe('execution horizon', () => {
       persistence_status: 'saving',
       actual_after_action: { observation_frame_index: 8 },
     });
+    expect(harness.replay.canStart).toBe(false);
     expect(
       harness.socket.sent
         .map((message) => JSON.parse(message).type)
@@ -554,12 +558,31 @@ describe('execution horizon', () => {
       persistence_status: 'saved',
       actual_after_action: { observation_frame_index: 8 },
     });
+    expect(harness.replay.canStart).toBe(true);
+    harness.setObservation({
+      frame_index: 9,
+      camera_frame_timestamp_ms: 150,
+      camera0_rgb: 'BBBB',
+      robot0_eef_pos: [cadStartPose.position, cadStartPose.position],
+      robot0_eef_rot_axis_angle: [cadStartRotation, cadStartRotation],
+      robot0_gripper_width: [[0.06], [0.06]],
+    });
+    act(() => harness.replay.step());
+
     expect(FakeWebSocket.sockets).toHaveLength(1);
+    expect(harness.socket.readyState).toBe(FakeWebSocket.OPEN);
     expect(
       harness.socket.sent
         .map((message) => JSON.parse(message).type)
         .filter((messageType) => messageType === 'observation'),
-    ).toHaveLength(1);
+    ).toHaveLength(2);
+    expect(
+      harness.socket.sent
+        .map((message) => JSON.parse(message))
+        .filter((message) => message.type === 'observation')
+        .at(-1),
+    ).toMatchObject({ episode_index: 0, frame_index: 9, camera0_rgb: 'BBBB' });
+    expect(harness.replay.reviewData).toBeNull();
     expect(
       harness.socket.sent
         .map((message) => JSON.parse(message).type)
@@ -606,6 +629,7 @@ describe('execution horizon', () => {
     });
     expect(harness.replay.reviewData).not.toHaveProperty('actual_after_action');
     expect(postedReviews).toHaveLength(1);
+    expect(harness.socket.readyState).toBe(FakeWebSocket.CLOSING);
     expect(
       harness.socket.sent
         .map((message) => JSON.parse(message).type)
@@ -665,6 +689,7 @@ describe('execution horizon', () => {
       persistence_error: 'disk write failed',
       actual_after_action: { observation_frame_index: 8 },
     });
+    expect(harness.socket.readyState).toBe(FakeWebSocket.CLOSING);
 
     act(() => harness.root.unmount());
     harness.container.remove();

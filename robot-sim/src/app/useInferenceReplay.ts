@@ -1330,6 +1330,21 @@ export const useInferenceReplay = ({
   };
 
   const step = () => {
+    const activeSocket = socketRef.current;
+    if (
+      singleActionDebugEnabled &&
+      statusRef.current === 'complete' &&
+      activeSocket?.readyState === WebSocket.OPEN
+    ) {
+      if (mountedRef.current) {
+        setError(null);
+        reviewDataRef.current = null;
+        setReviewData(null);
+      }
+      sendObservation(activeSocket);
+      return;
+    }
+
     if (statusRef.current !== 'waiting') {
       start();
       return;
@@ -1516,7 +1531,6 @@ export const useInferenceReplay = ({
         episode_index: chunk.episode_index,
         frame_index: chunk.frame_index,
       });
-      closeSocket(1000, 'single action completed');
       if (actualAfterActionMissing) {
         if (mountedRef.current) {
           setError({
@@ -1528,11 +1542,13 @@ export const useInferenceReplay = ({
           });
         }
         updateStatus('error');
+        closeSocket(4000, 'single action actual state missing');
       } else if (completionPersistence) {
         void completionPersistence.then((saved) => {
           reviewCompletionPendingRef.current = false;
           if (!mountedRef.current) return;
           updateStatus(saved ? 'complete' : 'error');
+          if (!saved) closeSocket(4000, 'single action review persistence failed');
         });
       }
     }
@@ -1568,6 +1584,14 @@ export const useInferenceReplay = ({
     status === 'playing' ||
     status === 'waiting';
 
+  const hasCompletedReview =
+    reviewData?.review_status === 'COMPLETED' && reviewData.persistence_status === 'saved';
+  const canStart =
+    (!isLocked || status === 'waiting') &&
+    !reviewCompletionPendingRef.current &&
+    (!singleActionDebugEnabled ||
+      (reviewData === null ? status !== 'complete' : status === 'complete' && hasCompletedReview));
+
   const canExecuteAction =
     singleActionDebugEnabled &&
     status === 'review' &&
@@ -1582,6 +1606,7 @@ export const useInferenceReplay = ({
     error,
     playback,
     isLocked,
+    canStart,
     canExecuteAction,
     step,
     stop,

@@ -1273,18 +1273,16 @@ export const App = () => {
           {modelId !== 'UR5_CAD' || isPolicyInferenceOnlyEnabled() || singleActionDebugEnabled ? (
             <InferencePanel
               canStep={
+                inference.canStart &&
                 Boolean(loadedRobot && physicsReady && !loadError) &&
                 (!singleActionDebugEnabled || singleActionRobotReady) &&
-                !(singleActionDebugEnabled && inference.reviewData !== null) &&
                 !datasetReplayEnabled &&
                 !experimentRecording &&
                 !(
                   isPolicyInferenceOnlyEnabled() &&
                   !singleActionDebugEnabled &&
                   inference.status === 'complete'
-                ) &&
-                !(singleActionDebugEnabled && inference.status === 'complete') &&
-                (!inference.isLocked || inference.status === 'waiting')
+                )
               }
               canExecuteAction={inference.canExecuteAction}
               error={inference.error}

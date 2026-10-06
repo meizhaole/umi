@@ -50,6 +50,7 @@
 - [x] 为 UR5_CAD 单独调整杯碟造型、初始位置与复位
 - [x] 为 UR5_CAD 单动作审阅增加机器人门禁与 JSON 持久化
 - [x] 修复 UR5_CAD 单动作执行后 review_status 持久化
+- [x] 允许已完成单动作 review 后沿用当前 episode 继续推理
 - [x] 完成 UR5_CAD 当前新场景单动作闭环验证并暂停待人工验收
 - [x] 修复仿真 bridge 的 episode start 与 UR5_CAD 夹爪宽度映射
 - [x] 为 UR5_CAD 增加基于 CAD 指尖中点的 umi_tcp_link 与调试标记
