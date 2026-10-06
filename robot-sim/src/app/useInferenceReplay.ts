@@ -53,6 +53,8 @@ const selectJointAngles = (description: RobotDescription, jointValues: JointValu
 
 const UR5_CAD_CONFIG = findRobotConfig('UR5_CAD');
 const SINGLE_ACTION_VALIDATION_ERROR = 'Single-action validation is only available for UR5_CAD.';
+const POLICY_TARGET_ZERO_EPSILON_M = 1e-6;
+const POLICY_TARGET_ZERO_EPSILON_RAD = 1e-6;
 const ACTION_DIMENSION_SEMANTICS = [
   { index: 0, name: 'position_x', unit: 'm' },
   { index: 1, name: 'position_y', unit: 'm' },
@@ -413,6 +415,7 @@ export const useInferenceReplay = ({
       non_finite_values_present: !finiteValues,
       all_arm_joints_within_limits: false,
       safety_verdict: 'BLOCKED',
+      review_status: 'WAITING_FOR_HUMAN_APPROVAL',
       human_confirmation_required: true,
       persistence_status: 'saving',
       ik_record: ikRecord,
@@ -516,7 +519,8 @@ export const useInferenceReplay = ({
     activeActionIndexRef.current = null;
     activeJointAnglesRef.current = [];
     const singleActionDebug = singleActionDebugEnabled;
-    const selection = selectExecutionActions(chunk.actions, singleActionDebug ? 1 : undefined);
+    const selection = selectExecutionActions(chunk.actions);
+    const ikRecordsByAction = new Map<number, IKActionDebugRecord>();
     latestIkRecordRef.current = null;
     if (mountedRef.current) {
       setError(null);
@@ -583,6 +587,9 @@ export const useInferenceReplay = ({
       }
       if (response.type === 'ik_record') {
         latestIkRecordRef.current = response.record;
+        if (response.record.record_phase === 'result') {
+          ikRecordsByAction.set(response.record.action_index, response.record);
+        }
         const socket = socketRef.current;
         if (socket?.readyState === WebSocket.OPEN) {
           const record: IKActionDebugRecord = response.record;
@@ -610,7 +617,11 @@ export const useInferenceReplay = ({
       }
 
       clearWorker(false);
-      activeJointAnglesRef.current = response.actions.map((action) =>
+      const firstSelectedActionIndex = selection.selectedActionIndexes[0];
+      const playbackActions = singleActionDebug
+        ? response.actions.filter((action) => action.actionIndex === firstSelectedActionIndex)
+        : response.actions;
+      activeJointAnglesRef.current = playbackActions.map((action) =>
         selectJointAngles(context.description as RobotDescription, action.jointValues),
       );
       const nextPlayback: PlaybackChunk = {
@@ -618,7 +629,7 @@ export const useInferenceReplay = ({
         episodeIndex: chunk.episode_index,
         frameIndex: chunk.frame_index,
         lastChunk: chunk.last_chunk,
-        actions: response.actions,
+        actions: playbackActions,
       };
       playbackTokenRef.current = nextPlayback.token;
       if (singleActionDebug) pendingPlaybackRef.current = nextPlayback;
@@ -638,27 +649,38 @@ export const useInferenceReplay = ({
         actions: response.actions,
       });
       if (singleActionDebug) {
-        const ikRecord = latestIkRecordRef.current;
-        const firstActionIndex = selection.selectedActionIndexes[0];
+        const firstActionIndex = firstSelectedActionIndex;
+        const ikRecord = ikRecordsByAction.get(firstActionIndex) ?? null;
         const firstPredictionAction = chunk.prediction[firstActionIndex];
         const firstRobotAction = chunk.actions[firstActionIndex];
-        const targetJoints = response.actions[0]?.jointValues ?? {};
+        const targetJoints =
+          ikRecord?.final_joint_values ??
+          response.actions.find((action) => action.actionIndex === firstActionIndex)?.jointValues ??
+          null;
         const seedJoints = ikRecord?.seed_joint_values ?? context.jointValues;
         const armJoints =
           context.description?.joints.filter(
             (joint) => joint.type === 'revolute' || joint.type === 'continuous',
           ) ?? [];
-        const jointDeltas = Object.fromEntries(
-          armJoints.map((joint) => [
-            joint.name,
-            (targetJoints[joint.name] ?? 0) - (seedJoints[joint.name] ?? 0),
-          ]),
-        );
-        const jointDeltaNorm = Math.hypot(...Object.values(jointDeltas));
-        const [maximumJointDeltaName, maximumJointDelta] = Object.entries(jointDeltas).reduce(
-          (maximum, current) => (Math.abs(current[1]) > Math.abs(maximum[1]) ? current : maximum),
-          ['', 0],
-        );
+        const jointDeltas = targetJoints
+          ? Object.fromEntries(
+              armJoints.map((joint) => [
+                joint.name,
+                (targetJoints[joint.name] ?? 0) - (seedJoints[joint.name] ?? 0),
+              ]),
+            )
+          : null;
+        const jointDeltaNorm = jointDeltas ? Math.hypot(...Object.values(jointDeltas)) : null;
+        const maximumJointDeltaEntry = jointDeltas
+          ? Object.entries(jointDeltas).reduce(
+              (maximum, current) =>
+                Math.abs(current[1]) > Math.abs(maximum[1]) ? current : maximum,
+              ['', 0],
+            )
+          : null;
+        const maximumJointDeltaName = maximumJointDeltaEntry?.[0] ?? null;
+        const maximumJointDelta =
+          maximumJointDeltaEntry === null ? null : Math.abs(maximumJointDeltaEntry[1]);
         const jointLimits = Object.fromEntries(
           armJoints.map((joint) => [
             joint.name,
@@ -682,6 +704,68 @@ export const useInferenceReplay = ({
             ? poseErrorRotation(targetTcp.orientation, currentTcp.orientation)
             : null;
         const tcpRotationDeltaNorm = tcpRotationDelta ? vectorLength(tcpRotationDelta) : null;
+        const actionDryRunSummary = selection.selectedActionIndexes.map((actionIndex) => {
+          const actionRecord = ikRecordsByAction.get(actionIndex);
+          const actionStartPose = actionRecord?.start_pose ?? context.tcpPose;
+          const actionTargetPose = actionRecord?.target_pose ?? null;
+          const actionTranslationDelta =
+            actionStartPose && actionTargetPose
+              ? actionTargetPose.position.map(
+                  (value, index) => value - actionStartPose.position[index],
+                )
+              : null;
+          const actionTranslationDeltaNorm = actionTranslationDelta
+            ? vectorLength(actionTranslationDelta as [number, number, number])
+            : null;
+          const actionRotationDelta =
+            actionStartPose && actionTargetPose
+              ? poseErrorRotation(actionTargetPose.orientation, actionStartPose.orientation)
+              : null;
+          const actionRotationDeltaNorm = actionRotationDelta
+            ? vectorLength(actionRotationDelta)
+            : null;
+          const actionSeedJoints = actionRecord?.seed_joint_values ?? null;
+          const actionTargetJoints = actionRecord?.final_joint_values ?? null;
+          const actionJointDeltas =
+            actionSeedJoints && actionTargetJoints
+              ? Object.fromEntries(
+                  armJoints.map((joint) => [
+                    joint.name,
+                    (actionTargetJoints[joint.name] ?? 0) - (actionSeedJoints[joint.name] ?? 0),
+                  ]),
+                )
+              : null;
+          const actionJointDeltaNorm = actionJointDeltas
+            ? Math.hypot(...Object.values(actionJointDeltas))
+            : null;
+          const actionMaximumJointDelta = actionJointDeltas
+            ? Math.max(...Object.values(actionJointDeltas).map(Math.abs))
+            : null;
+          const actionSucceeded = actionRecord?.status === 'success';
+
+          return {
+            action_pred_index: actionIndex,
+            tcp_translation_delta_norm_m: actionTranslationDeltaNorm,
+            tcp_rotation_delta_norm_rad: actionRotationDeltaNorm,
+            requested_gripper_opening_m: actionRecord?.requested_gripper_opening_m ?? null,
+            target_gripper_opening_m: actionRecord?.clamped_gripper_opening_m ?? null,
+            gripper_target_clamped: actionRecord?.gripper_target_clamped ?? null,
+            left_jaw_target: actionRecord?.left_jaw_target ?? null,
+            right_jaw_target: actionRecord?.right_jaw_target ?? null,
+            ik_iterations: actionRecord?.iterations ?? null,
+            position_residual_m: actionRecord?.position_residual ?? null,
+            orientation_residual_rad: actionRecord?.orientation_residual ?? null,
+            joint_delta_norm_rad: actionJointDeltaNorm,
+            max_joint_delta_rad: actionMaximumJointDelta,
+            success: actionSucceeded,
+            nonzero_arm_target:
+              actionSucceeded && actionJointDeltaNorm !== null && actionJointDeltaNorm > 0,
+            termination_reason: actionRecord?.termination_reason ?? null,
+          };
+        });
+        const firstNonzeroArmAction = actionDryRunSummary.find(
+          (action) => action.success && action.nonzero_arm_target,
+        );
         const currentGripperOpening =
           lastObservationRef.current?.robot0_gripper_width.at(-1)?.[0] ?? null;
         const gripperJoints = context.description
@@ -710,10 +794,11 @@ export const useInferenceReplay = ({
             ? targetGripperOpening - currentGripperOpening
             : null;
         const allArmJointsWithinLimits = armJoints.every((joint) => {
-          const value = targetJoints[joint.name];
+          const value = targetJoints?.[joint.name];
           const lower = joint.limit?.lower;
           const upper = joint.limit?.upper;
           return (
+            typeof value === 'number' &&
             Number.isFinite(value) &&
             (lower === undefined || value >= lower) &&
             (upper === undefined || value <= upper)
@@ -722,6 +807,7 @@ export const useInferenceReplay = ({
         const requiredSafetyDataAvailable =
           currentTcp !== null &&
           targetTcp !== null &&
+          targetJoints !== null &&
           currentGripperOpening !== null &&
           targetGripperOpening !== null &&
           typeof ikRecord?.position_residual === 'number' &&
@@ -730,14 +816,14 @@ export const useInferenceReplay = ({
           ...firstPredictionAction,
           ...firstRobotAction,
           ...armJoints.map((joint) => seedJoints[joint.name]),
-          ...Object.values(targetJoints),
-          ...Object.values(jointDeltas),
+          ...(targetJoints ? Object.values(targetJoints) : []),
+          ...(jointDeltas ? Object.values(jointDeltas) : []),
           ...(currentTcp ? [...currentTcp.position, ...currentTcp.orientation] : []),
           ...(targetTcp ? [...targetTcp.position, ...targetTcp.orientation] : []),
           ...(tcpTranslationDelta ?? []),
           ...(tcpRotationDelta ?? []),
-          jointDeltaNorm,
-          maximumJointDelta,
+          ...(jointDeltaNorm === null ? [] : [jointDeltaNorm]),
+          ...(maximumJointDelta === null ? [] : [maximumJointDelta]),
           ...(tcpTranslationDeltaNorm === null ? [] : [tcpTranslationDeltaNorm]),
           ...(tcpRotationDeltaNorm === null ? [] : [tcpRotationDeltaNorm]),
           ...(currentGripperOpening === null ? [] : [currentGripperOpening]),
@@ -755,6 +841,16 @@ export const useInferenceReplay = ({
             : []),
         ].every(Number.isFinite);
         const ikSucceeded = ikRecord?.status === 'success';
+        const policyTargetNearZero =
+          tcpTranslationDeltaNorm !== null &&
+          tcpRotationDeltaNorm !== null &&
+          tcpTranslationDeltaNorm <= POLICY_TARGET_ZERO_EPSILON_M &&
+          tcpRotationDeltaNorm <= POLICY_TARGET_ZERO_EPSILON_RAD;
+        const armMotionClassification = !ikSucceeded
+          ? 'IK_FAILED'
+          : jointDeltaNorm === 0
+            ? 'ZERO_WITHIN_TOLERANCE'
+            : 'NONZERO_IK_TARGET';
         const safetyVerdict =
           ikSucceeded && requiredSafetyDataAvailable && finiteValues && allArmJointsWithinLimits
             ? 'READY_FOR_HUMAN_APPROVAL'
@@ -771,6 +867,7 @@ export const useInferenceReplay = ({
             root_link: context.description?.rootLink ?? null,
             tcp_link: context.description?.tipLink ?? null,
           },
+          tcp_link: context.description?.tipLink ?? null,
           frame_index: chunk.frame_index,
           camera_frame_index: lastObservationRef.current?.frame_index ?? null,
           camera_frame_timestamp_ms: lastObservationRef.current?.camera_frame_timestamp_ms ?? null,
@@ -796,8 +893,9 @@ export const useInferenceReplay = ({
           ],
           first_executable_action_index: firstActionIndex,
           normal_execution_horizon: EXECUTION_HORIZON,
-          single_action_execution_horizon: selection.configuredExecutionHorizon,
-          selected_action_indexes: selection.selectedActionIndexes,
+          single_action_execution_horizon: 1,
+          selected_action_indexes: [firstActionIndex],
+          ik_dry_run_action_indexes: selection.selectedActionIndexes,
           action_start_index: 0,
           latency_compensation_steps: 0,
           action_pred_0: firstPredictionAction,
@@ -815,7 +913,7 @@ export const useInferenceReplay = ({
           target_joints: targetJoints,
           joint_deltas_rad: jointDeltas,
           joint_delta_norm_rad: jointDeltaNorm,
-          maximum_joint_delta_rad: Math.abs(maximumJointDelta),
+          maximum_joint_delta_rad: maximumJointDelta,
           maximum_joint_delta_joint: maximumJointDeltaName,
           joint_limits_rad: jointLimits,
           gripper_joint_limits_m: gripperJointLimits,
@@ -828,6 +926,17 @@ export const useInferenceReplay = ({
           required_safety_data_available: requiredSafetyDataAvailable,
           all_arm_joints_within_limits: allArmJointsWithinLimits,
           ik_success: ikSucceeded,
+          review_status: 'WAITING_FOR_HUMAN_APPROVAL',
+          arm_motion_classification: armMotionClassification,
+          policy_target_near_zero: policyTargetNearZero,
+          policy_target_near_zero_threshold: {
+            translation_m: POLICY_TARGET_ZERO_EPSILON_M,
+            rotation_rad: POLICY_TARGET_ZERO_EPSILON_RAD,
+          },
+          ik_target_within_tolerance_without_joint_change:
+            ikRecord?.iterations === 0 && jointDeltaNorm === 0,
+          action_pred_0_to_5_dry_run_summary: actionDryRunSummary,
+          first_nonzero_arm_action_index: firstNonzeroArmAction?.action_pred_index ?? null,
           position_residual_m: ikRecord?.position_residual ?? null,
           orientation_residual_rad: ikRecord?.orientation_residual ?? null,
           ik_termination_reason: ikRecord?.termination_reason ?? null,
@@ -893,6 +1002,7 @@ export const useInferenceReplay = ({
       selectedActionIndexes: selection.selectedActionIndexes,
       action_pose_repr: chunk.action_pose_repr,
       traceAllIterations: isIkTraceEnabled(),
+      continueOnIkFailure: singleActionDebug,
     };
     worker.postMessage(request);
   };

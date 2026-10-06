@@ -243,6 +243,7 @@ export const runIkSolve = (
             result.terminationReason,
           ),
         });
+        if (request.continueOnIkFailure) continue;
         postMessage({
           type: 'error',
           error: {
@@ -302,23 +303,26 @@ export const runIkSolve = (
       });
       previousActionOutputSeed = { ...seed };
     } catch (error) {
+      const errorRecord = createDebugRecord(
+        request,
+        actionIndex,
+        action,
+        actionSeed,
+        previousActionOutputSeed,
+        targetPose,
+        result,
+        null,
+        iterationTrace,
+        'solver_exception',
+        'result',
+        error instanceof Error ? error.message : String(error),
+      );
+      errorRecord.status = 'failure';
       postMessage({
         type: 'ik_record',
-        record: createDebugRecord(
-          request,
-          actionIndex,
-          action,
-          actionSeed,
-          previousActionOutputSeed,
-          targetPose,
-          result,
-          null,
-          iterationTrace,
-          'solver_exception',
-          'result',
-          error instanceof Error ? error.message : String(error),
-        ),
+        record: errorRecord,
       });
+      if (request.continueOnIkFailure) continue;
       postMessage({
         type: 'error',
         error: createError(request, actionIndex, error),

@@ -110,6 +110,7 @@ export interface IkWorkerRequest {
   selectedActionIndexes: number[];
   action_pose_repr: string;
   traceAllIterations: boolean;
+  continueOnIkFailure?: boolean;
 }
 
 export interface IKActionDebugRecord {
