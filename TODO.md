@@ -44,7 +44,8 @@
 - [x] 接入左右 holder-finger Assembly 实测位姿并拆分独立 jaw link
 - [x] 增加统一 Gripper opening 滑条并验证左右 jaw 同步运动
 - [x] 为 UR5 CAD 接入固定跟随 GoPro 腕部相机与部署图像预处理
-- [ ] 在支持 WebGL 的浏览器确认 GoPro 相机方向、夹爪构图与关节跟随
+- [x] 在支持 WebGL 的浏览器确认 GoPro 相机方向、夹爪构图与关节跟随
+- [ ] 验证 UR5 CAD 相机帧到 UMI policy 的运行时数据与单帧推理
 - [ ] 将本机训练 checkpoint 接入 Gazebo 回放启动参数
 - [ ] 接通 Gazebo 相机与 UMI 推理观测
 - [ ] 将实时 UMI 策略接入 ReBot RS 实机控制链路

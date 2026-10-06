@@ -376,12 +376,7 @@ export const App = () => {
         : null,
     [datasetReplayActualPose, datasetReplayTargetPose],
   );
-  const handleCameraFrame = useCallback((frame: SimCameraFrame) => {
-    cameraFramesRef.current = [...cameraFramesRef.current.slice(-1), frame];
-
-    const now = performance.now();
-    if (now - cameraPreviewLastDrawRef.current < CAMERA_PREVIEW_INTERVAL_MS) return;
-
+  const drawCameraPreview = useCallback((frame: SimCameraFrame) => {
     const canvas = cameraPreviewCanvasRef.current;
     const context = canvas?.getContext('2d');
     if (!canvas || !context) return;
@@ -398,17 +393,29 @@ export const App = () => {
       targetIndex += 4;
     }
     context.putImageData(imageData, 0, 0);
-    cameraPreviewLastDrawRef.current = now;
+    cameraPreviewLastDrawRef.current = performance.now();
 
     if (!cameraPreviewReadyRef.current) {
       cameraPreviewReadyRef.current = true;
       setCameraPreviewReady(true);
     }
   }, []);
+  const handleCameraFrame = useCallback(
+    (frame: SimCameraFrame) => {
+      cameraFramesRef.current = [...cameraFramesRef.current.slice(-1), frame];
+
+      if (performance.now() - cameraPreviewLastDrawRef.current < CAMERA_PREVIEW_INTERVAL_MS) {
+        return;
+      }
+      drawCameraPreview(frame);
+    },
+    [drawCameraPreview],
+  );
   const getObservation = useCallback((): InferenceObservation | null => {
     const frames = cameraFramesRef.current;
     const latest = frames[frames.length - 1];
     if (!latest || frames.length === 0) return null;
+    drawCameraPreview(latest);
     const history = frames.length > 1 ? frames.slice(-2) : [latest, latest];
     let binary = '';
     for (let offset = 0; offset < latest.rgb.length; offset += 0x8000) {
@@ -423,7 +430,7 @@ export const App = () => {
       ),
       robot0_gripper_width: history.map((frame) => [frame.gripperWidth]),
     };
-  }, []);
+  }, [drawCameraPreview]);
   const inference = useInferenceReplay({
     description: loadedRobot?.description ?? null,
     jointValues,
