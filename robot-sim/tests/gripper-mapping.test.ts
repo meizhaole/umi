@@ -1,6 +1,15 @@
+// @vitest-environment jsdom
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { JointDescription, RobotDescription } from '../src/core/types';
-import { getGripperOpening, mapGripperOpeningToJoints } from '../src/app/gripperMapping';
+import { findRobotConfig } from '../src/app/config';
+import {
+  getGripperJoints,
+  getGripperOpening,
+  mapGripperOpeningToJoints,
+} from '../src/app/gripperMapping';
+import { parseUrdf } from '../src/utils/urdfParser';
 
 const UR5_CAD_GRIPPER_JOINT_NAMES = ['left_jaw_joint', 'right_jaw_joint'] as const;
 
@@ -30,6 +39,35 @@ const UR5_CAD = description(
 );
 
 describe('UR5_CAD gripper width mapping', () => {
+  it('matches the configured jaw joints and total opening in the shipped URDF', () => {
+    const config = findRobotConfig('UR5_CAD');
+    const description = parseUrdf(
+      readFileSync(resolve('public/robot/ur_umi_real/urdf/ur5_umi_real.urdf'), 'utf8'),
+      { tipLink: config.tipLink },
+    );
+    const gripperJoints = getGripperJoints(description, config.gripperJointNames);
+
+    expect(gripperJoints.map(({ name, type, limit }) => ({ name, type, limit }))).toEqual([
+      {
+        name: 'left_jaw_joint',
+        type: 'prismatic',
+        limit: expect.objectContaining({ lower: 0, upper: 0.055 }),
+      },
+      {
+        name: 'right_jaw_joint',
+        type: 'prismatic',
+        limit: expect.objectContaining({ lower: 0, upper: 0.055 }),
+      },
+    ]);
+    expect(
+      getGripperOpening(
+        description,
+        { left_jaw_joint: 0.055, right_jaw_joint: 0.055 },
+        config.gripperJointNames,
+      ),
+    ).toBeCloseTo(0.11, 12);
+  });
+
   it('reports zero total opening at both jaw zero positions', () => {
     expect(
       getGripperOpening(

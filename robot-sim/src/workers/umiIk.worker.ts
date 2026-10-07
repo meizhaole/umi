@@ -81,10 +81,19 @@ const createDebugRecord = (
 ): IKActionDebugRecord => {
   const converged = result?.converged === true;
   const includeTrace = recordPhase === 'result' && (!converged || request.traceAllIterations);
-  const gripperMapping =
-    Array.isArray(action) && action.length === 7 && Number.isFinite(action[6])
-      ? mapGripperOpeningToJoints(request.description, action[6], request.gripperJointNames)
-      : null;
+  let gripperMapping: ReturnType<typeof mapGripperOpeningToJoints> | null = null;
+  let gripperMappingError: string | undefined;
+  if (Array.isArray(action) && action.length === 7 && Number.isFinite(action[6])) {
+    try {
+      gripperMapping = mapGripperOpeningToJoints(
+        request.description,
+        action[6],
+        request.gripperJointNames,
+      );
+    } catch (error) {
+      gripperMappingError = error instanceof Error ? error.message : String(error);
+    }
+  }
 
   return {
     record_phase: recordPhase,
@@ -102,6 +111,7 @@ const createDebugRecord = (
     trace_level: includeTrace ? 'full' : 'summary',
     raw_action: Array.isArray(action) ? [...action] : action,
     ...(gripperMapping ?? {}),
+    ...(gripperMappingError ? { gripper_mapping_error: gripperMappingError } : {}),
     start_pose: request.startPose,
     target_pose: targetPose,
     seed_joint_values: { ...seed },

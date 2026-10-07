@@ -243,3 +243,67 @@ Step 18 action0 的 target displacement 是 0.357045 mm，旋转范数 0.000584 
 7. server/logs/README.md 的 action_pose_repr 说明落后于源码，需要在后续文档维护时更新；本次未编辑该文件。
 
 **bounded action-chunk execution 判定：NOT_READY。** 当前证据支持继续做离线分析和受限 dry-run；要把整段动作作为 Cup Approach 行为执行，需要先让安全门覆盖计划执行的整个时域，并保存这段动作实际执行后的 TCP、夹爪、杯子状态和 fresh-camera 记录。
+
+## 2026-10-07：Timestamp-Scheduled Waypoint Plan Dry-Run
+
+本轮在 UR5_CAD 页面完成一次真实策略预测，并用 scheduler 选出的 waypoint 生成时间化候选计划。整个过程只读取 observation、运行策略和 IK worker、检查 URDF 几何；没有调用 SceneManager playback、关节电机命令、夹爪命令或 `actual_after_action`。最终及各 waypoint 的 `execution_count` 均为 0。
+
+```mermaid
+flowchart LR
+  O[request-bound observation<br/>TCP 与关节快照] --> S[UMI timestamp scheduler]
+  S --> I[selectedActionIndexes]
+  I --> K[相对同一 observation TCP 解码目标<br/>IK seed 按 waypoint 顺序传递]
+  K --> G[合并 IK arm state 与映射后的 jaw target]
+  G --> V[URDF joint limits 与逐段 pre-contact swept check]
+  V --> P[带时间戳的 safe-prefix 计划<br/>execution_count = 0]
+  S --> R[nextReplanTimestamp]
+  R -.离线队列替换模拟.-> P
+```
+
+### 夹爪映射错误定位与修复
+
+映射器在关节缺失或类型错误时抛出的准确异常为：`配置的夹爪关节 left_jaw_joint 不存在或不是 prismatic joint。`。检查顺序是先查 `left_jaw_joint`，再查 `right_jaw_joint`。UR5_CAD 配置仍使用这两个名字；当前 URDF 中二者都是 `prismatic`，各自限位为 0–0.055 m。映射器把策略给出的总开口宽度分配到两侧，每侧一半，因此总开口范围仍为 0–0.11 m。`gripper-mapping.test.ts` 现在直接解析当前 URDF 并验证关节、限位与最大开口。
+
+此前的模型切换竞态出现在 `WristCameraCapture` 的帧采集路径：它用 `loadedRobot.description` 读取夹爪宽度，同时拿当前所选型号的 `gripperJointNames`。切换到 UR5_CAD 后，如果旧型号 URDF 尚未加载完，旧描述中没有 `left_jaw_joint`，读取函数就会抛出上述异常。异常发生在相机帧回调中，所以不只是 UI/debug 文本问题；它可能中断相机帧采集并影响后续 observation。这个只读函数不发送夹爪目标，也不会改变 UR5_CAD 的有效 jaw target。该竞态早于 `c4357ee` 时间戳 scheduler 提交；当前 checkout 没有保留当时的 loaded model id 或错误事件，不能确认那次具体残留的是 RS 还是 UR5 描述。
+
+现在腕部相机只在已加载模型的 `robotId` 和 URDF 文件都匹配当前配置后启用，计划按钮也使用同一身份门禁。IK debug record 捕获映射异常并返回结构化失败信息；正式映射仍保持严格校验。真实计划集成还暴露了另一个目标拼装错误：IK 的 `final_joint_values` 只包含 arm 求解结果，不能单独代表 jaw 执行目标。计划器已改用 worker 的完整 `action_output_seed`，其中包含 IK arm state 和 worker 映射后的 jaw state；新增回归用例覆盖这两种状态的差异。
+
+### 真实预测与 waypoint 结果
+
+本次 request 为 `ab85f1489eba469cb89103776ddd39e8`，prediction 有 16 项，`action_pose_repr=relative`，推理往返时间为 601.7 ms。调度时钟是 `window.performance.now`，observation 时间为 19743.9 ms，scheduler 当前时间为 20367.5 ms；时间戳是本次浏览器进程内的单调时钟值。
+
+```text
+expired indexes:  [0, 1, 2, 3, 4, 5, 6]
+selected indexes: [7, 8, 9, 10, 11, 12, 13, 14, 15]
+next replan:      20343.9 ms（observation + 600 ms）
+```
+
+每个目标都由同一 request-bound observation TCP 组合得到。第一段从 observation 关节状态开始；后续段从上一个 waypoint 的完整预测关节状态开始。下表中的 TCP 位移是在机器人基座坐标系表达的目标位置减去 observation TCP 位置；`Δq` 是六个 arm joint delta 的 L2 范数；夹爪单位为 mm，残差列依次为 mm 与 mrad。
+
+| action | 时间戳（ms，距 observation） | ΔTCP xyz（mm） | IK residual（mm / mrad） | Δq（rad） | gripper target / delta（mm） | swept 最小距离（mm） | segment |
+|---:|---:|---|---:|---:|---:|---:|---|
+| 7 | 20443.9（+700） | [-2.270, 2.357, -1.766] | 0.145 / 0.067 | 0.0170 | 65.903 / +65.903 | 115.793 | SAFE_TO_EXECUTE |
+| 8 | 20543.9（+800） | [-0.879, 0.053, -1.237] | 0.076 / 0.051 | 0.0139 | 70.500 / +4.597 | 115.793 | SAFE_TO_EXECUTE |
+| 9 | 20643.9（+900） | [0.110, -1.998, -0.700] | 0.044 / 0.024 | 0.0124 | 79.700 / +9.201 | 116.636 | SAFE_TO_EXECUTE |
+| 10 | 20743.9（+1000） | [-0.436, -3.597, -0.162] | 0.050 / 0.035 | 0.0075 | 82.233 / +2.532 | 116.636 | SAFE_TO_EXECUTE |
+| 11 | 20843.9（+1100） | [-1.908, -1.688, 2.649] | 0.072 / 0.022 | 0.0081 | 82.075 / -0.158 | 116.876 | SAFE_TO_EXECUTE |
+| 12 | 20943.9（+1200） | [-1.005, 0.170, 5.623] | 0.026 / 0.017 | 0.0072 | 82.435 / +0.360 | 119.884 | SAFE_TO_EXECUTE |
+| 13 | 21043.9（+1300） | [0.461, 0.783, 8.413] | 0.050 / 0.024 | 0.0083 | 82.421 / -0.014 | 123.133 | SAFE_TO_EXECUTE |
+| 14 | 21143.9（+1400） | [1.552, 2.655, 12.403] | 0.045 / 0.010 | 0.0084 | 82.444 / +0.023 | 126.177 | SAFE_TO_EXECUTE |
+| 15 | 21243.9（+1500） | [2.602, 4.698, 18.722] | 0.153 / 0.050 | 0.0155 | 82.464 / +0.020 | 130.214 | SAFE_TO_EXECUTE |
+
+9/9 waypoint 的 IK 成功，位置与方向残差均低于 UR5_CAD 配置的 0.5 mm / 1 mrad tolerance。9 段 swept geometry 检查全部通过，使用既有 URDF visual mesh、cup world AABB 和安全阈值；实际最小距离为 115.793–130.214 mm，margin 约 1.38–1.46 mm。计划 `safe_prefix_indexes=[7,8,9,10,11,12,13,14,15]`、`blocked_action_index=null`、`plan_verdict=ALL_SELECTED_WAYPOINTS_PASSED`。这表示当前预测的 candidate plan 全部通过当前仿真检查，不表示这些 waypoint 会在未来全部执行；`nextReplanTimestamp=20343.9 ms` 仍是下一轮重规划边界。
+
+`gripper target` 最高为 82.464 mm，小于 110 mm 最大开口。9 项均为 `SAFE_ARM_MOTION`；本次没有合法 no-op waypoint。运行报告记载 `ik_count=9`、`playback_count=0`、`gripper_command_count=0`、`execution_count=0`，浏览器页面没有 page error 或 console error。
+
+### Rolling replan 队列语义
+
+官方 RTDE controller 将 waypoint 送入 `PoseTrajectoryInterpolator.schedule_waypoint()`。当目标时间不晚于 `curr_time` 时队列不变；新目标时间不晚于旧 `last_waypoint_time` 时，插值器把旧轨迹裁到当前时刻后接入新目标，旧 future waypoint 会被替换；晚于旧尾部的目标则从原尾部接续。证据：`../universal_manipulation_interface/umi/real_world/rtde_interpolation_controller.py:332-345`、`../universal_manipulation_interface/umi/common/pose_trajectory_interpolator.py:117-175`。
+
+`umi-scheduled-waypoint-plan.test.ts` 用纯数据模拟两轮 prediction：较早的 B waypoint 替换未到时的 A future 队列；较晚的 waypoint 接续旧队列；当前时刻或更早的 waypoint 不改变队列。模拟不调用 `SceneManager`，没有实际播放。
+
+### 验证与下一阶段门槛
+
+本轮定向回归覆盖 scheduler 选择、固定 observation pose reference、IK seed 连续传播、arm no-op、gripper-only/full no-op、IK 和安全失败截断、URDF limits、时间戳顺序、重规划时间及 queue replacement。`pnpm typecheck` 与 `pnpm build` 通过；`pnpm lint` 无 error，保留一个既有的 `WristCameraCapture.tsx` Hook dependency warning。全量 `pnpm test` 有 152 项通过、1 项失败：未修改的 `tests/kinematics.test.ts` 仍要求 `Part 1..6` 位于 `mount_link`，而当前已提交 URDF 将它们放在 `fixed_mount_link`；测试和 URDF 在本轮均未改动，该失败与本轮 waypoint 变更无关。
+
+**Timestamp-Scheduled UR5_CAD Playback 阶段判定：READY（可进入浏览器仿真 playback 阶段）。** 本轮验证的是候选计划生成和 swept safety；不代表已经实现或验证 timestamp-driven playback，也不构成实机执行许可。下一阶段应只在仿真里实现并验证 waypoint 时间驱动、运行中重规划替换和实际播放后的状态记录。实机控制器延迟仍未测量。

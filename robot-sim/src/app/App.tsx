@@ -22,6 +22,7 @@ import { useInferenceReplay } from './useInferenceReplay';
 import type { AutoLoopStepLimit } from './useInferenceReplay';
 import {
   DEFAULT_ROBOT_MODEL_ID,
+  doesLoadedRobotMatchConfig,
   findRobotConfig,
   ROBOT_MODELS,
   SIMULATION_CONFIG,
@@ -57,7 +58,11 @@ import { DatasetReplayPanel, type DatasetReplayState } from '../ui/DatasetReplay
 import { Wrist3PhysicsDebugPanel } from '../ui/Wrist3PhysicsDebugPanel';
 import type { Wrist3ExperimentTrace, Wrist3PhysicsDebugState } from '../sim/RobotBody';
 import { getObjectWorldAabb } from '../sim/tasks/cupApproachEvaluation';
-import { evaluateCupApproachPreContactSafety } from '../sim/tasks/cupApproachPreContactSafety';
+import {
+  cloneRobotAtJointValues,
+  createPreContactSafetyFailure,
+  evaluateCupApproachPreContactSafety,
+} from '../sim/tasks/cupApproachPreContactSafety';
 
 interface LoadedRobot {
   robotId: RobotModelId;
@@ -252,6 +257,7 @@ export const App = () => {
   const cameraPreviewImageDataRef = useRef<ImageData | null>(null);
   const cameraPreviewLastDrawRef = useRef(0);
   const cameraPreviewReadyRef = useRef(false);
+  const observationJointValuesRef = useRef<JointValues | null>(null);
   const observationIndexRef = useRef(0);
   const cameraFrameIndexRef = useRef(0);
   const playbackCompletionTokenRef = useRef<number | null>(null);
@@ -263,9 +269,7 @@ export const App = () => {
     currentModel.id === 'UR5_CAD' &&
     currentModel.file === ur5CadConfig.file;
   const singleActionRobotReady =
-    singleActionRobotSelected &&
-    loadedRobot?.robotId === 'UR5_CAD' &&
-    loadedRobot.urdfFile === ur5CadConfig.file;
+    singleActionRobotSelected && doesLoadedRobotMatchConfig(loadedRobot, ur5CadConfig);
   const hasWrist3Joint =
     modelId !== 'UR5_CAD' &&
     loadedRobot?.description.joints.some((joint) => joint.name === 'wrist_3_joint');
@@ -306,6 +310,7 @@ export const App = () => {
     setJointDeltaNorm(null);
     setIkMessage('');
     setJointValues({});
+    observationJointValuesRef.current = null;
     setJointBodyAngles({});
     setCommands({});
     setPhysicsReady(false);
@@ -507,8 +512,10 @@ export const App = () => {
       binary += String.fromCharCode(...latest.rgb.subarray(offset, offset + 0x8000));
     }
     const policyInferenceOnly = isPolicyInferenceOnlyEnabled() && !singleActionDebugEnabled;
+    const frameIndex = observationIndexRef.current++;
+    observationJointValuesRef.current = { ...latest.jointValues };
     return {
-      frame_index: observationIndexRef.current++,
+      frame_index: frameIndex,
       camera_frame_index: latest.camera_frame_index,
       camera_frame_timestamp_ms: latest.timestamp,
       camera0_rgb: btoa(binary),
@@ -540,6 +547,8 @@ export const App = () => {
     jointValues,
     tcpPose,
     getObservation,
+    getObservationJointValues: () =>
+      observationJointValuesRef.current ? { ...observationJointValuesRef.current } : null,
     waitForFreshCameraFrame,
     getCupWorldAabb: () => getObjectWorldAabb(cupEvaluationGeometryRef.current),
     getPreContactSafety: (currentJointValues, targetJointValues) =>
@@ -550,6 +559,34 @@ export const App = () => {
         targetJointValues,
         cupWorldAabb: getObjectWorldAabb(cupEvaluationGeometryRef.current),
       }),
+    getScheduledPlanSegmentSafety: (
+      segmentStartJoints,
+      segmentEndJoints,
+      segmentIndex,
+      cupWorldAabb,
+    ) => {
+      const robot = urdfVisualRobotRef.current;
+      const robotDescription = loadedRobot?.description ?? null;
+      if (!robot || !robotDescription) {
+        return createPreContactSafetyFailure(cupWorldAabb, 'URDF visual robot 未就绪。');
+      }
+      try {
+        const segmentRobot =
+          segmentIndex === 0 ? robot : cloneRobotAtJointValues(robot, segmentStartJoints);
+        return evaluateCupApproachPreContactSafety({
+          robot: segmentRobot,
+          description: robotDescription,
+          currentJointValues: segmentStartJoints,
+          targetJointValues: segmentEndJoints,
+          cupWorldAabb,
+        });
+      } catch (error) {
+        return createPreContactSafetyFailure(
+          cupWorldAabb,
+          error instanceof Error ? error.message : String(error),
+        );
+      }
+    },
     singleActionDebugEnabled,
   });
   useEffect(() => {
@@ -1350,6 +1387,25 @@ export const App = () => {
               >
                 运行 Official-style scheduling dry-run
               </button>
+              <p className="inference-progress">
+                使用 scheduler 选中索引逐项求解 IK，按连续关节状态检查 pre-contact
+                segment，并保留各路点时间戳；只生成计划，执行计数为 0。
+              </p>
+              <button
+                className="secondary-button"
+                disabled={
+                  !inference.canStartTimestampScheduledWaypointPlanDryRun ||
+                  !doesLoadedRobotMatchConfig(loadedRobot, currentModel) ||
+                  !physicsReady ||
+                  Boolean(loadError) ||
+                  datasetReplayEnabled ||
+                  experimentRecording
+                }
+                onClick={inference.startTimestampScheduledWaypointPlanDryRun}
+                type="button"
+              >
+                运行 Timestamp-Scheduled Waypoint Plan Dry-Run
+              </button>
               {inference.timestampSchedulingDryRunReport ? (
                 <pre className="inference-review">
                   {JSON.stringify(inference.timestampSchedulingDryRunReport, null, 2)}
@@ -1616,7 +1672,7 @@ export const App = () => {
                 datasetReplayActualPose={datasetReplayActualPose}
                 onPlaybackStep={applyReplayStep}
                 onPlaybackComplete={completeInferencePlayback}
-                cameraEnabled={Boolean(loadedRobot)}
+                cameraEnabled={doesLoadedRobotMatchConfig(loadedRobot, currentModel)}
                 tcpPose={tcpPose ?? DEFAULT_TARGET}
                 onCameraFrame={handleCameraFrame}
               />

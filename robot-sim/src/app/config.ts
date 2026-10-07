@@ -83,6 +83,19 @@ export const ROBOT_MODELS = [
 export type RobotModelId = (typeof ROBOT_MODELS)[number]['id'];
 export type RobotType = (typeof ROBOT_MODELS)[number]['type'];
 
+export interface LoadedRobotIdentity {
+  robotId: RobotModelId;
+  urdfFile: string;
+}
+
+export const doesLoadedRobotMatchConfig = (
+  loadedRobot: LoadedRobotIdentity | null,
+  robotConfig: Pick<RobotConfig, 'id' | 'file'>,
+): boolean =>
+  loadedRobot !== null &&
+  loadedRobot.robotId === robotConfig.id &&
+  loadedRobot.urdfFile === robotConfig.file;
+
 export const DEFAULT_ROBOT_MODEL_ID: RobotModelId = 'RS';
 
 export const SIMULATION_CONFIG = {

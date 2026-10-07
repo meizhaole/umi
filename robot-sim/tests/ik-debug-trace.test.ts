@@ -32,6 +32,50 @@ const seed = { shoulder: 0, elbow: 0 };
 const startPose = new Kinematics(description).forwardKinematics(seed);
 
 describe('IK 逐轮 trace', () => {
+  it('keeps a jaw mapping error inside the worker failure response', () => {
+    const messages: IkWorkerResponse[] = [];
+
+    expect(() =>
+      runIkSolve(
+        {
+          type: 'solve',
+          request_id: 'request-gripper-mapping-error',
+          episode_index: 0,
+          frame_index: 0,
+          description,
+          gripperJointNames: ['left_jaw_joint', 'right_jaw_joint'],
+          startPose,
+          initialJointValues: seed,
+          actions: [[0, 0, 0, 0, 0, 0, 0]],
+          predictionCount: 1,
+          configuredExecutionHorizon: 1,
+          executionCount: 1,
+          selectedActionIndexes: [0],
+          action_pose_repr: 'relative',
+          traceAllIterations: false,
+        },
+        (message) => messages.push(message),
+      ),
+    ).not.toThrow();
+
+    expect(messages).toContainEqual(
+      expect.objectContaining({
+        type: 'ik_record',
+        record: expect.objectContaining({
+          record_phase: 'started',
+          gripper_mapping_error: '配置的夹爪关节 left_jaw_joint 不存在或不是 prismatic joint。',
+        }),
+      }),
+    );
+    expect(messages.at(-1)).toMatchObject({
+      type: 'error',
+      error: {
+        code: 'IK_SOLVE_FAILED',
+        message: '配置的夹爪关节 left_jaw_joint 不存在或不是 prismatic joint。',
+      },
+    });
+  });
+
   it('应用请求级 tolerance 覆盖并在记录中保留有效 solver options', () => {
     const action = [0, 0.0006, 0, 0, 0, 0, 0];
     const solve = (ikOptions?: { positionTolerance: number; orientationTolerance: number }) => {

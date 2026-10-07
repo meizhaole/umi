@@ -133,6 +133,7 @@ export interface IKActionDebugRecord {
   requested_gripper_opening_m?: number;
   clamped_gripper_opening_m?: number;
   gripper_target_clamped?: boolean;
+  gripper_mapping_error?: string;
   left_jaw_target?: number | null;
   right_jaw_target?: number | null;
   joint_targets?: JointValues;

@@ -26,6 +26,10 @@ import type {
 import { poseErrorRotation, vectorLength } from '../utils/math';
 import { getGripperJoints, mapGripperOpeningToJoints } from './gripperMapping';
 import {
+  createUmiScheduledWaypointPlan,
+  type UmiScheduledWaypointPlan,
+} from './umiScheduledWaypointPlan';
+import {
   OFFICIAL_ACTION_EXEC_LATENCY_SECONDS,
   OFFICIAL_FRAME_LATENCY_SECONDS,
   OFFICIAL_UMI_FREQUENCY_HZ,
@@ -88,6 +92,7 @@ interface ReplayContext {
   jointValues: JointValues;
   tcpPose: Pose | null;
   getObservation: () => InferenceObservation | null;
+  getObservationJointValues?: () => JointValues | null;
   waitForFreshCameraFrame?: (
     options: FreshCameraFrameWaitOptions,
   ) => Promise<FreshCameraFrameWaitResult>;
@@ -95,6 +100,12 @@ interface ReplayContext {
   getPreContactSafety?: (
     currentJointValues: JointValues,
     targetJointValues: JointValues,
+  ) => PreContactSafetyResult;
+  getScheduledPlanSegmentSafety?: (
+    segmentStartJoints: JointValues,
+    segmentEndJoints: JointValues,
+    segmentIndex: number,
+    cupWorldAabb: WorldAabb | null,
   ) => PreContactSafetyResult;
 }
 
@@ -168,9 +179,11 @@ export const useInferenceReplay = ({
   jointValues,
   tcpPose,
   getObservation,
+  getObservationJointValues,
   waitForFreshCameraFrame,
   getCupWorldAabb,
   getPreContactSafety,
+  getScheduledPlanSegmentSafety,
   singleActionDebugEnabled,
 }: ReplayContext & { singleActionDebugEnabled: boolean }) => {
   const policyInferenceOnly = isPolicyInferenceOnlyEnabled() && !singleActionDebugEnabled;
@@ -202,9 +215,11 @@ export const useInferenceReplay = ({
     jointValues,
     tcpPose,
     getObservation,
+    getObservationJointValues,
     waitForFreshCameraFrame,
     getCupWorldAabb,
     getPreContactSafety,
+    getScheduledPlanSegmentSafety,
   });
   const socketRef = useRef<WebSocket | null>(null);
   const episodeIndexRef = useRef(-1);
@@ -221,6 +236,7 @@ export const useInferenceReplay = ({
   const mountedRef = useRef(true);
   const autoLoopRef = useRef<AutoLoopRuntime | null>(null);
   const timestampDryRunRef = useRef(false);
+  const timestampWaypointPlanDryRunRef = useRef(false);
   const timestampDryRunTimingRef = useRef<TimestampDryRunTiming | null>(null);
 
   contextRef.current = {
@@ -232,9 +248,11 @@ export const useInferenceReplay = ({
     jointValues,
     tcpPose,
     getObservation,
+    getObservationJointValues,
     waitForFreshCameraFrame,
     getCupWorldAabb,
     getPreContactSafety,
+    getScheduledPlanSegmentSafety,
   };
 
   const updateStatus = (nextStatus: InferenceStatus) => {
@@ -289,6 +307,7 @@ export const useInferenceReplay = ({
 
   const fail = (nextError: InferenceError, notifyServer: boolean, preserveReviewData = false) => {
     timestampDryRunRef.current = false;
+    timestampWaypointPlanDryRunRef.current = false;
     timestampDryRunTimingRef.current = null;
     const activeAutoLoop = autoLoopRef.current;
     if (activeAutoLoop) {
@@ -956,7 +975,13 @@ export const useInferenceReplay = ({
       gripper_command_count: 0,
     };
 
+    if (timestampWaypointPlanDryRunRef.current) {
+      runTimestampScheduledWaypointPlanDryRun(chunk, observationSnapshot, schedule, report);
+      return;
+    }
+
     timestampDryRunRef.current = false;
+    timestampWaypointPlanDryRunRef.current = false;
     timestampDryRunTimingRef.current = null;
     if (mountedRef.current) {
       setTimestampSchedulingDryRunReport(report);
@@ -969,6 +994,253 @@ export const useInferenceReplay = ({
     updateStatus('complete');
     publishDebugEvent('inference:timestamp_scheduling_dry_run', report);
     closeSocket(1000, 'timestamp scheduling dry-run complete');
+  };
+
+  const finishTimestampScheduledWaypointPlanDryRun = (
+    chunk: ActionChunk,
+    observationSnapshot: InferenceObservation,
+    schedule: ReturnType<typeof scheduleUmiActions>,
+    scheduleReport: Record<string, unknown>,
+    ikRecords: ReadonlyMap<number, IKActionDebugRecord>,
+    workerFailure?: { actionIndex: number | null; message: string },
+  ) => {
+    const context = contextRef.current;
+    const observationTcpPose = getObservationTcpPose(observationSnapshot);
+    const observationJointValues = context.getObservationJointValues?.();
+    let waypointPlan: UmiScheduledWaypointPlan | null = null;
+    let planError: string | null = null;
+
+    if (!context.description || !observationTcpPose) {
+      planError = 'UR5_CAD description 或 observation TCP 不可用。';
+    } else {
+      try {
+        waypointPlan = createUmiScheduledWaypointPlan({
+          requestId: chunk.request_id,
+          episodeIndex: chunk.episode_index,
+          frameIndex: chunk.frame_index,
+          observationTimestampMs: observationSnapshot.camera_frame_timestamp_ms,
+          observationTcpPose,
+          observationJointValues: observationJointValues ?? {},
+          observationGripperOpeningM:
+            observationSnapshot.robot0_gripper_width.at(-1)?.[0] ?? Number.NaN,
+          actionPoseRepr: chunk.action_pose_repr,
+          actions: chunk.actions,
+          schedule,
+          description: context.description,
+          gripperJointNames: context.robotConfig.gripperJointNames,
+          ikOptions: context.robotConfig.ikOptions,
+          ikRecords,
+          cupWorldAabb: context.getCupWorldAabb?.() ?? null,
+          evaluateSegmentSafety: (segmentStartJoints, segmentEndJoints, segmentIndex, cupAabb) =>
+            context.getScheduledPlanSegmentSafety?.(
+              segmentStartJoints,
+              segmentEndJoints,
+              segmentIndex,
+              cupAabb,
+            ) ?? createPreContactSafetyFailure(cupAabb, '分段 pre-contact safety 接口不可用。'),
+          ...(workerFailure ? { workerFailure } : {}),
+        });
+      } catch (error) {
+        planError = error instanceof Error ? error.message : String(error);
+      }
+    }
+
+    const report = {
+      ...scheduleReport,
+      waypoint_plan: waypointPlan,
+      waypoint_plan_error: planError,
+      ik_count: ikRecords.size,
+      playback_count: 0,
+      gripper_command_count: 0,
+      execution_count: 0,
+    };
+    timestampDryRunRef.current = false;
+    timestampWaypointPlanDryRunRef.current = false;
+    timestampDryRunTimingRef.current = null;
+    activeActionIndexRef.current = null;
+    activeChunkRef.current = null;
+    clearWorker(false);
+    workerRef.current = null;
+    if (mountedRef.current) {
+      setTimestampSchedulingDryRunReport(report);
+      setProgress(
+        waypointPlan?.plan_verdict ??
+          planError ??
+          'Timestamp-Scheduled Waypoint Plan Dry-Run 已停止',
+      );
+      setError(null);
+      setPlayback(null);
+    }
+    updateStatus('complete');
+    publishDebugEvent('inference:timestamp_scheduled_waypoint_plan_dry_run', report);
+    closeSocket(1000, 'timestamp scheduled waypoint plan dry-run complete');
+  };
+
+  const runTimestampScheduledWaypointPlanDryRun = (
+    chunk: ActionChunk,
+    observationSnapshot: InferenceObservation,
+    schedule: ReturnType<typeof scheduleUmiActions>,
+    scheduleReport: Record<string, unknown>,
+  ) => {
+    const context = contextRef.current;
+    const observationTcpPose = getObservationTcpPose(observationSnapshot);
+    const observationJointValues = context.getObservationJointValues?.();
+    const ikRecords = new Map<number, IKActionDebugRecord>();
+    timestampDryRunRef.current = false;
+    timestampWaypointPlanDryRunRef.current = false;
+    timestampDryRunTimingRef.current = null;
+    closeSocket(1000, 'timestamp waypoint plan inference complete');
+
+    if (!isUr5CadContext(context) || !observationTcpPose) {
+      finishTimestampScheduledWaypointPlanDryRun(
+        chunk,
+        observationSnapshot,
+        schedule,
+        scheduleReport,
+        ikRecords,
+        { actionIndex: null, message: 'UR5_CAD observation context 未就绪。' },
+      );
+      return;
+    }
+    if (!observationJointValues) {
+      finishTimestampScheduledWaypointPlanDryRun(
+        chunk,
+        observationSnapshot,
+        schedule,
+        scheduleReport,
+        ikRecords,
+        { actionIndex: null, message: '缺少 request-bound observation joint snapshot。' },
+      );
+      return;
+    }
+
+    const worker = new Worker(new URL('../workers/umiIk.worker.ts', import.meta.url), {
+      type: 'module',
+    });
+    workerRef.current = worker;
+    updateStatus('computing');
+    if (mountedRef.current) setProgress('正在按时间戳选择的 waypoint 顺序求解 IK');
+    publishDebugEvent('inference:timestamp_waypoint_plan_ik_started', {
+      request_id: chunk.request_id,
+      selected_action_indexes: schedule.selectedActionIndexes,
+      observation_joint_values: observationJointValues,
+      execution_count: 0,
+    });
+    workerTimeoutRef.current = window.setTimeout(
+      () => {
+        if (workerRef.current !== worker) return;
+        const failedIndex = activeActionIndexRef.current;
+        workerRef.current = null;
+        worker.terminate();
+        finishTimestampScheduledWaypointPlanDryRun(
+          chunk,
+          observationSnapshot,
+          schedule,
+          scheduleReport,
+          ikRecords,
+          {
+            actionIndex: failedIndex ?? schedule.selectedActionIndexes[0] ?? null,
+            message: `IK Worker 超时，已在 action ${failedIndex ?? 'unknown'} 停止计划。`,
+          },
+        );
+      },
+      IK_TIMEOUT_MS * Math.max(1, schedule.selectedActionIndexes.length),
+    );
+
+    worker.onmessage = (event: MessageEvent<IkWorkerResponse>) => {
+      if (workerRef.current !== worker) return;
+      const response = event.data;
+      if (response.type === 'progress') {
+        activeActionIndexRef.current = response.actionIndex;
+        return;
+      }
+      if (response.type === 'ik_record') {
+        if (response.record.record_phase === 'result') {
+          ikRecords.set(response.record.action_index, response.record);
+        }
+        return;
+      }
+      if (response.type === 'error') {
+        workerRef.current = null;
+        clearWorker(false);
+        finishTimestampScheduledWaypointPlanDryRun(
+          chunk,
+          observationSnapshot,
+          schedule,
+          scheduleReport,
+          ikRecords,
+          {
+            actionIndex: response.error.action_index ?? activeActionIndexRef.current,
+            message: response.error.message,
+          },
+        );
+        return;
+      }
+      if (response.type === 'solved') {
+        workerRef.current = null;
+        clearWorker(false);
+        finishTimestampScheduledWaypointPlanDryRun(
+          chunk,
+          observationSnapshot,
+          schedule,
+          scheduleReport,
+          ikRecords,
+        );
+      }
+    };
+    worker.onerror = (event: ErrorEvent) => {
+      if (workerRef.current !== worker) return;
+      workerRef.current = null;
+      clearWorker(false);
+      finishTimestampScheduledWaypointPlanDryRun(
+        chunk,
+        observationSnapshot,
+        schedule,
+        scheduleReport,
+        ikRecords,
+        {
+          actionIndex: activeActionIndexRef.current,
+          message: event.message || 'IK Worker 执行失败。',
+        },
+      );
+    };
+    worker.onmessageerror = () => {
+      if (workerRef.current !== worker) return;
+      workerRef.current = null;
+      clearWorker(false);
+      finishTimestampScheduledWaypointPlanDryRun(
+        chunk,
+        observationSnapshot,
+        schedule,
+        scheduleReport,
+        ikRecords,
+        {
+          actionIndex: activeActionIndexRef.current,
+          message: '无法读取 IK Worker 的返回消息。',
+        },
+      );
+    };
+    const selectedActionIndexes = [...schedule.selectedActionIndexes];
+    const request: IkWorkerRequest = {
+      type: 'solve',
+      request_id: chunk.request_id,
+      episode_index: chunk.episode_index,
+      frame_index: chunk.frame_index,
+      description: context.description as RobotDescription,
+      gripperJointNames: context.robotConfig.gripperJointNames,
+      ikOptions: context.robotConfig.ikOptions,
+      startPose: observationTcpPose,
+      initialJointValues: observationJointValues,
+      actions: selectedActionIndexes.map((actionIndex) => chunk.actions[actionIndex]),
+      predictionCount: chunk.actions.length,
+      configuredExecutionHorizon: selectedActionIndexes.length,
+      executionCount: 0,
+      selectedActionIndexes,
+      action_pose_repr: chunk.action_pose_repr,
+      traceAllIterations: false,
+      continueOnIkFailure: false,
+    };
+    worker.postMessage(request);
   };
 
   const handleActionChunk = (
@@ -2149,6 +2421,7 @@ export const useInferenceReplay = ({
       return;
     }
     timestampDryRunRef.current = false;
+    timestampWaypointPlanDryRunRef.current = false;
     timestampDryRunTimingRef.current = null;
     sendStop(pendingPlaybackRef.current ? [] : activeJointAnglesRef.current);
     pendingPlaybackRef.current = null;
@@ -2605,6 +2878,7 @@ export const useInferenceReplay = ({
       }
       workerRef.current?.terminate();
       workerRef.current = null;
+      timestampWaypointPlanDryRunRef.current = false;
       const socket = socketRef.current;
       if (socket?.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify({ type: 'stop' }));
@@ -2635,11 +2909,26 @@ export const useInferenceReplay = ({
   const startTimestampSchedulingDryRun = (): boolean => {
     if (!canStartTimestampSchedulingDryRun) return false;
     timestampDryRunRef.current = true;
+    timestampWaypointPlanDryRunRef.current = false;
     timestampDryRunTimingRef.current = null;
     if (mountedRef.current) {
       setError(null);
       setTimestampSchedulingDryRunReport(null);
       setProgress('正在获取新 observation 并运行单次策略推理');
+    }
+    start();
+    return true;
+  };
+
+  const startTimestampScheduledWaypointPlanDryRun = (): boolean => {
+    if (!canStartTimestampSchedulingDryRun) return false;
+    timestampDryRunRef.current = true;
+    timestampWaypointPlanDryRunRef.current = true;
+    timestampDryRunTimingRef.current = null;
+    if (mountedRef.current) {
+      setError(null);
+      setTimestampSchedulingDryRunReport(null);
+      setProgress('正在运行单次推理并准备时间化 waypoint 计划');
     }
     start();
     return true;
@@ -2684,6 +2973,7 @@ export const useInferenceReplay = ({
     canStartAutoLoop,
     canStartCupApproachTest,
     canStartTimestampSchedulingDryRun,
+    canStartTimestampScheduledWaypointPlanDryRun: canStartTimestampSchedulingDryRun,
     canStopAutoLoop: autoLoopRef.current !== null,
     canExecuteAction,
     step,
@@ -2692,6 +2982,7 @@ export const useInferenceReplay = ({
     startBoundedAutoLoop,
     startCupApproachTest,
     startTimestampSchedulingDryRun,
+    startTimestampScheduledWaypointPlanDryRun,
     stopAutoLoop,
     reviewData,
     timestampSchedulingDryRunReport,
