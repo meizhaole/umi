@@ -62,6 +62,8 @@ from umi.common.pose_util import pose_to_mat, mat_to_pose
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 
 def solve_table_collision(ee_pose, gripper_width, height_threshold):
+    # ee_pose 是原地更新的 TCP 位姿：[x, y, z, rx, ry, rz]，位置单位为米，后三项为轴角旋转向量（弧度）。
+    # 用夹爪宽度和指尖厚度构造末端平面的四个角点；若旋转、平移后的最低角点低于桌面阈值，只沿世界 z 轴抬高 TCP。
     finger_thickness = 25.5 / 1000
     keypoints = list()
     for dx in [-1, 1]:
@@ -74,6 +76,8 @@ def solve_table_collision(ee_pose, gripper_width, height_threshold):
     ee_pose[2] += delta
 
 def solve_sphere_collision(ee_poses, robots_config):
+    # 双臂碰撞近似为两个球体相交；sphere_center 是各机器人 TCP 坐标系内的球心，sphere_radius 与位姿位置均以米计。
+    # this_that_mat 表示 robot1 到 robot0 坐标系的固定相对变换；其中 0.89 米的 y 向偏移是当前场景约定。
     num_robot = len(robots_config)
     this_that_mat = np.identity(4)
     this_that_mat[:3, 3] = np.array([0, 0.89, 0]) # TODO: very hacky now!!!!
@@ -92,6 +96,7 @@ def solve_sphere_collision(ee_poses, robots_config):
             that_sphere_mat_global = this_that_mat @ that_ee_mat @ that_sphere_mat_local
             that_sphere_center = that_sphere_mat_global[:3, 3]
 
+            # 球心距小于半径和时，沿两球心连线各移动一半重叠量，再把修正后的球心换回 TCP 位姿。
             distance = np.linalg.norm(that_sphere_center - this_sphere_center)
             threshold = robots_config[this_robot_idx]['sphere_radius'] + robots_config[that_robot_idx]['sphere_radius']
             # print(that_sphere_center, this_sphere_center)
@@ -133,7 +138,7 @@ def main(input, output, robot_config,
     max_gripper_width = 0.09
     gripper_speed = 0.2
     
-    # load robot config file
+    # 读取机器人和夹爪参数；tx_left_right 用于把另一只机械臂的位姿变换到当前机械臂参考系。
     robot_config_data = yaml.safe_load(open(os.path.expanduser(robot_config), 'r'))
     
     # load left-right robot relative transform
@@ -143,7 +148,8 @@ def main(input, output, robot_config,
     robots_config = robot_config_data['robots']
     grippers_config = robot_config_data['grippers']
 
-    # load checkpoint
+    # 输入可直接指向 ckpt，也可指向训练输出目录；目录形式默认选择 checkpoints/latest.ckpt。
+    # 先在 CPU 上反序列化 checkpoint，以取得训练配置和权重载荷，稍后再把策略放到 CUDA。
     ckpt_path = input
     if not ckpt_path.endswith('.ckpt'):
         ckpt_path = os.path.join(ckpt_path, 'checkpoints', 'latest.ckpt')
@@ -152,11 +158,11 @@ def main(input, output, robot_config,
     print("model_name:", cfg.policy.obs_encoder.model_name)
     print("dataset_path:", cfg.task.dataset.dataset_path)
 
-    # setup experiment
+    # 控制周期 dt=1/frequency（秒）；shape_meta 描述策略需要的相机图像和低维观测尺寸、历史长度。
     dt = 1/frequency
 
     obs_res = get_real_obs_resolution(cfg.task.shape_meta)
-    # load fisheye converter
+    # 可选地将鱼眼相机图像按标定内参矫正，并重映射到训练配置指定的观测尺寸和模拟视场角。
     fisheye_converter = None
     if sim_fov is not None:
         assert camera_intrinsics is not None
@@ -169,6 +175,7 @@ def main(input, output, robot_config,
         )
 
     print("steps_per_inference:", steps_per_inference)
+    # 共享内存管理器供 SpaceMouse、按键监听和双臂环境进程间传递数据；离开上下文时统一关闭资源。
     with SharedMemoryManager() as shm_manager:
         with Spacemouse(shm_manager=shm_manager) as sm, \
             KeystrokeCounter() as key_counter, \
@@ -199,7 +206,7 @@ def main(input, output, robot_config,
             print("Waiting for camera")
             time.sleep(1.0)
 
-            # load match_dataset
+            # 可选读取演示数据集：回放缓冲区供按键 m 读取初始机器人状态，首帧图像用于与实时画面叠加对照。
             episode_first_frame_map = dict()
             match_replay_buffer = None
             if match_dataset is not None:
@@ -221,7 +228,7 @@ def main(input, output, robot_config,
                         episode_first_frame_map[episode_idx] = img
             print(f"Loaded initial frame for {len(episode_first_frame_map)} episodes")
 
-            # creating model
+            # 在环境/进程启动后构建工作区并恢复训练载荷，避免过早初始化模型与视频编码子进程争用 CUDA 上下文。
             # have to be done after fork to prevent 
             # duplicating CUDA context with ffmpeg nvenc
             cls = hydra.utils.get_class(cfg._target_)
@@ -233,6 +240,7 @@ def main(input, output, robot_config,
             if cfg.training.use_ema:
                 policy = workspace.ema_model
             policy.num_inference_steps = 16 # DDIM inference iterations
+            # 观测位姿表示和动作位姿表示由训练配置指定，转换函数会据此处理绝对位姿或相对位姿。
             obs_pose_rep = cfg.task.pose_repr.obs_pose_repr
             action_pose_repr = cfg.task.pose_repr.action_pose_repr
             print('obs_pose_rep', obs_pose_rep)
@@ -242,6 +250,7 @@ def main(input, output, robot_config,
             device = torch.device('cuda')
             policy.eval().to(device)
 
+            # 预热阶段采集一帧观测并执行一次无梯度推理，让模型/设备算子完成初始化；预测仅用于检查数据维度，不发送给机器人。
             print("Warming up policy inference")
             obs = env.get_obs()
             episode_start_pose = list()
@@ -253,6 +262,7 @@ def main(input, output, robot_config,
                 episode_start_pose.append(pose)
             with torch.no_grad():
                 policy.reset()
+                # 将环境观测整理为模型输入；随后增加 batch 维度并移到 CUDA。策略原始动作每臂 10 维，转换后为 7 维执行目标。
                 obs_dict_np = get_real_umi_obs_dict(
                     env_obs=obs, shape_meta=cfg.task.shape_meta, 
                     obs_pose_repr=obs_pose_rep,
@@ -270,6 +280,7 @@ def main(input, output, robot_config,
             print('Ready!')
             while True:
                 # ========= human control loop ==========
+                # 每轮人工控制开始时，以驱动当前目标位姿和夹爪开度作为增量控制的起点；默认只操作第 0 臂。
                 print("Human in control!")
                 robot_states = env.get_robot_state()
                 target_pose = np.stack([rs['TargetTCPPose'] for rs in robot_states])
@@ -282,15 +293,15 @@ def main(input, output, robot_config,
                 t_start = time.monotonic()
                 iter_idx = 0
                 while True:
-                    # calculate timing
+                    # 使用单调时钟定义控制周期：提前 command_latency 采样 SpaceMouse，目标命令安排到下一周期边界。
                     t_cycle_end = t_start + (iter_idx + 1) * dt
                     t_sample = t_cycle_end - command_latency
                     t_command_target = t_cycle_end + dt
 
-                    # pump obs
+                    # 每个周期读取最新观测，用于图像显示、episode 编号和可选的演示首帧对照。
                     obs = env.get_obs()
 
-                    # visualize
+                    # 可选把所选演示 episode 的首帧叠加到实时画面；下方事件循环负责读取窗口按键。
                     episode_id = env.replay_buffer.n_episodes
                     vis_img = obs[f'camera{match_camera}_rgb'][-1]
                     match_episode_id = episode_id
@@ -334,6 +345,8 @@ def main(input, output, robot_config,
                     _ = cv2.pollKey()
                     press_events = key_counter.get_press_events()
                     start_policy = False
+                    # q 退出；c 交给策略；e/w 切换匹配 episode；m 移动到匹配示教首姿态；退格确认后丢弃记录。
+                    # a 选择全部机械臂，1/2 分别只选择第 0/1 臂；选择结果决定后续 SpaceMouse 增量应用到哪些目标。
                     for key_stroke in press_events:
                         if key_stroke == KeyCode(char='q'):
                             # Exit program
@@ -352,7 +365,7 @@ def main(input, output, robot_config,
                             if match_episode is not None:
                                 match_episode = max(match_episode - 1, 0)
                         elif key_stroke == KeyCode(char='m'):
-                            # move the robot
+                            # 将匹配 episode 的首个 TCP 位姿和夹爪宽度作为新目标，并等待这段 3 秒的示教姿态移动完成。
                             duration = 3.0
                             ep = match_replay_buffer.get_episode(match_episode_id)
 
@@ -368,6 +381,7 @@ def main(input, output, robot_config,
                             time.sleep(duration)
 
                         elif key_stroke == Key.backspace:
+                            # 仅在二次确认后丢弃当前 episode 记录，并清空按键事件，避免重复触发。
                             if click.confirm('Are you sure to drop an episode?'):
                                 env.drop_episode()
                                 key_counter.clear()
@@ -381,6 +395,7 @@ def main(input, output, robot_config,
                     if start_policy:
                         break
 
+                    # 等待到采样时刻后读取经坐标变换的 SpaceMouse 六维状态；平移与旋转增量按频率缩放为单周期目标变化。
                     precise_wait(t_sample)
                     # get teleop command
                     sm_state = sm.get_motion_state_transformed()
@@ -388,12 +403,14 @@ def main(input, output, robot_config,
                     dpos = sm_state[:3] * (0.5 / frequency)
                     drot_xyz = sm_state[3:] * (1.5 / frequency)
 
+                    # 将 XYZ 欧拉角增量左乘到当前轴角姿态；同一增量应用于当前选中的机械臂。
                     drot = st.Rotation.from_euler('xyz', drot_xyz)
                     for robot_idx in control_robot_idx_list:
                         target_pose[robot_idx, :3] += dpos
                         target_pose[robot_idx, 3:] = (drot * st.Rotation.from_rotvec(
                             target_pose[robot_idx, 3:])).as_rotvec()
 
+                    # SpaceMouse 按钮 0 逐步闭合夹爪、按钮 1 逐步张开；目标开度限制在 0 到最大开度之间。
                     dpos = 0
                     if sm.is_button_pressed(0):
                         # close gripper
@@ -403,19 +420,19 @@ def main(input, output, robot_config,
                     for robot_idx in control_robot_idx_list:
                         gripper_target_pos[robot_idx] = np.clip(gripper_target_pos[robot_idx] + dpos, 0, max_gripper_width)
 
-                    # solve collision with table
+                    # 先修正每个受控末端与桌面的干涉，再统一检查双臂球体近似碰撞。
                     for robot_idx in control_robot_idx_list:
                         solve_table_collision(
                             ee_pose=target_pose[robot_idx],
                             gripper_width=gripper_target_pos[robot_idx],
                             height_threshold=robots_config[robot_idx]['height_threshold'])
                     
-                    # solve collison between two robots
                     solve_sphere_collision(
                         ee_poses=target_pose,
                         robots_config=robots_config
                     )
 
+                    # 环境动作按每臂 7 维打包：[位置 3、轴角旋转向量 3、夹爪开度 1]。
                     action = np.zeros((7 * target_pose.shape[0],))
 
                     for robot_idx in range(target_pose.shape[0]):
@@ -423,7 +440,7 @@ def main(input, output, robot_config,
                         action[7 * robot_idx + 6] = gripper_target_pos[robot_idx]
 
 
-                    # execute teleop command
+                    # 将单调时钟目标时刻换算为环境使用的墙上时钟时间；人工遥操作不启用延迟补偿。
                     env.exec_actions(
                         actions=[action], 
                         timestamps=[t_command_target-time.monotonic()+time.time()],
@@ -433,14 +450,14 @@ def main(input, output, robot_config,
                 
                 # ========== policy control loop ==============
                 try:
-                    # start episode
+                    # 按未来 1 秒后的墙上时钟时刻开始新 episode，同时建立对应的单调时钟基准供周期调度使用。
                     policy.reset()
                     start_delay = 1.0
                     eval_t_start = time.time() + start_delay
                     t_start = time.monotonic() + start_delay
                     env.start_episode(eval_t_start)
 
-                    # get current pose
+                    # 记录 episode 起始时各机械臂末端的最新位置和轴角姿态，供相对位姿观测/动作还原使用。
                     obs = env.get_obs()
                     episode_start_pose = list()
                     for robot_id in range(len(robots_config)):
@@ -450,23 +467,23 @@ def main(input, output, robot_config,
                         ], axis=-1)[-1]
                         episode_start_pose.append(pose)
 
-                    # wait for 1/30 sec to get the closest frame actually
-                    # reduces overall latency
+                    # 开始前额外留出 1/60 秒，使采集到的相机帧更贴近 episode 起点，并减少首轮观测延迟。
                     frame_latency = 1/60
                     precise_wait(eval_t_start - frame_latency, time_func=time.time)
                     print("Started!")
                     iter_idx = 0
                     perv_target_pose = None
                     while True:
-                        # calculate timing
+                        # 每次策略调用覆盖 steps_per_inference 个控制周期；本轮调度边界据此向前推进。
                         t_cycle_end = t_start + (iter_idx + steps_per_inference) * dt
 
-                        # get obs
+                        # 取相机、机器人和夹爪观测及其时间戳；最新时间戳用于将预测动作对齐到真实采样时刻。
                         obs = env.get_obs()
                         obs_timestamps = obs['timestamp']
                         print(f'Obs latency {time.time() - obs_timestamps[-1]}')
 
-                        # run inference
+                        # 在无梯度模式下完成观测表示转换、批次维添加、策略预测和动作表示还原。
+                        # 模型输出每臂 10 维（位姿表示 9 维加夹爪 1 维），转换后每臂为环境需要的 7 维 TCP/夹爪目标。
                         with torch.no_grad():
                             s = time.time()
                             obs_dict_np = get_real_umi_obs_dict(
@@ -481,7 +498,7 @@ def main(input, output, robot_config,
                             action = get_real_umi_action(raw_action, obs, action_pose_repr)
                             print('Inference latency:', time.time() - s)
                         
-                        # convert policy action to env actions
+                        # 对预测时域内每一步动作应用桌面和双臂碰撞修正；reshape 仅把连续的每臂 7 维分组成机器人维度。
                         this_target_poses = action
                         assert this_target_poses.shape[1] == len(robots_config) * 7
                         for target_pose in this_target_poses:
@@ -498,8 +515,7 @@ def main(input, output, robot_config,
                                 robots_config=robots_config
                             )
 
-                        # deal with timing
-                        # the same step actions are always the target for
+                        # 预测序列的时间戳从最新观测时刻起按 dt 等间隔排列，只提交仍在未来且预留 10 毫秒调度余量的动作。
                         action_timestamps = (np.arange(len(action), dtype=np.float64)
                             ) * dt + obs_timestamps[-1]
                         print(dt)
@@ -507,7 +523,7 @@ def main(input, output, robot_config,
                         curr_time = time.time()
                         is_new = action_timestamps > (curr_time + action_exec_latency)
                         if np.sum(is_new) == 0:
-                            # exceeded time budget, still do something
+                            # 推理超出整段动作预算时，保留最后一个目标并安排到下一个可用控制周期，避免本轮没有新命令。
                             this_target_poses = this_target_poses[[-1]]
                             # schedule on next available step
                             next_step_idx = int(np.ceil((curr_time - eval_t_start) / dt))
@@ -518,7 +534,7 @@ def main(input, output, robot_config,
                             this_target_poses = this_target_poses[is_new]
                             action_timestamps = action_timestamps[is_new]
 
-                        # execute actions
+                        # 提交未来动作序列并按机器人/夹爪配置补偿执行延迟；环境会过滤已过期时间戳并调度各路 waypoint。
                         env.exec_actions(
                             actions=this_target_poses,
                             timestamps=action_timestamps,
@@ -526,7 +542,7 @@ def main(input, output, robot_config,
                         )
                         print(f"Submitted {len(this_target_poses)} steps of actions.")
 
-                        # visualize
+                        # 显示 camera0_rgb 最新帧和 episode 已运行时长；当前两个显示槽位读取同一帧，策略循环期间仍监听停止按键。
                         episode_id = env.replay_buffer.n_episodes
                         obs_left_img = obs['camera0_rgb'][-1]
                         obs_right_img = obs['camera0_rgb'][-1]
@@ -555,6 +571,7 @@ def main(input, output, robot_config,
                                 print('Stopped.')
                                 stop_episode = True
 
+                        # max_duration 的单位为秒；超时或按 s 后结束记录并返回人工控制循环。
                         t_since_start = time.time() - eval_t_start
                         if t_since_start > max_duration:
                             print("Max Duration reached.")
@@ -569,7 +586,7 @@ def main(input, output, robot_config,
 
                 except KeyboardInterrupt:
                     print("Interrupted!")
-                    # stop robot.
+                    # 捕获 Ctrl+C 时结束当前 episode 记录，并让外层循环恢复人工控制。
                     env.end_episode()
                 
                 print("Stopped.")
