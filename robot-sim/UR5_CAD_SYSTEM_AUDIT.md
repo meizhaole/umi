@@ -6,7 +6,7 @@
 
 > 本文以当前 checkout 源码、实际 checkpoint 元数据和本地运行记录为证据。用户指定的 umi_system_debug_merged(2).md 在当前 checkout 中未找到；本次以 ../doc/umi_system_debug_merged.md（文档标注审计日期 2026-10-03）作为历史清单，并用当前源码逐项复核。旧文档保持原样，仍是 historical baseline；本文是 UR5_CAD current source of truth。
 >
-> 本轮只读源码、checkpoint 元数据和既有日志，没有运行 policy、仿真或机器人动作。debug 下的 JSON 是本机生成记录，已在本文中提炼关键结果。
+> 本次复核了当前官方源码、checkpoint 元数据和既有日志，并实现了纯时间戳调度干跑与 synthetic timestamp tests。没有运行真实 Cup Approach，也没有执行机器人动作。debug 下的 JSON 是本机生成记录，已在本文中提炼关键结果。
 
 ## 最终判定
 
@@ -105,11 +105,27 @@ T_target[i] = T_observation × T_relative[i]
 
 ## 官方实机 inference 与 execution 时序
 
-scripts_real/eval_real_umi.py 默认 steps_per_inference=6、frequency=10 Hz，因此 dt=0.1 s。每轮先取 observation 并完成 policy.predict_action，再由最新 observation timestamp 生成 16 个动作时间戳，概念上为 obs_time + [0..15]×dt；之后只保留时间戳晚于当前时间加 command latency 的动作。官方实机评估没有把 steps_per_inference=6 直接写成 action_pred[0:6]。如推理耗时使整个预测都过期，脚本会把最后一个预测目标安排到下一个可用时隙。证据：../universal_manipulation_interface/scripts_real/eval_real_umi.py:86-89,371-437。
+当前官方脚本的 `frequency=10 Hz`，所以 `dt = 1 / frequency = 0.1 s`。每轮在 `env.get_obs()` 后运行 `policy.predict_action`，把 `result['action_pred'][0]` 转为环境动作。时间戳按 `action_timestamps = np.arange(len(action), dtype=np.float64) * dt + obs_timestamps[-1]` 生成，其中 `obs_timestamps[-1]` 是 observation 相机时间戳。过滤使用 `curr_time = time.time()` 和源码常量 `action_exec_latency = 0.01`：只保留 `action_timestamps > curr_time + action_exec_latency`，等于 cutoff 的 action 也过期。证据：`../universal_manipulation_interface/scripts_real/eval_real_umi.py:86-89,390-418`。
 
-筛出的 targets 与 timestamps 传给 UmiEnv.exec_actions(compensate_latency=True)。环境会丢弃已过期目标，并分别按 robot action latency 0.18 s 与 gripper action latency 0.1 s 调整 waypoint 时间；UR5 RTDE waypoint 控制器以 500 Hz 工作。高层 inference 周期结束后，eval 脚本等待至该周期末，再获取新 observation 和重新推理。证据：../universal_manipulation_interface/scripts_real/eval_real_umi.py:136-169,479-481；../universal_manipulation_interface/umi/real_world/umi_env.py:231-250,446-483。
+如果没有任何 timestamp 通过筛选，官方保留 `this_target_poses[-1]`，计算 `next_step_idx = ceil((curr_time - eval_t_start) / dt)`，并将它的时间改为 `eval_t_start + next_step_idx * dt`。否则，原样选择所有通过筛选的 action 和 timestamp。这里的 `steps_per_inference=6` 不切片预测数组；它参与 `t_cycle_end = t_start + (iter_idx + steps_per_inference) * dt`，每轮完成后 `iter_idx += steps_per_inference`，因此默认每 0.6 秒推进一次 inference 周期，并在 `precise_wait(t_cycle_end - frame_latency)` 后取下一 observation。官方设置 `frame_latency = 1/60 s`。证据：`../universal_manipulation_interface/scripts_real/eval_real_umi.py:86-89,386-437,479-481`。
 
-checkpoint 的 n_action_steps=8 与 eval 的 steps_per_inference=6 不是同一个量。前者不是当前 TIMM policy 实际动作切片；后者控制下一次 observation / inference 的周期推进。官方一轮推理会按时间戳提交仍有效的候选，不保证每轮恰好提交 6 个 action，也不保证 action index 0 一定仍未过期。
+`UmiEnv.exec_actions(compensate_latency=True)` 在接收时用 `receive_time=time.time()` 再筛一次 `timestamps > receive_time`；这层没有 fallback。剩下的每个机器人 waypoint 时间设为 `timestamp - 0.18 s`，每个 gripper waypoint 时间设为 `timestamp - 0.1 s`。这些延迟来自本次 eval 创建 UmiEnv 时设置的 `robot_action_latency`、`gripper_action_latency`，不是 policy scheduler 的 0.01 s stale cutoff。UR5 控制器以 500 Hz 运行。证据：`../universal_manipulation_interface/scripts_real/eval_real_umi.py:136-169`；`../universal_manipulation_interface/umi/real_world/umi_env.py:231-250,446-483`。
+
+RTDE `schedule_waypoint` 将每项命令各自放入容量 256 的 FIFO shared-memory queue，控制进程每 500 Hz 最多取一项；队列不会把新 inference 的命令合并成一个 chunk。控制进程把 Unix timestamp 转为 monotonic 时间，再调用 `PoseTrajectoryInterpolator.schedule_waypoint`。新目标时间不晚于当前插入时间时插值轨迹不变；新目标位于当前时间之后且不晚于已有最后 waypoint 时，会裁掉当前时刻后的旧未来轨迹并插入新目标；晚于已有最后 waypoint 时则延续轨迹追加。速度约束还可能把实际 waypoint 到达时间推后。证据：`../universal_manipulation_interface/umi/real_world/rtde_interpolation_controller.py:109-113,199-208,249-305,331-345`；`../universal_manipulation_interface/umi/common/pose_trajectory_interpolator.py:117-185`。
+
+checkpoint 的 `n_action_steps=8`、16 项 `action_pred` 与 eval 的 `steps_per_inference=6` 是不同概念。eval 不保证每轮恰好提交六项，也不保证 index 0 未过期；下一轮较早的 waypoint 可以替换控制器插值器里尚未到达的未来轨迹。
+
+## Official-style timestamp scheduling implementation
+
+新增 `src/app/umiActionScheduler.ts` 作为纯函数调度器。它仅根据完整动作数、相机 observation timestamp、推理请求/响应时间、10 Hz、steps_per_inference、官方 stale cutoff lead time 和仿真 command latency 返回时间索引、过期项、fallback、每项时间诊断与下一次重规划时间；它不执行 IK、playback、gripper 或 SceneManager 更新。页面的 UR5_CAD dry-run 获取一帧 observation 并进行一次完整 policy inference，拿到完整 `action_chunk` 后即计算并停止；`execution_count=0`、`ik_count=0`、`playback_count=0`、`gripper_command_count=0`。
+
+**OFFICIAL UMI semantics**：动作时间戳锚定最新 observation camera timestamp；过期比较为严格 `action_timestamp > current_time + 0.01 s`；全过期时只回退最后一项，按 `eval_t_start + ceil((current_time-eval_t_start)/dt) * dt` 设时间。下一次 inference deadline 使用 `eval_t_start + (iteration_index + steps_per_inference) * dt - frame_latency`。`frequency=10 Hz` 同时决定动作间隔和高层时间步长；`steps_per_inference=6` 推进 6 个时间步。
+
+**ROBOT-SIM approximation**：相机帧、observation 创建、WebSocket 请求/响应和调度当前时间统一使用浏览器 `performance.now()` 的毫秒值，时序记录不与 `Date.now()` 或 Python 时间比较。browser dry-run 将新 observation 的相机 timestamp 加官方 `frame_latency=1/60 s` 作为单次周期的 `eval_t_start` 近似值，当前只有 iteration index 0。官方评估 stale cutoff 的 0.01 s 作为单独参数保留；仿真没有实测 controller command latency，`simulated_command_latency_seconds=0`，事件记录 `SIMULATION_LATENCY_ASSUMPTION=0`。因此本 dry-run 可以核对同一浏览器时钟上的调度索引，但不代表真实 RTDE 延迟补偿或完整实机 timing。
+
+`action_pose_repr=relative` 的目标位姿仍全部使用本次 observation TCP：`T_target[i] = T_observation @ T_relative[i]`。scheduler 只返回 index，不重写 pose reference。far-cup Step 18（`request_id=a1932a9db3d040f190248efa7d857497`）没有 observation 创建、推理请求发送和推理响应接收的同一时钟记录，因此 `HISTORICAL_EXACT_SELECTION = INCONCLUSIVE`；既有 16 项预测仍可核对 action index、相对位姿参考和时间戳相对结构，不能据此还原当时 selected indexes。
+
+Synthetic timestamp tests 覆盖 10 Hz/16 项、230 ms inference latency、全过期 fallback、6-step replan cadence、零仿真 command latency、非零 stale lead、同一 monotonic clock 与 16 个共享 observation TCP 参考的目标。普通单动作、3-step/10-step auto-loop、Cup Approach action0-only 和普通 action chunk 执行仍走原分支，scheduler 结果不会传入执行路径。
 
 ## robot-sim 的 action slicing 与执行时域
 
@@ -222,7 +238,7 @@ Step 18 action0 的 target displacement 是 0.357045 mm，旋转范数 0.000584 
 2. far-cup Step 18 的 action0 在 IK tolerance 内，因此迭代数为 0、arm joint delta 为 0，随后被执行门禁阻断。它不能证明后续 chunk 不可执行；index 1–5 有干跑结果，index 6–15 没有 IK 结果。
 3. 20-step Cup Approach 的安全检查目前覆盖当轮 action0。进入 Cup Approach chunk 行为评估前，需要逐项确认计划执行 target 的 IK 和整段 pre-contact 路径，再取得真实 playback 与执行后新帧证据。
 4. 本地日志没有 3-step / 10-step run 快照可用于复核；源码支持这两种轮数，用户提供的“已通过”状态不等于当前目录可独立重建的运行证据。
-5. 仿真 action scheduling 不使用官方 action timestamps，也没有实机 controller latency。仿真 actual_after_action 与相机图像均来自浏览器模型。
+5. 现有 playback 与 Cup Approach 执行路径仍不使用官方 action timestamps；新增模块只生成 dry-run 结果，不驱动执行。仿真没有实测 RTDE/controller latency，actual_after_action 与相机图像均来自浏览器模型。
 6. policy 图像处理代码路径已对齐官方 helper，但 GoPro 镜头模型、TCP-camera 实体外参和训练图像分布还没有做实测对照。
 7. server/logs/README.md 的 action_pose_repr 说明落后于源码，需要在后续文档维护时更新；本次未编辑该文件。
 

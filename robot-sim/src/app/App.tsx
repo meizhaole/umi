@@ -1324,6 +1324,40 @@ export const App = () => {
             </button>
           ) : null}
 
+          {modelId === 'UR5_CAD' ? (
+            <section className="panel">
+              <div className="panel-heading">
+                <div>
+                  <p className="eyebrow">OFFICIAL UMI TIMING</p>
+                  <h2>时间戳调度干跑</h2>
+                </div>
+              </div>
+              <p className="inference-progress">
+                单次 observation 与策略推理，只输出时间索引；IK、动作回放和夹爪命令均为 0。
+              </p>
+              <button
+                className="secondary-button"
+                disabled={
+                  !inference.canStartTimestampSchedulingDryRun ||
+                  !loadedRobot ||
+                  !physicsReady ||
+                  Boolean(loadError) ||
+                  datasetReplayEnabled ||
+                  experimentRecording
+                }
+                onClick={inference.startTimestampSchedulingDryRun}
+                type="button"
+              >
+                运行 Official-style scheduling dry-run
+              </button>
+              {inference.timestampSchedulingDryRunReport ? (
+                <pre className="inference-review">
+                  {JSON.stringify(inference.timestampSchedulingDryRunReport, null, 2)}
+                </pre>
+              ) : null}
+            </section>
+          ) : null}
+
           {singleActionDebugEnabled && !singleActionRobotSelected ? (
             <div className="inference-error" role="alert">
               Single-action validation is only available for UR5_CAD.

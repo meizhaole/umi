@@ -26,6 +26,13 @@ import type {
 import { poseErrorRotation, vectorLength } from '../utils/math';
 import { getGripperJoints, mapGripperOpeningToJoints } from './gripperMapping';
 import {
+  OFFICIAL_ACTION_EXEC_LATENCY_SECONDS,
+  OFFICIAL_FRAME_LATENCY_SECONDS,
+  OFFICIAL_UMI_FREQUENCY_HZ,
+  OFFICIAL_UMI_STEPS_PER_INFERENCE,
+  scheduleUmiActions,
+} from './umiActionScheduler';
+import {
   createPreContactSafetyFailure,
   type PreContactSafetyResult,
 } from '../sim/tasks/cupApproachPreContactSafety';
@@ -98,6 +105,12 @@ interface PlaybackSnapshot {
   observation: InferenceObservation | null;
 }
 
+interface TimestampDryRunTiming {
+  observationCreatedTimestampMs: number;
+  inferenceRequestSentTimestampMs: number;
+  episodeStartTimestampMs: number;
+}
+
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null;
 
@@ -166,6 +179,10 @@ export const useInferenceReplay = ({
   const [error, setError] = useState<InferenceError | null>(null);
   const [playback, setPlayback] = useState<PlaybackChunk | null>(null);
   const [reviewData, setReviewData] = useState<Record<string, unknown> | null>(null);
+  const [timestampSchedulingDryRunReport, setTimestampSchedulingDryRunReport] = useState<Record<
+    string,
+    unknown
+  > | null>(null);
   const [autoLoop, setAutoLoop] = useState<AutoLoopState>({
     runId: null,
     step: 0,
@@ -203,6 +220,8 @@ export const useInferenceReplay = ({
   const playbackTokenRef = useRef(0);
   const mountedRef = useRef(true);
   const autoLoopRef = useRef<AutoLoopRuntime | null>(null);
+  const timestampDryRunRef = useRef(false);
+  const timestampDryRunTimingRef = useRef<TimestampDryRunTiming | null>(null);
 
   contextRef.current = {
     robotId,
@@ -269,6 +288,8 @@ export const useInferenceReplay = ({
   };
 
   const fail = (nextError: InferenceError, notifyServer: boolean, preserveReviewData = false) => {
+    timestampDryRunRef.current = false;
+    timestampDryRunTimingRef.current = null;
     const activeAutoLoop = autoLoopRef.current;
     if (activeAutoLoop) {
       activeAutoLoop.freshCameraWaitController?.abort();
@@ -806,12 +827,27 @@ export const useInferenceReplay = ({
           single_action_validation: true,
         }
       : observation;
-    lastObservationRef.current = policyObservation;
+    let requestObservation = policyObservation;
+    if (timestampDryRunRef.current) {
+      requestObservation = { ...policyObservation };
+      delete requestObservation.policy_inference_only;
+    }
+    lastObservationRef.current = requestObservation;
+    const observationCreatedTimestampMs = performance.now();
+    const inferenceRequestSentTimestampMs = performance.now();
+    if (timestampDryRunRef.current) {
+      timestampDryRunTimingRef.current = {
+        observationCreatedTimestampMs,
+        inferenceRequestSentTimestampMs,
+        episodeStartTimestampMs:
+          observation.camera_frame_timestamp_ms + OFFICIAL_FRAME_LATENCY_SECONDS * 1000,
+      };
+    }
     socket.send(
       JSON.stringify({
         type: 'observation',
         episode_index: episodeIndexRef.current,
-        ...policyObservation,
+        ...requestObservation,
       }),
     );
     if (mountedRef.current) setProgress('观测已发送，正在推理下一步动作');
@@ -828,7 +864,145 @@ export const useInferenceReplay = ({
     });
   };
 
-  const handleActionChunk = (chunk: ActionChunk) => {
+  const finishTimestampSchedulingDryRun = (
+    chunk: ActionChunk,
+    observationSnapshot: InferenceObservation,
+    inferenceResponseReceivedTimestampMs: number,
+  ) => {
+    const timing = timestampDryRunTimingRef.current;
+    if (!timing) {
+      fail(
+        {
+          code: 'TIMESTAMP_DRY_RUN_TIMING_MISSING',
+          stage: 'scheduling',
+          message: '时间戳调度干跑缺少统一单调时钟记录。',
+          request_id: chunk.request_id,
+          episode_index: chunk.episode_index,
+          frame_index: chunk.frame_index,
+        },
+        false,
+      );
+      return;
+    }
+    const observationTcpPose = getObservationTcpPose(observationSnapshot);
+    if (!observationTcpPose) {
+      fail(
+        {
+          code: 'INVALID_OBSERVATION_TCP',
+          stage: 'scheduling',
+          message: '时间戳调度干跑缺少有效的 observation TCP pose。',
+          request_id: chunk.request_id,
+          episode_index: chunk.episode_index,
+          frame_index: chunk.frame_index,
+        },
+        false,
+      );
+      return;
+    }
+
+    const schedulerCurrentTimestampMs = performance.now();
+    const schedule = scheduleUmiActions({
+      actionCount: chunk.actions.length,
+      observationTimestampMs: observationSnapshot.camera_frame_timestamp_ms,
+      inferenceRequestSentTimestampMs: timing.inferenceRequestSentTimestampMs,
+      inferenceResponseReceivedTimestampMs,
+      schedulerCurrentTimestampMs,
+      episodeStartTimestampMs: timing.episodeStartTimestampMs,
+      iterationIndex: 0,
+      frequencyHz: OFFICIAL_UMI_FREQUENCY_HZ,
+      stepsPerInference: OFFICIAL_UMI_STEPS_PER_INFERENCE,
+      actionExecLatencySeconds: OFFICIAL_ACTION_EXEC_LATENCY_SECONDS,
+      simulatedCommandLatencySeconds: 0,
+    });
+    const report = {
+      request_id: chunk.request_id,
+      episode_index: chunk.episode_index,
+      frame_index: chunk.frame_index,
+      camera_frame_index: observationSnapshot.camera_frame_index ?? null,
+      camera_timestamp_ms: observationSnapshot.camera_frame_timestamp_ms,
+      observation_created_timestamp_ms: timing.observationCreatedTimestampMs,
+      inference_request_sent_timestamp_ms: timing.inferenceRequestSentTimestampMs,
+      inference_response_received_timestamp_ms: inferenceResponseReceivedTimestampMs,
+      inference_round_trip_ms:
+        inferenceResponseReceivedTimestampMs - timing.inferenceRequestSentTimestampMs,
+      scheduler_current_timestamp_ms: schedulerCurrentTimestampMs,
+      frequency_hz: schedule.frequencyHz,
+      dt_ms: schedule.dtMs,
+      steps_per_inference: schedule.stepsPerInference,
+      action_count: chunk.actions.length,
+      action_pose_repr: chunk.action_pose_repr,
+      action_pred_shape: chunk.action_pred_shape,
+      prediction_horizon: chunk.prediction.length,
+      observation_tcp_snapshot: observationTcpPose,
+      target_pose_reference: 'all actions retain the original observation TCP reference',
+      clock_domain: schedule.timingDiagnostics.clockDomain,
+      action_exec_latency_seconds: schedule.actionExecLatencySeconds,
+      action_exec_latency_source: 'official eval_real_umi.py action_exec_latency = 0.01 s',
+      simulated_command_latency_seconds: schedule.simulatedCommandLatencySeconds,
+      simulated_command_latency_source:
+        'SIMULATION_LATENCY_ASSUMPTION = 0; no measured simulator command latency',
+      action_timestamps_ms: schedule.actionTimestampsMs,
+      action_timings: schedule.actionTimings,
+      expired_action_indexes: schedule.expiredActionIndexes,
+      executable_action_indexes: schedule.executableActionIndexes,
+      selected_action_indexes: schedule.selectedActionIndexes,
+      fallback_action_index: schedule.fallbackActionIndex,
+      fallback_timestamp_ms: schedule.fallbackTimestampMs,
+      next_replan_timestamp_ms: schedule.nextReplanTimestampMs,
+      stale_cutoff_timestamp_ms: schedule.timingDiagnostics.staleCutoffTimestampMs,
+      execution_count: 0,
+      ik_count: 0,
+      playback_count: 0,
+      gripper_command_count: 0,
+    };
+
+    timestampDryRunRef.current = false;
+    timestampDryRunTimingRef.current = null;
+    if (mountedRef.current) {
+      setTimestampSchedulingDryRunReport(report);
+      setProgress(
+        `时间戳调度干跑完成，选中 action index ${schedule.selectedActionIndexes.join(', ')}`,
+      );
+      setError(null);
+      setPlayback(null);
+    }
+    updateStatus('complete');
+    publishDebugEvent('inference:timestamp_scheduling_dry_run', report);
+    closeSocket(1000, 'timestamp scheduling dry-run complete');
+  };
+
+  const handleActionChunk = (
+    chunk: ActionChunk,
+    inferenceResponseReceivedTimestampMs = performance.now(),
+  ) => {
+    if (timestampDryRunRef.current) {
+      const observationSnapshot = lastObservationRef.current;
+      if (
+        !observationSnapshot ||
+        observationSnapshot.frame_index !== chunk.frame_index ||
+        episodeIndexRef.current !== chunk.episode_index
+      ) {
+        fail(
+          {
+            code: 'ACTION_CONTEXT_MISMATCH',
+            stage: 'protocol',
+            message: '时间戳调度干跑的动作块与 observation episode/frame 不匹配。',
+            request_id: chunk.request_id,
+            episode_index: chunk.episode_index,
+            frame_index: chunk.frame_index,
+          },
+          false,
+        );
+        return;
+      }
+      finishTimestampSchedulingDryRun(
+        chunk,
+        observationSnapshot,
+        inferenceResponseReceivedTimestampMs,
+      );
+      return;
+    }
+
     const context = contextRef.current;
     if (singleActionDebugEnabled && !isUr5CadContext(context)) {
       fail(
@@ -1443,6 +1617,18 @@ export const useInferenceReplay = ({
   };
 
   const handlePredictionResult = (result: Record<string, unknown>) => {
+    if (timestampDryRunRef.current) {
+      fail(
+        {
+          code: 'TIMESTAMP_DRY_RUN_FULL_ACTIONS_REQUIRED',
+          stage: 'scheduling',
+          message: '时间戳调度干跑需要包含完整动作预测的 action_chunk。',
+          request_id: typeof result.request_id === 'string' ? result.request_id : undefined,
+        },
+        false,
+      );
+      return;
+    }
     clearWorker();
     activeChunkRef.current = null;
     if (mountedRef.current) {
@@ -1529,7 +1715,7 @@ export const useInferenceReplay = ({
 
     try {
       clearWorker();
-      if (!policyInferenceOnly) {
+      if (!policyInferenceOnly && !timestampDryRunRef.current) {
         const worker = new Worker(new URL('../workers/umiIk.worker.ts', import.meta.url), {
           type: 'module',
         });
@@ -1556,6 +1742,7 @@ export const useInferenceReplay = ({
         publishDebugEvent('inference:connected', { url: INFERENCE_SOCKET_URL });
       };
       socket.onmessage = (event: MessageEvent<string>) => {
+        const messageReceivedTimestampMs = performance.now();
         if (socketRef.current !== socket || statusRef.current === 'stopped') return;
         let message: unknown;
         try {
@@ -1612,7 +1799,7 @@ export const useInferenceReplay = ({
             );
             return;
           }
-          handleActionChunk(message);
+          handleActionChunk(message, messageReceivedTimestampMs);
           return;
         }
         if (message.type === 'complete') {
@@ -1961,6 +2148,8 @@ export const useInferenceReplay = ({
     ) {
       return;
     }
+    timestampDryRunRef.current = false;
+    timestampDryRunTimingRef.current = null;
     sendStop(pendingPlaybackRef.current ? [] : activeJointAnglesRef.current);
     pendingPlaybackRef.current = null;
     activeJointAnglesRef.current = [];
@@ -2436,6 +2625,26 @@ export const useInferenceReplay = ({
     status === 'playing' ||
     status === 'waiting';
 
+  const canStartTimestampSchedulingDryRun =
+    isUr5CadContext(contextRef.current) &&
+    !isLocked &&
+    !autoLoopRef.current &&
+    !reviewCompletionPendingRef.current &&
+    (status === 'idle' || status === 'stopped' || status === 'error' || status === 'complete');
+
+  const startTimestampSchedulingDryRun = (): boolean => {
+    if (!canStartTimestampSchedulingDryRun) return false;
+    timestampDryRunRef.current = true;
+    timestampDryRunTimingRef.current = null;
+    if (mountedRef.current) {
+      setError(null);
+      setTimestampSchedulingDryRunReport(null);
+      setProgress('正在获取新 observation 并运行单次策略推理');
+    }
+    start();
+    return true;
+  };
+
   const hasCompletedReview =
     reviewData?.review_status === 'COMPLETED' && reviewData.persistence_status === 'saved';
   const canStart =
@@ -2474,6 +2683,7 @@ export const useInferenceReplay = ({
     canStart,
     canStartAutoLoop,
     canStartCupApproachTest,
+    canStartTimestampSchedulingDryRun,
     canStopAutoLoop: autoLoopRef.current !== null,
     canExecuteAction,
     step,
@@ -2481,8 +2691,10 @@ export const useInferenceReplay = ({
     autoLoop,
     startBoundedAutoLoop,
     startCupApproachTest,
+    startTimestampSchedulingDryRun,
     stopAutoLoop,
     reviewData,
+    timestampSchedulingDryRunReport,
     executePendingAction,
     failPlayback,
     completePlayback,
