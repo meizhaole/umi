@@ -1,5 +1,5 @@
 import type { InferenceError, InferenceStatus } from '../app/inferenceProtocol';
-import type { AutoLoopState } from '../app/useInferenceReplay';
+import type { AutoLoopState, AutoLoopStepLimit } from '../app/useInferenceReplay';
 
 interface InferencePanelProps {
   status: InferenceStatus;
@@ -17,7 +17,7 @@ interface InferencePanelProps {
   autoLoop: AutoLoopState;
   canStartAutoLoop: boolean;
   canStopAutoLoop: boolean;
-  onStartAutoLoop: () => void;
+  onStartAutoLoop: (maxSteps: AutoLoopStepLimit) => void;
   onStopAutoLoop: () => void;
 }
 
@@ -74,10 +74,18 @@ export const InferencePanel = ({
           <button
             className="primary-button"
             disabled={!canStartAutoLoop}
-            onClick={onStartAutoLoop}
+            onClick={() => onStartAutoLoop(3)}
             type="button"
           >
             自动闭环 3 步
+          </button>
+          <button
+            className="primary-button"
+            disabled={!canStartAutoLoop}
+            onClick={() => onStartAutoLoop(10)}
+            type="button"
+          >
+            自动闭环 10 步
           </button>
           <p className="inference-progress" aria-live="polite">
             自动闭环：{autoLoop.step || 0} / {autoLoop.maxSteps} · {autoLoop.phase}

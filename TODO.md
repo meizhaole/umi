@@ -58,6 +58,7 @@
 - [x] 完成 UR5_CAD IK tolerance sensitivity dry-run
 - [x] 为 UR5_CAD 单独应用 0.5 mm / 0.001 rad IK 容差
 - [x] 为 UR5_CAD 增加最多三步独立推理的受限自动闭环验证
+- [x] 在 robot-sim 中新增 10 步受限自动闭环稳定性验证模式
 - [ ] 将本机训练 checkpoint 接入 Gazebo 回放启动参数
 - [ ] 接通 Gazebo 相机与 UMI 推理观测
 - [ ] 将实时 UMI 策略接入 ReBot RS 实机控制链路

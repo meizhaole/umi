@@ -12,7 +12,7 @@ import type {
 } from '../src/app/inferenceProtocol';
 import { findRobotConfig } from '../src/app/config';
 import { selectExecutionActions } from '../src/app/executionHorizon';
-import { useInferenceReplay } from '../src/app/useInferenceReplay';
+import { useInferenceReplay, type AutoLoopStepLimit } from '../src/app/useInferenceReplay';
 import type { InferenceObservation } from '../src/app/inferenceProtocol';
 import type { JointValues, Pose } from '../src/core/types';
 import { Kinematics } from '../src/core/Kinematics';
@@ -73,12 +73,15 @@ class FakeWebSocket {
 
   sent: string[] = [];
 
+  onSend: ((data: string) => void) | null = null;
+
   constructor(readonly url: string) {
     FakeWebSocket.sockets.push(this);
   }
 
   send(data: string) {
     this.sent.push(data);
+    this.onSend?.(data);
   }
 
   close() {
@@ -234,7 +237,7 @@ const makeAutoLoopObservation = (
   };
 };
 
-const createAutoLoopHarness = async () => {
+const createAutoLoopHarness = async (maxSteps: AutoLoopStepLimit = 3) => {
   let observation = makeAutoLoopObservation(7, 10, 50, cadStartPose, 0.06);
   const context = {
     robotId: 'UR5_CAD' as const,
@@ -256,6 +259,7 @@ const createAutoLoopHarness = async () => {
   document.body.appendChild(container);
   const root = createRoot(container);
   const postedReviews: Record<string, unknown>[] = [];
+  const timeline: string[] = [];
   vi.stubGlobal(
     'fetch',
     vi.fn(async (_url: string, init: RequestInit) => {
@@ -280,6 +284,7 @@ const createAutoLoopHarness = async () => {
         context.jointValues = actualAfterAction.actual_joints as JointValues;
         context.tcpPose = actualAfterAction.actual_tcp;
         root.render(createElement(Probe));
+        timeline.push(`saved:${review.auto_loop_step}`);
       }
       return {
         ok: true,
@@ -292,8 +297,14 @@ const createAutoLoopHarness = async () => {
   await act(async () => {
     root.render(createElement(Probe));
   });
-  act(() => replay.startAutoLoop());
+  act(() => replay.startBoundedAutoLoop(maxSteps));
   const socket = FakeWebSocket.sockets[0];
+  socket.onSend = (data) => {
+    const message = JSON.parse(data) as Record<string, unknown>;
+    if (message.type === 'observation') {
+      timeline.push(`observation:${message.frame_index}`);
+    }
+  };
   socket.readyState = FakeWebSocket.OPEN;
   await act(async () => {
     socket.emitMessage({ type: 'status', state: 'ready' });
@@ -308,6 +319,7 @@ const createAutoLoopHarness = async () => {
       return observation;
     },
     postedReviews,
+    timeline,
     socket,
     root,
     container,
@@ -380,6 +392,17 @@ const completeAutoLoopPlayback = async (
   });
 };
 
+const expectPoseNear = (actual: Pose, expected: Pose) => {
+  actual.position.forEach((value, axis) => {
+    expect(Math.abs(value - expected.position[axis])).toBeLessThan(1e-9);
+  });
+  const quaternionDot = actual.orientation.reduce(
+    (sum, value, index) => sum + value * expected.orientation[index],
+    0,
+  );
+  expect(Math.abs(Math.abs(quaternionDot) - 1)).toBeLessThan(1e-9);
+};
+
 describe('execution horizon', () => {
   beforeEach(() => {
     FakeWebSocket.sockets = [];
@@ -391,6 +414,9 @@ describe('execution horizon', () => {
   });
 
   afterEach(() => {
+    FakeWebSocket.sockets.forEach((socket) => {
+      socket.onSend = null;
+    });
     vi.unstubAllGlobals();
     Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: false });
   });
@@ -881,7 +907,7 @@ describe('execution horizon', () => {
 
     for (let step = 1; step <= 3; step += 1) {
       if (step === 1) {
-        expect(harness.replay.startAutoLoop()).toBe(false);
+        expect(harness.replay.startBoundedAutoLoop(3)).toBe(false);
         act(() => harness.replay.step());
         expect(
           harness.socket.sent.filter((message) => JSON.parse(message).type === 'observation'),
@@ -958,6 +984,172 @@ describe('execution horizon', () => {
       completedSteps: 3,
       phase: 'COMPLETED',
     });
+    expect(harness.socket.readyState).toBe(FakeWebSocket.CLOSING);
+
+    act(() => harness.root.unmount());
+    harness.container.remove();
+  });
+
+  it('十步自动闭环逐步保存后才推理下一步，并在第十步停止', async () => {
+    vi.stubGlobal('crypto', { randomUUID: () => 'run-auto-ten-steps' });
+    const harness = await createAutoLoopHarness(10);
+    expect(harness.replay.startBoundedAutoLoop(3)).toBe(false);
+
+    for (let step = 1; step <= 10; step += 1) {
+      await sendAutoLoopActionChunk(harness, `request-auto-${step}`, step * 0.0008);
+
+      expect(harness.replay.playback?.actions.map((action) => action.actionIndex)).toEqual([0]);
+      expect(harness.replay.reviewData).toMatchObject({
+        auto_loop_step: step,
+        action_index: 0,
+        selected_action_indexes: [0],
+        single_action_execution_horizon: 1,
+        persistence_status: 'saved',
+      });
+      expect((harness.replay.reviewData?.action_pred as number[][])[0][0]).toBe(step * 0.0008);
+      expect(harness.replay.reviewData?.action_pred as number[][]).toHaveLength(16);
+
+      await completeAutoLoopPlayback(harness);
+      const completedReview = harness.postedReviews.filter(
+        (review) => review.review_status === 'COMPLETED',
+      )[step - 1];
+      expect(completedReview).toMatchObject({
+        auto_loop_step: step,
+        request_id: `request-auto-${step}`,
+        review_status: 'COMPLETED',
+      });
+      expect(completedReview.actual_after_action).toBeTruthy();
+    }
+
+    const sentObservations = harness.socket.sent
+      .map((message) => JSON.parse(message))
+      .filter((message) => message.type === 'observation');
+    const completedReviews = harness.postedReviews.filter(
+      (review) => review.review_status === 'COMPLETED',
+    );
+    const frameIndices = sentObservations.map((message) => message.frame_index as number);
+    const cameraFrameIndices = sentObservations.map(
+      (message) => message.camera_frame_index as number,
+    );
+    expect(sentObservations).toHaveLength(10);
+    expect(sentObservations.map((message) => message.episode_index)).toEqual(
+      Array.from({ length: 10 }, () => 0),
+    );
+    expect(
+      frameIndices.every((frame, index) => index === 0 || frame > frameIndices[index - 1]),
+    ).toBe(true);
+    expect(
+      cameraFrameIndices.every(
+        (frame, index) => index === 0 || frame > cameraFrameIndices[index - 1],
+      ),
+    ).toBe(true);
+    expect(completedReviews).toHaveLength(10);
+    expect(new Set(completedReviews.map((review) => review.request_id)).size).toBe(10);
+    expect(completedReviews.map((review) => review.action_index)).toEqual(
+      Array.from({ length: 10 }, () => 0),
+    );
+    completedReviews.forEach((review, index) => {
+      expect(review.action_start_pose).toEqual(review.observation_tcp_snapshot);
+      expect(review.review_status).toBe('COMPLETED');
+      expect(review.ik_success).toBe(true);
+      expect(review).toMatchObject({
+        current_joints: expect.any(Object),
+        target_joints: expect.any(Object),
+        target_tcp: expect.any(Object),
+        current_gripper_opening_m: expect.any(Number),
+        target_gripper_opening_m: expect.any(Number),
+        position_residual_m: expect.any(Number),
+        orientation_residual_rad: expect.any(Number),
+        ik_termination_reason: expect.any(String),
+        frame_index: expect.any(Number),
+        camera_frame_index: expect.any(Number),
+        episode_index: 0,
+      });
+      expect(review.ik_record).toMatchObject({ iterations: expect.any(Number) });
+      if (index > 0) {
+        const previousActual = completedReviews[index - 1].actual_after_action as {
+          actual_joints: JointValues;
+          actual_tcp: Pose;
+          actual_gripper_opening_m: number;
+        };
+        expect(review.current_joints).toEqual(previousActual.actual_joints);
+        expectPoseNear(review.observation_tcp_snapshot as Pose, previousActual.actual_tcp);
+        expect(review.current_gripper_opening_m).toBe(previousActual.actual_gripper_opening_m);
+      }
+    });
+    for (let step = 1; step < 10; step += 1) {
+      const savedIndex = harness.timeline.indexOf(`saved:${step}`);
+      const nextObservationIndex = harness.timeline.indexOf(`observation:${frameIndices[step]}`);
+      expect(savedIndex).toBeGreaterThanOrEqual(0);
+      expect(nextObservationIndex).toBeGreaterThan(savedIndex);
+    }
+    expect(
+      harness.socket.sent.filter((message) => JSON.parse(message).type === 'ack'),
+    ).toHaveLength(10);
+    expect(harness.replay.autoLoop).toMatchObject({
+      step: 10,
+      maxSteps: 10,
+      completedSteps: 10,
+      phase: 'COMPLETED',
+    });
+    expect(harness.socket.readyState).toBe(FakeWebSocket.CLOSING);
+
+    act(() => harness.root.unmount());
+    harness.container.remove();
+  });
+
+  it('第 5 步 inference 失败时不会启动第 6 步', async () => {
+    vi.stubGlobal('crypto', { randomUUID: () => 'run-auto-step-five-error' });
+    const harness = await createAutoLoopHarness(10);
+    for (let step = 1; step <= 4; step += 1) {
+      await sendAutoLoopActionChunk(harness, `request-auto-${step}`);
+      await completeAutoLoopPlayback(harness);
+    }
+
+    await act(async () => {
+      harness.socket.emitMessage({
+        type: 'error',
+        code: 'POLICY_FAILED',
+        stage: 'inference',
+        message: 'mock step five inference failure',
+      });
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 0));
+    });
+
+    const sentObservations = harness.socket.sent
+      .map((message) => JSON.parse(message))
+      .filter((message) => message.type === 'observation');
+    expect(sentObservations).toHaveLength(5);
+    expect(
+      harness.postedReviews.filter((review) => review.review_status === 'COMPLETED'),
+    ).toHaveLength(4);
+    expect(harness.replay.autoLoop.phase).toBe('ERROR');
+
+    act(() => harness.root.unmount());
+    harness.container.remove();
+  });
+
+  it('第 4 步执行期间停止后保存当前步但不启动第 5 步', async () => {
+    vi.stubGlobal('crypto', { randomUUID: () => 'run-auto-step-four-stop' });
+    const harness = await createAutoLoopHarness(10);
+    for (let step = 1; step <= 3; step += 1) {
+      await sendAutoLoopActionChunk(harness, `request-auto-${step}`);
+      await completeAutoLoopPlayback(harness);
+    }
+    await sendAutoLoopActionChunk(harness, 'request-auto-4');
+
+    act(() => harness.replay.stopAutoLoop());
+    expect(harness.replay.autoLoop.phase).toBe('STOPPED');
+    await completeAutoLoopPlayback(harness);
+
+    const sentObservations = harness.socket.sent
+      .map((message) => JSON.parse(message))
+      .filter((message) => message.type === 'observation');
+    expect(sentObservations).toHaveLength(4);
+    expect(
+      harness.postedReviews.filter((review) => review.review_status === 'COMPLETED'),
+    ).toHaveLength(4);
+    expect(harness.replay.autoLoop.phase).toBe('STOPPED');
     expect(harness.socket.readyState).toBe(FakeWebSocket.CLOSING);
 
     act(() => harness.root.unmount());

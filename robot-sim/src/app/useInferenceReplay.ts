@@ -23,7 +23,9 @@ import { getGripperJoints, mapGripperOpeningToJoints } from './gripperMapping';
 
 const INFERENCE_SOCKET_URL = 'ws://localhost:8000/ws/inference';
 const IK_TIMEOUT_MS = 1000;
-export const AUTO_LOOP_MAX_STEPS = 3;
+export const AUTO_LOOP_3_STEP_LIMIT = 3;
+export const AUTO_LOOP_10_STEP_LIMIT = 10;
+export type AutoLoopStepLimit = typeof AUTO_LOOP_3_STEP_LIMIT | typeof AUTO_LOOP_10_STEP_LIMIT;
 
 export type AutoLoopPhase =
   'IDLE' | 'CAPTURING' | 'INFERENCING' | 'EXECUTING' | 'SAVING' | 'COMPLETED' | 'STOPPED' | 'ERROR';
@@ -133,7 +135,7 @@ export const useInferenceReplay = ({
   const [autoLoop, setAutoLoop] = useState<AutoLoopState>({
     runId: null,
     step: 0,
-    maxSteps: AUTO_LOOP_MAX_STEPS,
+    maxSteps: AUTO_LOOP_3_STEP_LIMIT,
     completedSteps: 0,
     phase: 'IDLE',
   });
@@ -1577,7 +1579,7 @@ export const useInferenceReplay = ({
     stepSingleAction();
   };
 
-  function startAutoLoop(): boolean {
+  function startBoundedAutoLoop(maxSteps: AutoLoopStepLimit): boolean {
     const context = contextRef.current;
     const statusCanStart =
       statusRef.current === 'idle' ||
@@ -1599,7 +1601,7 @@ export const useInferenceReplay = ({
     const runtime: AutoLoopRuntime = {
       runId: crypto.randomUUID(),
       step: 1,
-      maxSteps: AUTO_LOOP_MAX_STEPS,
+      maxSteps,
       completedSteps: 0,
       phase: 'CAPTURING',
       stopRequested: false,
@@ -1612,7 +1614,7 @@ export const useInferenceReplay = ({
     updateAutoLoop(runtime, 'CAPTURING');
     if (mountedRef.current) {
       setError(null);
-      setProgress('自动闭环准备采集第 1 / 3 步观测');
+      setProgress(`自动闭环准备采集第 1 / ${maxSteps} 步观测`);
     }
     stepSingleAction();
     return autoLoopRef.current === runtime;
@@ -1958,7 +1960,9 @@ export const useInferenceReplay = ({
                 currentAutoLoop.step,
                 currentAutoLoop.completedSteps,
               );
-              if (mountedRef.current) setProgress('三步自动闭环已完成');
+              if (mountedRef.current) {
+                setProgress(`${currentAutoLoop.maxSteps} 步自动闭环已完成`);
+              }
               closeSocket(1000, 'auto loop completed');
               return;
             }
@@ -2064,7 +2068,7 @@ export const useInferenceReplay = ({
     step,
     stop,
     autoLoop,
-    startAutoLoop,
+    startBoundedAutoLoop,
     stopAutoLoop,
     reviewData,
     executePendingAction,

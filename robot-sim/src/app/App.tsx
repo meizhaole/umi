@@ -16,6 +16,7 @@ import { configureRobotUrdf } from '../utils/configureRobotUrdf';
 import { resolvePackageUris } from '../utils/resolvePackageUri.mjs';
 import { publishDebugEvent } from './debugBus';
 import { useInferenceReplay } from './useInferenceReplay';
+import type { AutoLoopStepLimit } from './useInferenceReplay';
 import {
   DEFAULT_ROBOT_MODEL_ID,
   findRobotConfig,
@@ -1332,10 +1333,10 @@ export const App = () => {
                 inference.step();
               }}
               onStop={inference.stop}
-              onStartAutoLoop={() => {
+              onStartAutoLoop={(maxSteps: AutoLoopStepLimit) => {
                 if (mode !== 'position' && !inference.isLocked) setControlMode('position');
                 setIsRunning(true);
-                inference.startAutoLoop();
+                inference.startBoundedAutoLoop(maxSteps);
               }}
               onStopAutoLoop={inference.stopAutoLoop}
               progress={inference.progress}

@@ -148,7 +148,7 @@ class SingleActionReviewPersistenceTest(unittest.TestCase):
         auto_loop_dir = Path(self.temp_dir.name) / "ur5-cad-auto-loop"
         with patch.object(main, "AUTO_LOOP_REVIEW_DIR", auto_loop_dir, create=True):
             saved_reviews = []
-            for step in (1, 2):
+            for step in (1, 2, 10):
                 review = self.make_review("COMPLETED")
                 review.update(
                     {
@@ -176,11 +176,15 @@ class SingleActionReviewPersistenceTest(unittest.TestCase):
 
         self.assertEqual(
             [saved_review["auto_loop_step"] for saved_review in saved_reviews],
-            [1, 2],
+            [1, 2, 10],
         )
         self.assertEqual(
             [Path(saved_review["persistence_path"]).name for saved_review in saved_reviews],
-            ["run-0123456789abcdef-step-1.json", "run-0123456789abcdef-step-2.json"],
+            [
+                "run-0123456789abcdef-step-1.json",
+                "run-0123456789abcdef-step-2.json",
+                "run-0123456789abcdef-step-10.json",
+            ],
         )
         self.assertNotEqual(
             saved_reviews[0]["request_id"],
@@ -188,7 +192,7 @@ class SingleActionReviewPersistenceTest(unittest.TestCase):
         )
 
     def test_auto_loop_review_rejects_invalid_run_id_and_step(self):
-        for run_id, step in (("../outside", 1), ("run-safe", 4)):
+        for run_id, step in (("../outside", 1), ("run-safe", 11)):
             with self.subTest(run_id=run_id, step=step):
                 review = self.make_review("WAITING_FOR_HUMAN_APPROVAL")
                 review.update(
