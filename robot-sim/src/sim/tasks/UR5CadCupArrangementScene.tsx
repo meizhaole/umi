@@ -9,6 +9,7 @@ import {
 import { CubicBezierCurve3, DoubleSide, Plane, Vector2, Vector3 } from 'three';
 
 import type { CupBodyRef } from './CupArrangementScene';
+import type { CupEvaluationGeometryRef } from './cupApproachEvaluation';
 
 const SAUCER_POSITION: [number, number, number] = [-0.578, 0, 0];
 const CUP_POSITION: [number, number, number] = [-0.578, 0.001, -0.24];
@@ -70,6 +71,7 @@ const CUP_HANDLE_COLLIDERS = CUP_HANDLE_COLLIDER_POINTS.slice(0, -1).map((start,
 
 interface UR5CadCupArrangementSceneProps {
   bodyRef: CupBodyRef;
+  evaluationGeometryRef: CupEvaluationGeometryRef;
   onDragStateChange: (dragging: boolean) => void;
 }
 
@@ -89,10 +91,11 @@ const Saucer = () => (
 
 interface UR5CadCupProps {
   bodyRef: CupBodyRef;
+  evaluationGeometryRef: CupEvaluationGeometryRef;
   onDragStateChange: (dragging: boolean) => void;
 }
 
-const UR5CadCup = ({ bodyRef, onDragStateChange }: UR5CadCupProps) => {
+const UR5CadCup = ({ bodyRef, evaluationGeometryRef, onDragStateChange }: UR5CadCupProps) => {
   const dragOffset = useRef(new Vector2());
   const dragPoint = useRef(new Vector3());
   const isDragging = useRef(false);
@@ -231,42 +234,49 @@ const UR5CadCup = ({ bodyRef, onDragStateChange }: UR5CadCupProps) => {
           rotation={collider.rotation}
         />
       ))}
-      <mesh
-        castShadow
-        onPointerDown={handlePointerDown}
-        onPointerMove={handlePointerMove}
-        onPointerUp={handlePointerUp}
-        onPointerCancel={handlePointerUp}
-        receiveShadow
-      >
-        <latheGeometry args={[CUP_PROFILE, 48]} />
-        <meshStandardMaterial
-          color={isSelected ? '#8fcbd0' : '#d5e4e5'}
-          roughness={0.24}
-          side={DoubleSide}
-        />
-      </mesh>
-      <mesh
-        castShadow
-        onPointerDown={handlePointerDown}
-        onPointerMove={handlePointerMove}
-        onPointerUp={handlePointerUp}
-        onPointerCancel={handlePointerUp}
-        receiveShadow
-      >
-        <tubeGeometry args={[CUP_HANDLE_CURVE, 32, 0.006, 12, false]} />
-        <meshStandardMaterial color={isSelected ? '#8fcbd0' : '#d5e4e5'} roughness={0.24} />
-      </mesh>
+      <group ref={evaluationGeometryRef}>
+        <mesh
+          castShadow
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUp}
+          onPointerCancel={handlePointerUp}
+          receiveShadow
+        >
+          <latheGeometry args={[CUP_PROFILE, 48]} />
+          <meshStandardMaterial
+            color={isSelected ? '#8fcbd0' : '#d5e4e5'}
+            roughness={0.24}
+            side={DoubleSide}
+          />
+        </mesh>
+        <mesh
+          castShadow
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUp}
+          onPointerCancel={handlePointerUp}
+          receiveShadow
+        >
+          <tubeGeometry args={[CUP_HANDLE_CURVE, 32, 0.006, 12, false]} />
+          <meshStandardMaterial color={isSelected ? '#8fcbd0' : '#d5e4e5'} roughness={0.24} />
+        </mesh>
+      </group>
     </RigidBody>
   );
 };
 
 export const UR5CadCupArrangementScene = ({
   bodyRef,
+  evaluationGeometryRef,
   onDragStateChange,
 }: UR5CadCupArrangementSceneProps) => (
   <>
     <Saucer />
-    <UR5CadCup bodyRef={bodyRef} onDragStateChange={onDragStateChange} />
+    <UR5CadCup
+      bodyRef={bodyRef}
+      evaluationGeometryRef={evaluationGeometryRef}
+      onDragStateChange={onDragStateChange}
+    />
   </>
 );

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Quaternion, Vector3 } from 'three';
+import type { Group } from 'three';
 import { JointController } from '../core/JointController';
 import { Kinematics } from '../core/Kinematics';
 import { RobotModel } from '../core/RobotModel';
@@ -53,6 +54,7 @@ import {
 import { DatasetReplayPanel, type DatasetReplayState } from '../ui/DatasetReplayPanel';
 import { Wrist3PhysicsDebugPanel } from '../ui/Wrist3PhysicsDebugPanel';
 import type { Wrist3ExperimentTrace, Wrist3PhysicsDebugState } from '../sim/RobotBody';
+import { getObjectWorldAabb } from '../sim/tasks/cupApproachEvaluation';
 
 interface LoadedRobot {
   robotId: RobotModelId;
@@ -190,6 +192,7 @@ export const App = () => {
     isSingleActionDebugEnabled(),
   );
   const [cupSceneResetToken, setCupSceneResetToken] = useState(0);
+  const cupEvaluationGeometryRef = useRef<Group | null>(null);
   const [loadedRobot, setLoadedRobot] = useState<LoadedRobot | null>(null);
   const [loadError, setLoadError] = useState('');
   const [jointValues, setJointValues] = useState<JointValues>({});
@@ -515,6 +518,7 @@ export const App = () => {
     jointValues,
     tcpPose,
     getObservation,
+    getCupWorldAabb: () => getObjectWorldAabb(cupEvaluationGeometryRef.current),
     singleActionDebugEnabled,
   });
   useEffect(() => {
@@ -1318,6 +1322,7 @@ export const App = () => {
                 !datasetReplayEnabled &&
                 !experimentRecording
               }
+              canStartCupApproachTest={inference.canStartCupApproachTest}
               canStopAutoLoop={inference.canStopAutoLoop}
               error={inference.error}
               isLocked={inference.isLocked}
@@ -1339,6 +1344,11 @@ export const App = () => {
                 inference.startBoundedAutoLoop(maxSteps);
               }}
               onStopAutoLoop={inference.stopAutoLoop}
+              onStartCupApproachTest={() => {
+                if (mode !== 'position' && !inference.isLocked) setControlMode('position');
+                setIsRunning(true);
+                inference.startCupApproachTest();
+              }}
               progress={inference.progress}
               reviewData={inference.reviewData}
               singleActionReview={singleActionDebugEnabled && inference.status === 'review'}
@@ -1526,6 +1536,7 @@ export const App = () => {
                 onPhysicsReady={setPhysicsReady}
                 playback={inference.playback}
                 cupSceneResetToken={cupSceneResetToken}
+                cupEvaluationGeometryRef={cupEvaluationGeometryRef}
                 inferenceActive={inference.isLocked}
                 positionExecutionOverride={
                   datasetReplayEnabled

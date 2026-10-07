@@ -19,6 +19,7 @@ import { Kinematics } from '../src/core/Kinematics';
 import { parseUrdf } from '../src/utils/urdfParser';
 import { quaternionToRotationVector } from '../src/utils/math';
 import { runIkSolve } from '../src/workers/umiIk.worker';
+import type { WorldAabb } from '../src/sim/tasks/cupApproachEvaluation';
 
 const planarUrdf = `
   <robot name="planar">
@@ -237,8 +238,14 @@ const makeAutoLoopObservation = (
   };
 };
 
-const createAutoLoopHarness = async (maxSteps: AutoLoopStepLimit = 3) => {
+const createAutoLoopHarness = async (maxSteps: AutoLoopStepLimit = 3, cupApproach = false) => {
   let observation = makeAutoLoopObservation(7, 10, 50, cadStartPose, 0.06);
+  const cupWorldAabb: WorldAabb = {
+    min: [-0.7, -0.1, -0.3],
+    max: [-0.5, 0.2, -0.1],
+    center: [-0.6, 0.05, -0.2],
+    size: [0.2, 0.3, 0.2],
+  };
   const context = {
     robotId: 'UR5_CAD' as const,
     robotConfig: cadConfig,
@@ -248,6 +255,7 @@ const createAutoLoopHarness = async (maxSteps: AutoLoopStepLimit = 3) => {
     jointValues: cadSeed,
     tcpPose: cadStartPose,
     getObservation: () => observation,
+    getCupWorldAabb: cupApproach ? () => cupWorldAabb : undefined,
     singleActionDebugEnabled: true,
   };
   let replay!: ReturnType<typeof useInferenceReplay>;
@@ -297,7 +305,10 @@ const createAutoLoopHarness = async (maxSteps: AutoLoopStepLimit = 3) => {
   await act(async () => {
     root.render(createElement(Probe));
   });
-  act(() => replay.startBoundedAutoLoop(maxSteps));
+  act(() => {
+    if (cupApproach) replay.startCupApproachTest();
+    else replay.startBoundedAutoLoop(maxSteps);
+  });
   const socket = FakeWebSocket.sockets[0];
   socket.onSend = (data) => {
     const message = JSON.parse(data) as Record<string, unknown>;
@@ -1093,6 +1104,105 @@ describe('execution horizon', () => {
       phase: 'COMPLETED',
     });
     expect(harness.socket.readyState).toBe(FakeWebSocket.CLOSING);
+
+    act(() => harness.root.unmount());
+    harness.container.remove();
+  });
+
+  it('杯子接近测试最多二十步，每步只执行 action 0 且评估数据不进入 observation', async () => {
+    vi.stubGlobal('crypto', { randomUUID: () => 'run-cup-approach-twenty' });
+    const harness = await createAutoLoopHarness(3, true);
+
+    for (let step = 1; step <= 20; step += 1) {
+      await sendAutoLoopActionChunk(harness, `request-cup-${step}`, 0.001);
+
+      expect(harness.replay.reviewData).toMatchObject({
+        task_type: 'cup_approach',
+        auto_loop_step: step,
+        auto_loop_max_steps: 20,
+        selected_action_indexes: [0],
+        single_action_execution_horizon: 1,
+        task_evaluation: {
+          task_type: 'cup_approach',
+          cup_world_aabb_before: expect.any(Object),
+          tcp_to_cup_surface_proxy_distance_before_m: expect.any(Number),
+        },
+      });
+      expect(harness.replay.playback?.actions.map((action) => action.actionIndex)).toEqual([0]);
+      await completeAutoLoopPlayback(harness);
+    }
+
+    const sentObservations = harness.socket.sent
+      .map((message) => JSON.parse(message) as Record<string, unknown>)
+      .filter((message) => message.type === 'observation');
+    const completedReviews = harness.postedReviews.filter(
+      (review) => review.review_status === 'COMPLETED',
+    );
+    const expectedObservationKeys = [
+      'type',
+      'episode_index',
+      'frame_index',
+      'camera_frame_index',
+      'camera_frame_timestamp_ms',
+      'camera0_rgb',
+      'camera_image_shape',
+      'robot0_eef_pos',
+      'robot0_eef_rot_axis_angle',
+      'robot0_gripper_width',
+      'robot_id',
+      'robot_config_id',
+      'robot_config_file',
+      'urdf_name',
+      'single_action_validation',
+    ].sort();
+
+    expect(sentObservations).toHaveLength(20);
+    sentObservations.forEach((observation) => {
+      expect(Object.keys(observation).sort()).toEqual(expectedObservationKeys);
+      expect(JSON.stringify(observation)).not.toMatch(/cup|target|goal|distance|bbox/iu);
+    });
+    expect(completedReviews).toHaveLength(20);
+    expect(new Set(completedReviews.map((review) => review.request_id)).size).toBe(20);
+    expect(completedReviews.map((review) => review.action_index)).toEqual(
+      Array.from({ length: 20 }, () => 0),
+    );
+    expect(
+      harness.socket.sent.filter((message) => JSON.parse(message).type === 'ack'),
+    ).toHaveLength(20);
+    expect(completedReviews.every((review) => review.task_evaluation !== undefined)).toBe(true);
+    expect(harness.replay.autoLoop).toMatchObject({
+      step: 20,
+      maxSteps: 20,
+      completedSteps: 20,
+      phase: 'COMPLETED',
+      taskType: 'cup_approach',
+    });
+    expect(harness.socket.readyState).toBe(FakeWebSocket.CLOSING);
+
+    act(() => harness.root.unmount());
+    harness.container.remove();
+  });
+
+  it('杯子接近测试中途安全失败后不再发送下一步 observation', async () => {
+    vi.stubGlobal('crypto', { randomUUID: () => 'run-cup-approach-safety-failure' });
+    const harness = await createAutoLoopHarness(3, true);
+    await sendAutoLoopActionChunk(harness, 'request-cup-1');
+    await completeAutoLoopPlayback(harness);
+    FakeWorker.nextResponse = {
+      type: 'error',
+      error: { code: 'NO_IK_SOLUTION', stage: 'ik', message: 'mock cup approach IK failure' },
+    };
+
+    await sendAutoLoopActionChunk(harness, 'request-cup-2');
+
+    const sentObservations = harness.socket.sent
+      .map((message) => JSON.parse(message))
+      .filter((message) => message.type === 'observation');
+    expect(sentObservations).toHaveLength(2);
+    expect(
+      harness.postedReviews.filter((review) => review.review_status === 'COMPLETED'),
+    ).toHaveLength(1);
+    expect(harness.replay.autoLoop.phase).toBe('ERROR');
 
     act(() => harness.root.unmount());
     harness.container.remove();

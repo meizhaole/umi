@@ -23,7 +23,7 @@ SINGLE_ACTION_REVIEW_PATH = (
     Path(__file__).resolve().parents[1] / "debug" / "ur5-cad-single-action-review.json"
 )
 AUTO_LOOP_REVIEW_DIR = Path(__file__).resolve().parents[1] / "debug" / "ur5-cad-auto-loop"
-AUTO_LOOP_MAX_STEPS = 10
+AUTO_LOOP_MAX_STEPS = 20
 AUTO_LOOP_RUN_ID_PATTERN = re.compile(r"[A-Za-z0-9-]{1,64}")
 
 
@@ -110,7 +110,7 @@ def create_app() -> FastAPI:
         ):
             raise HTTPException(
                 status_code=422,
-                detail="A valid auto-loop run ID and step from 1 to 10 are required.",
+                detail="A valid auto-loop run ID and step from 1 to 20 are required.",
             )
 
         destination = AUTO_LOOP_REVIEW_DIR / f"{run_id}-step-{step}.json"

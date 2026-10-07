@@ -20,12 +20,20 @@ import type {
 } from './inferenceProtocol';
 import { poseErrorRotation, vectorLength } from '../utils/math';
 import { getGripperJoints, mapGripperOpeningToJoints } from './gripperMapping';
+import {
+  evaluateCupApproachSample,
+  robotPositionToSceneWorld,
+  type CupApproachSample,
+  type WorldAabb,
+} from '../sim/tasks/cupApproachEvaluation';
 
 const INFERENCE_SOCKET_URL = 'ws://localhost:8000/ws/inference';
 const IK_TIMEOUT_MS = 1000;
 export const AUTO_LOOP_3_STEP_LIMIT = 3;
 export const AUTO_LOOP_10_STEP_LIMIT = 10;
+export const CUP_APPROACH_STEP_LIMIT = 20;
 export type AutoLoopStepLimit = typeof AUTO_LOOP_3_STEP_LIMIT | typeof AUTO_LOOP_10_STEP_LIMIT;
+export type AutoLoopTaskType = 'bounded_auto_loop' | 'cup_approach';
 
 export type AutoLoopPhase =
   'IDLE' | 'CAPTURING' | 'INFERENCING' | 'EXECUTING' | 'SAVING' | 'COMPLETED' | 'STOPPED' | 'ERROR';
@@ -36,6 +44,7 @@ export interface AutoLoopState {
   maxSteps: number;
   completedSteps: number;
   phase: AutoLoopPhase;
+  taskType: AutoLoopTaskType | null;
 }
 
 interface AutoLoopRuntime extends AutoLoopState {
@@ -44,6 +53,8 @@ interface AutoLoopRuntime extends AutoLoopState {
   lastObservationFrameIndex: number | null;
   lastCameraFrameIndex: number | null;
   lastCameraTimestamp: number | null;
+  taskType: AutoLoopTaskType;
+  taskEvaluationBefore: CupApproachSample | null;
 }
 
 const isIkTraceEnabled = (): boolean =>
@@ -58,6 +69,7 @@ interface ReplayContext {
   jointValues: JointValues;
   tcpPose: Pose | null;
   getObservation: () => InferenceObservation | null;
+  getCupWorldAabb?: () => WorldAabb | null;
 }
 
 interface PlaybackSnapshot {
@@ -124,6 +136,7 @@ export const useInferenceReplay = ({
   jointValues,
   tcpPose,
   getObservation,
+  getCupWorldAabb,
   singleActionDebugEnabled,
 }: ReplayContext & { singleActionDebugEnabled: boolean }) => {
   const policyInferenceOnly = isPolicyInferenceOnlyEnabled() && !singleActionDebugEnabled;
@@ -138,6 +151,7 @@ export const useInferenceReplay = ({
     maxSteps: AUTO_LOOP_3_STEP_LIMIT,
     completedSteps: 0,
     phase: 'IDLE',
+    taskType: null,
   });
   const reviewDataRef = useRef<Record<string, unknown> | null>(null);
   const statusRef = useRef(status);
@@ -150,6 +164,7 @@ export const useInferenceReplay = ({
     jointValues,
     tcpPose,
     getObservation,
+    getCupWorldAabb,
   });
   const socketRef = useRef<WebSocket | null>(null);
   const episodeIndexRef = useRef(-1);
@@ -175,6 +190,7 @@ export const useInferenceReplay = ({
     jointValues,
     tcpPose,
     getObservation,
+    getCupWorldAabb,
   };
 
   const updateStatus = (nextStatus: InferenceStatus) => {
@@ -198,6 +214,7 @@ export const useInferenceReplay = ({
         maxSteps: runtime.maxSteps,
         completedSteps,
         phase,
+        taskType: runtime.taskType,
       });
     }
   };
@@ -404,10 +421,33 @@ export const useInferenceReplay = ({
       ? {
           auto_loop_run_id: activeAutoLoop.runId,
           auto_loop_step: activeAutoLoop.step,
+          auto_loop_max_steps: activeAutoLoop.maxSteps,
+          task_type: activeAutoLoop.taskType,
           action_pred: chunk.prediction,
           selected_action_index: 0,
         }
       : {};
+  };
+
+  const taskEvaluationBeforeField = (runtime: AutoLoopRuntime | null) => {
+    const sample = runtime?.taskEvaluationBefore;
+    if (runtime?.taskType !== 'cup_approach' || !sample) return {};
+
+    return {
+      task_evaluation: {
+        task_type: 'cup_approach',
+        cup_world_aabb_before: sample.cupWorldAabb,
+        cup_center_world_before: sample.cupCenterWorld,
+        tcp_world_position_before: sample.tcpWorldPosition,
+        tcp_to_cup_center_distance_before_m: sample.tcpToCupCenterDistanceM,
+        tcp_to_cup_surface_proxy_distance_before_m: sample.tcpToCupSurfaceProxyDistanceM,
+        cup_world_aabb_after: null,
+        cup_center_world_after: null,
+        tcp_world_position_after: null,
+        tcp_to_cup_center_distance_after_m: null,
+        tcp_to_cup_surface_proxy_distance_after_m: null,
+      },
+    };
   };
 
   const saveFailedIkReview = (chunk: ActionChunk, error: InferenceError): boolean => {
@@ -514,6 +554,7 @@ export const useInferenceReplay = ({
         tcp_link: context.description?.tipLink ?? null,
       },
       frame_index: chunk.frame_index,
+      ...taskEvaluationBeforeField(autoLoopRef.current),
       observation_tcp_snapshot: observationTcpPose,
       action_start_pose: currentTcp,
       camera_frame_index: lastObservationRef.current?.camera_frame_index ?? null,
@@ -637,6 +678,27 @@ export const useInferenceReplay = ({
       activeAutoLoop.lastObservationFrameIndex = observation.frame_index;
       activeAutoLoop.lastCameraFrameIndex = cameraFrameIndex as number;
       activeAutoLoop.lastCameraTimestamp = observation.camera_frame_timestamp_ms;
+      if (activeAutoLoop.taskType === 'cup_approach') {
+        const cupWorldAabb = context.getCupWorldAabb?.() ?? null;
+        const tcpPose = getObservationTcpPose(observation);
+        if (!cupWorldAabb || !tcpPose) {
+          fail(
+            {
+              code: 'CUP_APPROACH_EVALUATION_UNAVAILABLE',
+              stage: 'evaluation',
+              message: '当前杯子 world AABB 或 umi_tcp_link observation 不可用。',
+              episode_index: episodeIndexRef.current,
+              frame_index: observation.frame_index,
+            },
+            true,
+          );
+          return;
+        }
+        activeAutoLoop.taskEvaluationBefore = evaluateCupApproachSample(
+          robotPositionToSceneWorld(tcpPose.position),
+          cupWorldAabb,
+        );
+      }
       updateAutoLoop(activeAutoLoop, 'INFERENCING');
     }
     const policyObservation = singleActionDebugEnabled
@@ -1114,6 +1176,7 @@ export const useInferenceReplay = ({
           },
           tcp_link: context.description?.tipLink ?? null,
           frame_index: chunk.frame_index,
+          ...taskEvaluationBeforeField(autoLoopRef.current),
           observation_tcp_snapshot: observationTcpPose,
           action_start_pose: ikRecord?.start_pose ?? observationTcpPose,
           camera_frame_index: lastObservationRef.current?.camera_frame_index ?? null,
@@ -1580,6 +1643,14 @@ export const useInferenceReplay = ({
   };
 
   function startBoundedAutoLoop(maxSteps: AutoLoopStepLimit): boolean {
+    return startAutoLoop(maxSteps, 'bounded_auto_loop');
+  }
+
+  function startCupApproachTest(): boolean {
+    return startAutoLoop(CUP_APPROACH_STEP_LIMIT, 'cup_approach');
+  }
+
+  function startAutoLoop(maxSteps: number, taskType: AutoLoopTaskType): boolean {
     const context = contextRef.current;
     const statusCanStart =
       statusRef.current === 'idle' ||
@@ -1593,7 +1664,10 @@ export const useInferenceReplay = ({
       autoLoopRef.current ||
       !statusCanStart ||
       reviewCompletionPendingRef.current ||
-      !isUr5CadContext(context)
+      !isUr5CadContext(context) ||
+      (taskType === 'cup_approach' && !context.getCupWorldAabb?.()) ||
+      (taskType === 'bounded_auto_loop' && maxSteps !== 3 && maxSteps !== 10) ||
+      (taskType === 'cup_approach' && maxSteps !== CUP_APPROACH_STEP_LIMIT)
     ) {
       return false;
     }
@@ -1609,12 +1683,18 @@ export const useInferenceReplay = ({
       lastObservationFrameIndex: null,
       lastCameraFrameIndex: null,
       lastCameraTimestamp: null,
+      taskType,
+      taskEvaluationBefore: null,
     };
     autoLoopRef.current = runtime;
     updateAutoLoop(runtime, 'CAPTURING');
     if (mountedRef.current) {
       setError(null);
-      setProgress(`自动闭环准备采集第 1 / ${maxSteps} 步观测`);
+      setProgress(
+        taskType === 'cup_approach'
+          ? `杯子接近测试准备采集第 1 / ${maxSteps} 步观测`
+          : `自动闭环准备采集第 1 / ${maxSteps} 步观测`,
+      );
     }
     stepSingleAction();
     return autoLoopRef.current === runtime;
@@ -1822,6 +1902,46 @@ export const useInferenceReplay = ({
         );
         return;
       }
+      let completedTaskEvaluation: Record<string, unknown> | null = null;
+      if (activeAutoLoop?.taskType === 'cup_approach') {
+        const before = activeAutoLoop.taskEvaluationBefore;
+        const cupWorldAabb = contextRef.current.getCupWorldAabb?.() ?? null;
+        const after =
+          cupWorldAabb && snapshot
+            ? evaluateCupApproachSample(
+                robotPositionToSceneWorld(snapshot.tcp_pose.position),
+                cupWorldAabb,
+              )
+            : null;
+        if (!before || !after) {
+          fail(
+            {
+              code: 'CUP_APPROACH_EVALUATION_UNAVAILABLE',
+              stage: 'evaluation',
+              message: '动作执行后无法获取杯子 world AABB 或 umi_tcp_link 位姿。',
+              request_id: chunk.request_id,
+              episode_index: chunk.episode_index,
+              frame_index: chunk.frame_index,
+            },
+            true,
+            true,
+          );
+          return;
+        }
+        completedTaskEvaluation = {
+          task_type: 'cup_approach',
+          cup_world_aabb_before: before.cupWorldAabb,
+          cup_center_world_before: before.cupCenterWorld,
+          tcp_world_position_before: before.tcpWorldPosition,
+          tcp_to_cup_center_distance_before_m: before.tcpToCupCenterDistanceM,
+          tcp_to_cup_surface_proxy_distance_before_m: before.tcpToCupSurfaceProxyDistanceM,
+          cup_world_aabb_after: after.cupWorldAabb,
+          cup_center_world_after: after.cupCenterWorld,
+          tcp_world_position_after: after.tcpWorldPosition,
+          tcp_to_cup_center_distance_after_m: after.tcpToCupCenterDistanceM,
+          tcp_to_cup_surface_proxy_distance_after_m: after.tcpToCupSurfaceProxyDistanceM,
+        };
+      }
       if (activeAutoLoop && postObservation) {
         activeAutoLoop.lastObservationFrameIndex = postObservation.frame_index;
         activeAutoLoop.lastCameraFrameIndex = postObservation.camera_frame_index as number;
@@ -1855,6 +1975,7 @@ export const useInferenceReplay = ({
       };
       const nextReview = {
         ...currentReview,
+        ...(completedTaskEvaluation ? { task_evaluation: completedTaskEvaluation } : {}),
         actual_after_action: actualAfterAction,
         persistence_status: 'saving',
       };
@@ -1961,7 +2082,11 @@ export const useInferenceReplay = ({
                 currentAutoLoop.completedSteps,
               );
               if (mountedRef.current) {
-                setProgress(`${currentAutoLoop.maxSteps} 步自动闭环已完成`);
+                setProgress(
+                  currentAutoLoop.taskType === 'cup_approach'
+                    ? `杯子接近测试已完成 ${currentAutoLoop.maxSteps} 步`
+                    : `${currentAutoLoop.maxSteps} 步自动闭环已完成`,
+                );
               }
               closeSocket(1000, 'auto loop completed');
               return;
@@ -2045,6 +2170,7 @@ export const useInferenceReplay = ({
       status === 'stopped' ||
       status === 'error' ||
       (status === 'complete' && hasCompletedReview));
+  const canStartCupApproachTest = canStartAutoLoop && Boolean(contextRef.current.getCupWorldAabb);
 
   const canExecuteAction =
     singleActionDebugEnabled &&
@@ -2063,12 +2189,14 @@ export const useInferenceReplay = ({
     isLocked,
     canStart,
     canStartAutoLoop,
+    canStartCupApproachTest,
     canStopAutoLoop: autoLoopRef.current !== null,
     canExecuteAction,
     step,
     stop,
     autoLoop,
     startBoundedAutoLoop,
+    startCupApproachTest,
     stopAutoLoop,
     reviewData,
     executePendingAction,

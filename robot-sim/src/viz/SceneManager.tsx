@@ -10,6 +10,7 @@ import type { ControlMode, JointCommand, JointValues, RobotDescription } from '.
 import { PhysicsWorld } from '../sim/PhysicsWorld';
 import { OfficialCupArrangementScene, type CupBodyRef } from '../sim/tasks/CupArrangementScene';
 import { UR5CadCupArrangementScene } from '../sim/tasks/UR5CadCupArrangementScene';
+import type { CupEvaluationGeometryRef } from '../sim/tasks/cupApproachEvaluation';
 import {
   RobotBody,
   type Wrist3ExperimentTrace,
@@ -31,6 +32,7 @@ interface SceneManagerProps {
   isRunning: boolean;
   playback: PlaybackChunk | null;
   cupSceneResetToken: number;
+  cupEvaluationGeometryRef: CupEvaluationGeometryRef;
   inferenceActive: boolean;
   positionExecutionOverride?: 'joint_motors' | 'kinematic_fk';
   datasetReplayActive?: boolean;
@@ -213,6 +215,7 @@ export const SceneManager = ({
   isRunning,
   playback,
   cupSceneResetToken,
+  cupEvaluationGeometryRef,
   inferenceActive,
   positionExecutionOverride,
   datasetReplayActive = false,
@@ -340,6 +343,7 @@ export const SceneManager = ({
           <UR5CadCupArrangementScene
             key={cupSceneResetToken}
             bodyRef={cupBodyRef}
+            evaluationGeometryRef={cupEvaluationGeometryRef}
             onDragStateChange={handleCupDragStateChange}
           />
         ) : (

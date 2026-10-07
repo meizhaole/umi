@@ -148,12 +148,17 @@ class SingleActionReviewPersistenceTest(unittest.TestCase):
         auto_loop_dir = Path(self.temp_dir.name) / "ur5-cad-auto-loop"
         with patch.object(main, "AUTO_LOOP_REVIEW_DIR", auto_loop_dir, create=True):
             saved_reviews = []
-            for step in (1, 2, 10):
+            for step in (1, 2, 10, 20):
                 review = self.make_review("COMPLETED")
                 review.update(
                     {
                         "auto_loop_run_id": "run-0123456789abcdef",
                         "auto_loop_step": step,
+                        "task_type": "cup_approach",
+                        "task_evaluation": {
+                            "tcp_to_cup_surface_proxy_distance_before_m": 0.2,
+                            "tcp_to_cup_surface_proxy_distance_after_m": 0.19,
+                        },
                         "request_id": f"request-step-{step}",
                         "actual_after_action": {
                             "actual_joints": {"shoulder_pan_joint": 0.001},
@@ -176,7 +181,7 @@ class SingleActionReviewPersistenceTest(unittest.TestCase):
 
         self.assertEqual(
             [saved_review["auto_loop_step"] for saved_review in saved_reviews],
-            [1, 2, 10],
+            [1, 2, 10, 20],
         )
         self.assertEqual(
             [Path(saved_review["persistence_path"]).name for saved_review in saved_reviews],
@@ -184,15 +189,24 @@ class SingleActionReviewPersistenceTest(unittest.TestCase):
                 "run-0123456789abcdef-step-1.json",
                 "run-0123456789abcdef-step-2.json",
                 "run-0123456789abcdef-step-10.json",
+                "run-0123456789abcdef-step-20.json",
             ],
         )
         self.assertNotEqual(
             saved_reviews[0]["request_id"],
             saved_reviews[1]["request_id"],
         )
+        self.assertEqual(saved_reviews[-1]["task_type"], "cup_approach")
+        self.assertEqual(
+            saved_reviews[-1]["task_evaluation"],
+            {
+                "tcp_to_cup_surface_proxy_distance_before_m": 0.2,
+                "tcp_to_cup_surface_proxy_distance_after_m": 0.19,
+            },
+        )
 
     def test_auto_loop_review_rejects_invalid_run_id_and_step(self):
-        for run_id, step in (("../outside", 1), ("run-safe", 11)):
+        for run_id, step in (("../outside", 1), ("run-safe", 21)):
             with self.subTest(run_id=run_id, step=step):
                 review = self.make_review("WAITING_FOR_HUMAN_APPROVAL")
                 review.update(

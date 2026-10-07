@@ -18,6 +18,8 @@ interface InferencePanelProps {
   canStartAutoLoop: boolean;
   canStopAutoLoop: boolean;
   onStartAutoLoop: (maxSteps: AutoLoopStepLimit) => void;
+  canStartCupApproachTest: boolean;
+  onStartCupApproachTest: () => void;
   onStopAutoLoop: () => void;
 }
 
@@ -52,6 +54,8 @@ export const InferencePanel = ({
   canStartAutoLoop,
   canStopAutoLoop,
   onStartAutoLoop,
+  canStartCupApproachTest,
+  onStartCupApproachTest,
   onStopAutoLoop,
 }: InferencePanelProps) => (
   <section className="panel inference-panel">
@@ -87,8 +91,17 @@ export const InferencePanel = ({
           >
             自动闭环 10 步
           </button>
+          <button
+            className="primary-button"
+            disabled={!canStartCupApproachTest}
+            onClick={onStartCupApproachTest}
+            type="button"
+          >
+            杯子接近测试 20 步
+          </button>
           <p className="inference-progress" aria-live="polite">
-            自动闭环：{autoLoop.step || 0} / {autoLoop.maxSteps} · {autoLoop.phase}
+            {autoLoop.taskType === 'cup_approach' ? '杯子接近测试' : '自动闭环'}：
+            {autoLoop.step || 0} / {autoLoop.maxSteps} · {autoLoop.phase}
           </p>
           <button
             className="secondary-button"
