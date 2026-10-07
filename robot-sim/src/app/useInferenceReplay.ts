@@ -4,6 +4,11 @@ import { findRobotConfig, type RobotConfig, type RobotModelId } from './config';
 import { publishDebugEvent } from './debugBus';
 import { EXECUTION_HORIZON, selectExecutionActions } from './executionHorizon';
 import {
+  FreshCameraFrameWaitError,
+  type FreshCameraFrameWaitOptions,
+  type FreshCameraFrameWaitResult,
+} from './freshCameraFrame';
+import {
   getObservationTcpPose,
   isActionChunk,
   isPolicyInferenceOnlyEnabled,
@@ -36,6 +41,7 @@ const IK_TIMEOUT_MS = 1000;
 export const AUTO_LOOP_3_STEP_LIMIT = 3;
 export const AUTO_LOOP_10_STEP_LIMIT = 10;
 export const CUP_APPROACH_STEP_LIMIT = 20;
+export const AUTO_LOOP_FRESH_CAMERA_TIMEOUT_MS = 1000;
 export type AutoLoopStepLimit = typeof AUTO_LOOP_3_STEP_LIMIT | typeof AUTO_LOOP_10_STEP_LIMIT;
 export type AutoLoopTaskType = 'bounded_auto_loop' | 'cup_approach';
 
@@ -59,6 +65,8 @@ interface AutoLoopRuntime extends AutoLoopState {
   lastCameraTimestamp: number | null;
   taskType: AutoLoopTaskType;
   taskEvaluationBefore: CupApproachSample | null;
+  freshCameraWaitController: AbortController | null;
+  freshCameraWaitDurationMs: number | null;
 }
 
 const isIkTraceEnabled = (): boolean =>
@@ -73,6 +81,9 @@ interface ReplayContext {
   jointValues: JointValues;
   tcpPose: Pose | null;
   getObservation: () => InferenceObservation | null;
+  waitForFreshCameraFrame?: (
+    options: FreshCameraFrameWaitOptions,
+  ) => Promise<FreshCameraFrameWaitResult>;
   getCupWorldAabb?: () => WorldAabb | null;
   getPreContactSafety?: (
     currentJointValues: JointValues,
@@ -144,6 +155,7 @@ export const useInferenceReplay = ({
   jointValues,
   tcpPose,
   getObservation,
+  waitForFreshCameraFrame,
   getCupWorldAabb,
   getPreContactSafety,
   singleActionDebugEnabled,
@@ -173,6 +185,7 @@ export const useInferenceReplay = ({
     jointValues,
     tcpPose,
     getObservation,
+    waitForFreshCameraFrame,
     getCupWorldAabb,
     getPreContactSafety,
   });
@@ -200,6 +213,7 @@ export const useInferenceReplay = ({
     jointValues,
     tcpPose,
     getObservation,
+    waitForFreshCameraFrame,
     getCupWorldAabb,
     getPreContactSafety,
   };
@@ -257,6 +271,8 @@ export const useInferenceReplay = ({
   const fail = (nextError: InferenceError, notifyServer: boolean, preserveReviewData = false) => {
     const activeAutoLoop = autoLoopRef.current;
     if (activeAutoLoop) {
+      activeAutoLoop.freshCameraWaitController?.abort();
+      activeAutoLoop.freshCameraWaitController = null;
       autoLoopRef.current = null;
       updateAutoLoop(activeAutoLoop, 'ERROR');
     }
@@ -289,6 +305,28 @@ export const useInferenceReplay = ({
       closeSocket(4000, 'inference failed');
     }
   };
+
+  const getAutoLoopCameraEvidence = (
+    activeAutoLoop: AutoLoopRuntime,
+    currentObservationFrameIndex: number | null,
+    latestCameraFrameIndex: number | null,
+    latestCameraTimestampMs: number | null,
+    waitDurationMs: number | null = activeAutoLoop.freshCameraWaitDurationMs,
+  ) => ({
+    previous_observation_frame_index: activeAutoLoop.lastObservationFrameIndex,
+    current_observation_frame_index: currentObservationFrameIndex,
+    previous_camera_frame_index: activeAutoLoop.lastCameraFrameIndex,
+    previous_camera_timestamp_ms: activeAutoLoop.lastCameraTimestamp,
+    latest_camera_frame_index: latestCameraFrameIndex,
+    latest_camera_timestamp_ms: latestCameraTimestampMs,
+    latest_camera_timestamp_finite: Number.isFinite(latestCameraTimestampMs),
+    wait_duration_ms: waitDurationMs ?? 0,
+    timeout_ms: AUTO_LOOP_FRESH_CAMERA_TIMEOUT_MS,
+    episode_index: episodeIndexRef.current,
+    auto_loop_run_id: activeAutoLoop.runId,
+    auto_loop_step: activeAutoLoop.step,
+    task_type: activeAutoLoop.taskType,
+  });
 
   const persistReviewData = async (
     reviewData: Record<string, unknown>,
@@ -676,15 +714,26 @@ export const useInferenceReplay = ({
 
   const sendObservation = (socket: WebSocket) => {
     const context = contextRef.current;
+    const activeAutoLoop = autoLoopRef.current;
     const observation = context.getObservation();
     if (!observation) {
       fail(
-        { code: 'CAMERA_NOT_READY', stage: 'observation', message: '腕部相机尚未生成有效图像。' },
+        activeAutoLoop
+          ? {
+              code: 'AUTO_LOOP_STALE_CAMERA_FRAME',
+              stage: 'observation',
+              message: '等待新相机帧后未能构造有效 observation。',
+              ...getAutoLoopCameraEvidence(activeAutoLoop, null, null, null),
+            }
+          : {
+              code: 'CAMERA_NOT_READY',
+              stage: 'observation',
+              message: '腕部相机尚未生成有效图像。',
+            },
         true,
       );
       return;
     }
-    const activeAutoLoop = autoLoopRef.current;
     if (activeAutoLoop) {
       const cameraFrameIndex = observation.camera_frame_index;
       if (
@@ -706,8 +755,15 @@ export const useInferenceReplay = ({
             code: 'AUTO_LOOP_STALE_CAMERA_FRAME',
             stage: 'observation',
             message: '自动闭环要求 observation 与相机帧均向前推进。',
-            episode_index: episodeIndexRef.current,
             frame_index: observation.frame_index,
+            ...getAutoLoopCameraEvidence(
+              activeAutoLoop,
+              observation.frame_index,
+              typeof cameraFrameIndex === 'number' ? cameraFrameIndex : null,
+              typeof observation.camera_frame_timestamp_ms === 'number'
+                ? observation.camera_frame_timestamp_ms
+                : null,
+            ),
           },
           true,
         );
@@ -1704,6 +1760,133 @@ export const useInferenceReplay = ({
     sendObservation(socket);
   }
 
+  async function awaitFreshCameraThenStep(
+    activeAutoLoop: AutoLoopRuntime,
+    socket: WebSocket,
+  ): Promise<void> {
+    const waitForFreshCameraFrame = contextRef.current.waitForFreshCameraFrame;
+    const previousCameraFrameIndex = activeAutoLoop.lastCameraFrameIndex;
+    const previousCameraTimestampMs = activeAutoLoop.lastCameraTimestamp;
+    if (
+      !waitForFreshCameraFrame ||
+      previousCameraFrameIndex === null ||
+      previousCameraTimestampMs === null
+    ) {
+      fail(
+        {
+          code: 'AUTO_LOOP_STALE_CAMERA_FRAME',
+          stage: 'observation',
+          message: '自动闭环缺少有效的相机帧等待器或上一动作相机基线。',
+          ...getAutoLoopCameraEvidence(activeAutoLoop, null, null, null, 0),
+        },
+        true,
+        true,
+      );
+      return;
+    }
+
+    const controller = new AbortController();
+    activeAutoLoop.freshCameraWaitController = controller;
+    activeAutoLoop.freshCameraWaitDurationMs = null;
+    updateAutoLoop(activeAutoLoop, 'CAPTURING');
+    if (mountedRef.current) setProgress('等待腕部相机生成严格更新的新帧');
+
+    try {
+      const freshFrame = await waitForFreshCameraFrame({
+        previousCameraFrameIndex,
+        previousCameraTimestampMs,
+        timeoutMs: AUTO_LOOP_FRESH_CAMERA_TIMEOUT_MS,
+        signal: controller.signal,
+      });
+      if (
+        !mountedRef.current ||
+        autoLoopRef.current !== activeAutoLoop ||
+        activeAutoLoop.stopRequested
+      ) {
+        return;
+      }
+      activeAutoLoop.freshCameraWaitDurationMs = freshFrame.waitDurationMs;
+      if (
+        !Number.isInteger(freshFrame.cameraFrameIndex) ||
+        freshFrame.cameraFrameIndex <= previousCameraFrameIndex ||
+        !Number.isFinite(freshFrame.cameraTimestampMs) ||
+        freshFrame.cameraTimestampMs <= previousCameraTimestampMs
+      ) {
+        fail(
+          {
+            code: 'AUTO_LOOP_STALE_CAMERA_FRAME',
+            stage: 'observation',
+            message: '相机等待器返回的帧未同时推进帧号与时间戳。',
+            ...getAutoLoopCameraEvidence(
+              activeAutoLoop,
+              null,
+              freshFrame.cameraFrameIndex,
+              freshFrame.cameraTimestampMs,
+              freshFrame.waitDurationMs,
+            ),
+          },
+          true,
+          true,
+        );
+        return;
+      }
+      if (socketRef.current !== socket || socket.readyState !== WebSocket.OPEN) {
+        fail(
+          {
+            code: 'AUTO_LOOP_WEBSOCKET_CLOSED',
+            stage: 'connection',
+            message: '等待相机新帧期间推理连接已关闭，自动闭环不能继续。',
+            ...getAutoLoopCameraEvidence(
+              activeAutoLoop,
+              null,
+              freshFrame.cameraFrameIndex,
+              freshFrame.cameraTimestampMs,
+              freshFrame.waitDurationMs,
+            ),
+          },
+          false,
+          true,
+        );
+        return;
+      }
+      stepSingleAction();
+    } catch (caught) {
+      if (
+        controller.signal.aborted ||
+        !mountedRef.current ||
+        autoLoopRef.current !== activeAutoLoop ||
+        activeAutoLoop.stopRequested
+      ) {
+        return;
+      }
+      const waitError = caught instanceof FreshCameraFrameWaitError ? caught : null;
+      fail(
+        {
+          code: 'AUTO_LOOP_STALE_CAMERA_FRAME',
+          stage: 'observation',
+          message:
+            waitError?.reason === 'timeout'
+              ? `自动闭环在 ${AUTO_LOOP_FRESH_CAMERA_TIMEOUT_MS} ms 内未收到严格更新的有效相机帧。`
+              : '自动闭环等待新相机帧失败。',
+          ...(waitError ? { camera_wait_failure_reason: waitError.reason } : {}),
+          ...getAutoLoopCameraEvidence(
+            activeAutoLoop,
+            null,
+            waitError?.latestCameraFrameIndex ?? null,
+            waitError?.latestCameraTimestampMs ?? null,
+            waitError?.waitDurationMs ?? null,
+          ),
+        },
+        true,
+        true,
+      );
+    } finally {
+      if (activeAutoLoop.freshCameraWaitController === controller) {
+        activeAutoLoop.freshCameraWaitController = null;
+      }
+    }
+  }
+
   const step = () => {
     if (autoLoopRef.current) return;
     stepSingleAction();
@@ -1753,6 +1936,8 @@ export const useInferenceReplay = ({
       lastCameraTimestamp: null,
       taskType,
       taskEvaluationBefore: null,
+      freshCameraWaitController: null,
+      freshCameraWaitDurationMs: null,
     };
     autoLoopRef.current = runtime;
     updateAutoLoop(runtime, 'CAPTURING');
@@ -1797,6 +1982,22 @@ export const useInferenceReplay = ({
     const activeAutoLoop = autoLoopRef.current;
     if (!activeAutoLoop) return;
     activeAutoLoop.stopRequested = true;
+    if (activeAutoLoop.freshCameraWaitController) {
+      activeAutoLoop.freshCameraWaitController.abort();
+      activeAutoLoop.freshCameraWaitController = null;
+      autoLoopRef.current = null;
+      updateAutoLoop(activeAutoLoop, 'STOPPED');
+      updateStatus('stopped');
+      if (mountedRef.current) setProgress('自动闭环已停止，没有发送下一步观测');
+      publishDebugEvent('inference:stop', {
+        reason: 'user',
+        auto_loop_run_id: activeAutoLoop.runId,
+        auto_loop_step: activeAutoLoop.step,
+        stage: 'fresh_camera_wait',
+      });
+      closeSocket(1000, 'auto loop stopped while waiting for camera');
+      return;
+    }
     updateAutoLoop(activeAutoLoop, 'STOPPED');
     if (statusRef.current === 'playing' || reviewCompletionPendingRef.current) {
       if (mountedRef.current) setProgress('已停止后续闭环，当前动作完成并保存后结束');
@@ -1935,8 +2136,14 @@ export const useInferenceReplay = ({
             stage: 'observation',
             message: '执行后相机帧没有推进，自动闭环已停止。',
             request_id: chunk.request_id,
-            episode_index: chunk.episode_index,
             frame_index: postObservation?.frame_index ?? chunk.frame_index,
+            ...getAutoLoopCameraEvidence(
+              activeAutoLoop,
+              postObservation?.frame_index ?? null,
+              postObservation?.camera_frame_index ?? null,
+              postActionCameraTimestamp ?? null,
+              0,
+            ),
           },
           true,
           true,
@@ -2130,6 +2337,8 @@ export const useInferenceReplay = ({
             currentAutoLoop.completedSteps = currentAutoLoop.step;
             updateStatus('complete');
             if (currentAutoLoop.stopRequested) {
+              currentAutoLoop.freshCameraWaitController?.abort();
+              currentAutoLoop.freshCameraWaitController = null;
               autoLoopRef.current = null;
               updateAutoLoop(
                 currentAutoLoop,
@@ -2142,6 +2351,8 @@ export const useInferenceReplay = ({
               return;
             }
             if (currentAutoLoop.completedSteps >= currentAutoLoop.maxSteps) {
+              currentAutoLoop.freshCameraWaitController?.abort();
+              currentAutoLoop.freshCameraWaitController = null;
               autoLoopRef.current = null;
               updateAutoLoop(
                 currentAutoLoop,
@@ -2180,7 +2391,7 @@ export const useInferenceReplay = ({
               currentAutoLoop.completedSteps + 1,
               currentAutoLoop.completedSteps,
             );
-            stepSingleAction();
+            void awaitFreshCameraThenStep(currentAutoLoop, socket);
             return;
           }
           updateStatus(saved ? 'complete' : 'error');
@@ -2194,6 +2405,11 @@ export const useInferenceReplay = ({
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      autoLoopRef.current?.freshCameraWaitController?.abort();
+      if (autoLoopRef.current) {
+        autoLoopRef.current.freshCameraWaitController = null;
+        autoLoopRef.current = null;
+      }
       if (workerTimeoutRef.current !== null) {
         window.clearTimeout(workerTimeoutRef.current);
         workerTimeoutRef.current = null;

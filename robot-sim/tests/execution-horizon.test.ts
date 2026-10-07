@@ -12,7 +12,12 @@ import type {
 } from '../src/app/inferenceProtocol';
 import { findRobotConfig } from '../src/app/config';
 import { selectExecutionActions } from '../src/app/executionHorizon';
-import { useInferenceReplay, type AutoLoopStepLimit } from '../src/app/useInferenceReplay';
+import {
+  AUTO_LOOP_FRESH_CAMERA_TIMEOUT_MS,
+  useInferenceReplay,
+  type AutoLoopStepLimit,
+} from '../src/app/useInferenceReplay';
+import { FreshCameraFrameWaitError } from '../src/app/freshCameraFrame';
 import type { InferenceObservation } from '../src/app/inferenceProtocol';
 import type { JointValues, Pose } from '../src/core/types';
 import { Kinematics } from '../src/core/Kinematics';
@@ -247,6 +252,16 @@ const createAutoLoopHarness = async (
   maxSteps: AutoLoopStepLimit = 3,
   cupApproach = false,
   preContactUnsafe = false,
+  waitForFreshCameraFrame?: (options: {
+    previousCameraFrameIndex: number;
+    previousCameraTimestampMs: number;
+    timeoutMs: number;
+    signal: AbortSignal;
+  }) => Promise<{
+    cameraFrameIndex: number;
+    cameraTimestampMs: number;
+    waitDurationMs: number;
+  }>,
 ) => {
   let observation = makeAutoLoopObservation(7, 10, 50, cadStartPose, 0.06);
   const cupWorldAabb: WorldAabb = {
@@ -264,6 +279,13 @@ const createAutoLoopHarness = async (
     jointValues: cadSeed,
     tcpPose: cadStartPose,
     getObservation: () => observation,
+    waitForFreshCameraFrame:
+      waitForFreshCameraFrame ??
+      (async () => ({
+        cameraFrameIndex: observation.camera_frame_index as number,
+        cameraTimestampMs: observation.camera_frame_timestamp_ms,
+        waitDurationMs: 0,
+      })),
     getCupWorldAabb: cupApproach ? () => cupWorldAabb : undefined,
     getPreContactSafety: cupApproach
       ? (): PreContactSafetyResult => {
@@ -1048,6 +1070,215 @@ describe('execution horizon', () => {
     harness.container.remove();
   });
 
+  it('保存上一步 review 后等待相机 callback 再发送下一步 observation', async () => {
+    vi.stubGlobal('crypto', { randomUUID: () => 'run-auto-fresh-camera-wait' });
+    let releaseWaiter:
+      | ((sample: {
+          cameraFrameIndex: number;
+          cameraTimestampMs: number;
+          waitDurationMs: number;
+        }) => void)
+      | null = null;
+    const waitForFreshCameraFrame = vi.fn(
+      () =>
+        new Promise<{
+          cameraFrameIndex: number;
+          cameraTimestampMs: number;
+          waitDurationMs: number;
+        }>((resolvePromise) => {
+          releaseWaiter = resolvePromise;
+        }),
+    );
+    const harness = await createAutoLoopHarness(3, false, false, waitForFreshCameraFrame);
+    await sendAutoLoopActionChunk(harness, 'request-auto-fresh-camera-first');
+    await completeAutoLoopPlayback(harness);
+
+    const sentBeforeFreshFrame = harness.socket.sent
+      .map((message) => JSON.parse(message))
+      .filter((message) => message.type === 'observation');
+    expect(waitForFreshCameraFrame).toHaveBeenCalledTimes(1);
+    expect(waitForFreshCameraFrame).toHaveBeenCalledWith(
+      expect.objectContaining({
+        previousCameraFrameIndex: 11,
+        previousCameraTimestampMs: 60,
+        timeoutMs: expect.any(Number),
+        signal: expect.any(AbortSignal),
+      }),
+    );
+    expect(sentBeforeFreshFrame).toHaveLength(1);
+
+    await act(async () => {
+      releaseWaiter?.({ cameraFrameIndex: 12, cameraTimestampMs: 70, waitDurationMs: 0 });
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 0));
+    });
+    expect(
+      harness.socket.sent
+        .map((message) => JSON.parse(message))
+        .filter((message) => message.type === 'observation'),
+    ).toHaveLength(2);
+
+    act(() => harness.root.unmount());
+    harness.container.remove();
+  });
+
+  it('fresh-frame timeout 保留前后帧证据并 fail closed', async () => {
+    vi.stubGlobal('crypto', { randomUUID: () => 'run-auto-fresh-camera-timeout' });
+    const waitForFreshCameraFrame = vi.fn(
+      async (options: { previousCameraFrameIndex: number; previousCameraTimestampMs: number }) => {
+        throw new FreshCameraFrameWaitError(
+          'timeout',
+          options.previousCameraFrameIndex,
+          options.previousCameraTimestampMs,
+          options.previousCameraFrameIndex + 1,
+          Number.NaN,
+          AUTO_LOOP_FRESH_CAMERA_TIMEOUT_MS,
+        );
+      },
+    );
+    const harness = await createAutoLoopHarness(3, false, false, waitForFreshCameraFrame);
+    await sendAutoLoopActionChunk(harness, 'request-auto-fresh-camera-timeout');
+    await completeAutoLoopPlayback(harness);
+
+    const sentObservations = harness.socket.sent
+      .map((message) => JSON.parse(message))
+      .filter((message) => message.type === 'observation');
+    expect(sentObservations).toHaveLength(1);
+    expect(harness.replay.error).toMatchObject({
+      code: 'AUTO_LOOP_STALE_CAMERA_FRAME',
+      previous_observation_frame_index: 8,
+      current_observation_frame_index: null,
+      previous_camera_frame_index: 11,
+      previous_camera_timestamp_ms: 60,
+      latest_camera_frame_index: 12,
+      latest_camera_timestamp_finite: false,
+      wait_duration_ms: AUTO_LOOP_FRESH_CAMERA_TIMEOUT_MS,
+      timeout_ms: AUTO_LOOP_FRESH_CAMERA_TIMEOUT_MS,
+      episode_index: 0,
+      auto_loop_run_id: 'run-auto-fresh-camera-timeout',
+      auto_loop_step: 2,
+      task_type: 'bounded_auto_loop',
+      camera_wait_failure_reason: 'timeout',
+    });
+    expect(harness.replay.error?.latest_camera_timestamp_ms).toBeNaN();
+    expect(harness.replay.autoLoop.phase).toBe('ERROR');
+    expect(
+      harness.socket.sent.filter((message) => JSON.parse(message).type === 'stop'),
+    ).toHaveLength(1);
+
+    act(() => harness.root.unmount());
+    harness.container.remove();
+  });
+
+  it('用户在 fresh-camera wait 期间停止时立即取消且不发送下一步 observation', async () => {
+    vi.stubGlobal('crypto', { randomUUID: () => 'run-auto-fresh-camera-stop' });
+    let waitSignal: AbortSignal | null = null;
+    const waitForFreshCameraFrame = vi.fn(
+      ({ signal }: { signal: AbortSignal }) =>
+        new Promise<{
+          cameraFrameIndex: number;
+          cameraTimestampMs: number;
+          waitDurationMs: number;
+        }>((_resolvePromise, rejectPromise) => {
+          waitSignal = signal;
+          signal.addEventListener('abort', () => rejectPromise(new Error('wait aborted')), {
+            once: true,
+          });
+        }),
+    );
+    const harness = await createAutoLoopHarness(3, false, false, waitForFreshCameraFrame);
+    await sendAutoLoopActionChunk(harness, 'request-auto-fresh-camera-stop');
+    await completeAutoLoopPlayback(harness);
+    expect(waitForFreshCameraFrame).toHaveBeenCalledTimes(1);
+
+    act(() => harness.replay.stopAutoLoop());
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect((waitSignal as AbortSignal | null)?.aborted).toBe(true);
+    expect(
+      harness.socket.sent
+        .map((message) => JSON.parse(message))
+        .filter((message) => message.type === 'observation'),
+    ).toHaveLength(1);
+    expect(harness.replay.autoLoop.phase).toBe('STOPPED');
+    expect(harness.replay.status).toBe('stopped');
+    expect(harness.replay.error).toBeNull();
+    expect(harness.socket.readyState).toBe(FakeWebSocket.CLOSING);
+
+    act(() => harness.root.unmount());
+    harness.container.remove();
+  });
+
+  it('WebSocket 在 fresh-camera wait 期间断开时取消 waiter', async () => {
+    vi.stubGlobal('crypto', { randomUUID: () => 'run-auto-fresh-camera-disconnect' });
+    let waitSignal: AbortSignal | null = null;
+    const waitForFreshCameraFrame = vi.fn(
+      ({ signal }: { signal: AbortSignal }) =>
+        new Promise<{
+          cameraFrameIndex: number;
+          cameraTimestampMs: number;
+          waitDurationMs: number;
+        }>((_resolvePromise, rejectPromise) => {
+          waitSignal = signal;
+          signal.addEventListener('abort', () => rejectPromise(new Error('wait aborted')), {
+            once: true,
+          });
+        }),
+    );
+    const harness = await createAutoLoopHarness(3, false, false, waitForFreshCameraFrame);
+    await sendAutoLoopActionChunk(harness, 'request-auto-fresh-camera-disconnect');
+    await completeAutoLoopPlayback(harness);
+
+    act(() => {
+      harness.socket.onclose?.({ code: 1006, reason: 'connection lost' } as CloseEvent);
+    });
+    await Promise.resolve();
+
+    expect((waitSignal as AbortSignal | null)?.aborted).toBe(true);
+    expect(harness.replay.error?.code).toBe('AUTO_LOOP_WEBSOCKET_CLOSED');
+    expect(
+      harness.socket.sent
+        .map((message) => JSON.parse(message))
+        .filter((message) => message.type === 'observation'),
+    ).toHaveLength(1);
+
+    act(() => harness.root.unmount());
+    harness.container.remove();
+  });
+
+  it('component unmount 会取消相机等待，不恢复 auto-loop', async () => {
+    vi.stubGlobal('crypto', { randomUUID: () => 'run-auto-fresh-camera-unmount' });
+    let waitSignal: AbortSignal | null = null;
+    const waitForFreshCameraFrame = vi.fn(
+      ({ signal }: { signal: AbortSignal }) =>
+        new Promise<{
+          cameraFrameIndex: number;
+          cameraTimestampMs: number;
+          waitDurationMs: number;
+        }>((_resolvePromise, rejectPromise) => {
+          waitSignal = signal;
+          signal.addEventListener('abort', () => rejectPromise(new Error('wait aborted')), {
+            once: true,
+          });
+        }),
+    );
+    const harness = await createAutoLoopHarness(3, false, false, waitForFreshCameraFrame);
+    await sendAutoLoopActionChunk(harness, 'request-auto-fresh-camera-unmount');
+    await completeAutoLoopPlayback(harness);
+
+    act(() => harness.root.unmount());
+    await Promise.resolve();
+
+    expect((waitSignal as AbortSignal | null)?.aborted).toBe(true);
+    expect(
+      harness.socket.sent
+        .map((message) => JSON.parse(message))
+        .filter((message) => message.type === 'observation'),
+    ).toHaveLength(1);
+    harness.container.remove();
+  });
+
   it('十步自动闭环逐步保存后才推理下一步，并在第十步停止', async () => {
     vi.stubGlobal('crypto', { randomUUID: () => 'run-auto-ten-steps' });
     const harness = await createAutoLoopHarness(10);
@@ -1447,7 +1678,19 @@ describe('execution horizon', () => {
       harness.postedReviews.filter((review) => review.review_status === 'COMPLETED'),
     ).toHaveLength(0);
     expect(harness.replay.autoLoop.phase).toBe('ERROR');
-    expect(harness.replay.error?.code).toBe('AUTO_LOOP_STALE_CAMERA_FRAME');
+    expect(harness.replay.error).toMatchObject({
+      code: 'AUTO_LOOP_STALE_CAMERA_FRAME',
+      previous_observation_frame_index: 7,
+      current_observation_frame_index: 8,
+      previous_camera_frame_index: 10,
+      previous_camera_timestamp_ms: 50,
+      latest_camera_frame_index: 10,
+      latest_camera_timestamp_ms: 60,
+      timeout_ms: AUTO_LOOP_FRESH_CAMERA_TIMEOUT_MS,
+      auto_loop_run_id: 'run-auto-stale-camera',
+      auto_loop_step: 1,
+      task_type: 'bounded_auto_loop',
+    });
 
     act(() => harness.root.unmount());
     harness.container.remove();
@@ -1567,7 +1810,18 @@ describe('execution horizon', () => {
       harness.socket.sent.filter((message) => JSON.parse(message).type === 'observation'),
     ).toHaveLength(1);
     expect(harness.replay.autoLoop.phase).toBe('ERROR');
-    expect(harness.replay.error?.code).toBe('AUTO_LOOP_STALE_CAMERA_FRAME');
+    expect(harness.replay.error).toMatchObject({
+      code: 'AUTO_LOOP_STALE_CAMERA_FRAME',
+      previous_observation_frame_index: 8,
+      current_observation_frame_index: null,
+      previous_camera_frame_index: 11,
+      previous_camera_timestamp_ms: 60,
+      latest_camera_frame_index: 11,
+      latest_camera_timestamp_ms: 60,
+      auto_loop_run_id: 'run-auto-capture-error',
+      auto_loop_step: 2,
+      task_type: 'bounded_auto_loop',
+    });
 
     act(() => harness.root.unmount());
     harness.container.remove();

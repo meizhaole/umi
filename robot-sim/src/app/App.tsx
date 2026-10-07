@@ -17,6 +17,7 @@ import { parseUrdf } from '../utils/urdfParser';
 import { configureRobotUrdf } from '../utils/configureRobotUrdf';
 import { resolvePackageUris } from '../utils/resolvePackageUri.mjs';
 import { publishDebugEvent } from './debugBus';
+import { FreshCameraFrameWaiter, type FreshCameraFrameWaitOptions } from './freshCameraFrame';
 import { useInferenceReplay } from './useInferenceReplay';
 import type { AutoLoopStepLimit } from './useInferenceReplay';
 import {
@@ -243,6 +244,10 @@ export const App = () => {
   });
   const [cameraPreviewReady, setCameraPreviewReady] = useState(false);
   const cameraFramesRef = useRef<IndexedSimCameraFrame[]>([]);
+  const cameraFrameWaiterRef = useRef<FreshCameraFrameWaiter | null>(null);
+  if (cameraFrameWaiterRef.current === null) {
+    cameraFrameWaiterRef.current = new FreshCameraFrameWaiter();
+  }
   const cameraPreviewCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const cameraPreviewImageDataRef = useRef<ImageData | null>(null);
   const cameraPreviewLastDrawRef = useRef(0);
@@ -320,6 +325,7 @@ export const App = () => {
     cameraPreviewLastDrawRef.current = 0;
     cameraFramesRef.current = [];
     cameraFrameIndexRef.current = 0;
+    cameraFrameWaiterRef.current?.reset();
 
     const loadRobot = async () => {
       try {
@@ -477,6 +483,11 @@ export const App = () => {
         camera_frame_index: cameraFrameIndexRef.current++,
       };
       cameraFramesRef.current = [...cameraFramesRef.current.slice(-1), indexedFrame];
+      cameraFrameWaiterRef.current?.publish({
+        cameraFrameIndex: indexedFrame.camera_frame_index,
+        cameraTimestampMs: indexedFrame.timestamp,
+        imageAvailable: indexedFrame.rgb.length > 0,
+      });
 
       if (performance.now() - cameraPreviewLastDrawRef.current < CAMERA_PREVIEW_INTERVAL_MS) {
         return;
@@ -515,6 +526,11 @@ export const App = () => {
         : {}),
     };
   }, [drawCameraPreview, singleActionDebugEnabled]);
+  const waitForFreshCameraFrame = useCallback(
+    (options: FreshCameraFrameWaitOptions) =>
+      cameraFrameWaiterRef.current!.waitForFreshFrame(options),
+    [],
+  );
   const inference = useInferenceReplay({
     robotId: modelId,
     robotConfig: currentModel,
@@ -524,6 +540,7 @@ export const App = () => {
     jointValues,
     tcpPose,
     getObservation,
+    waitForFreshCameraFrame,
     getCupWorldAabb: () => getObjectWorldAabb(cupEvaluationGeometryRef.current),
     getPreContactSafety: (currentJointValues, targetJointValues) =>
       evaluateCupApproachPreContactSafety({
