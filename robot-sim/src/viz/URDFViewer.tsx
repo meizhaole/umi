@@ -18,6 +18,7 @@ interface URDFViewerProps {
   cameraEnabled: boolean;
   tcpPose: Pose;
   onCameraFrame: (frame: SimCameraFrame) => void;
+  onRobotChange: (robot: URDFRobot | null) => void;
 }
 
 export const URDFViewer = ({
@@ -31,6 +32,7 @@ export const URDFViewer = ({
   cameraEnabled,
   tcpPose,
   onCameraFrame,
+  onRobotChange,
 }: URDFViewerProps) => {
   const [robot, setRobot] = useState<URDFRobot | null>(null);
 
@@ -61,6 +63,11 @@ export const URDFViewer = ({
       active = false;
     };
   }, [description.name, onError, onLoaded, packageMappings, urdfXml]);
+
+  useEffect(() => {
+    onRobotChange(robot);
+    return () => onRobotChange(null);
+  }, [onRobotChange, robot]);
 
   useEffect(() => {
     if (!robot) return;

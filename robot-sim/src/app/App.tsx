@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Quaternion, Vector3 } from 'three';
 import type { Group } from 'three';
+import type { URDFRobot } from 'urdf-loader';
 import { JointController } from '../core/JointController';
 import { Kinematics } from '../core/Kinematics';
 import { RobotModel } from '../core/RobotModel';
@@ -55,6 +56,7 @@ import { DatasetReplayPanel, type DatasetReplayState } from '../ui/DatasetReplay
 import { Wrist3PhysicsDebugPanel } from '../ui/Wrist3PhysicsDebugPanel';
 import type { Wrist3ExperimentTrace, Wrist3PhysicsDebugState } from '../sim/RobotBody';
 import { getObjectWorldAabb } from '../sim/tasks/cupApproachEvaluation';
+import { evaluateCupApproachPreContactSafety } from '../sim/tasks/cupApproachPreContactSafety';
 
 interface LoadedRobot {
   robotId: RobotModelId;
@@ -193,6 +195,10 @@ export const App = () => {
   );
   const [cupSceneResetToken, setCupSceneResetToken] = useState(0);
   const cupEvaluationGeometryRef = useRef<Group | null>(null);
+  const urdfVisualRobotRef = useRef<URDFRobot | null>(null);
+  const handleUrdfVisualRobotChange = useCallback((robot: URDFRobot | null) => {
+    urdfVisualRobotRef.current = robot;
+  }, []);
   const [loadedRobot, setLoadedRobot] = useState<LoadedRobot | null>(null);
   const [loadError, setLoadError] = useState('');
   const [jointValues, setJointValues] = useState<JointValues>({});
@@ -519,6 +525,14 @@ export const App = () => {
     tcpPose,
     getObservation,
     getCupWorldAabb: () => getObjectWorldAabb(cupEvaluationGeometryRef.current),
+    getPreContactSafety: (currentJointValues, targetJointValues) =>
+      evaluateCupApproachPreContactSafety({
+        robot: urdfVisualRobotRef.current,
+        description: loadedRobot?.description ?? null,
+        currentJointValues,
+        targetJointValues,
+        cupWorldAabb: getObjectWorldAabb(cupEvaluationGeometryRef.current),
+      }),
     singleActionDebugEnabled,
   });
   useEffect(() => {
@@ -1533,6 +1547,7 @@ export const App = () => {
                 onJointBodyAngles={setJointBodyAngles}
                 onWrist3DebugState={setWrist3PhysicsDebugState}
                 onWrist3ExperimentComplete={handleWrist3ExperimentComplete}
+                onUrdfVisualRobotChange={handleUrdfVisualRobotChange}
                 onPhysicsReady={setPhysicsReady}
                 playback={inference.playback}
                 cupSceneResetToken={cupSceneResetToken}

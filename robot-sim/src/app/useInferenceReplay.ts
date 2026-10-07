@@ -21,6 +21,10 @@ import type {
 import { poseErrorRotation, vectorLength } from '../utils/math';
 import { getGripperJoints, mapGripperOpeningToJoints } from './gripperMapping';
 import {
+  createPreContactSafetyFailure,
+  type PreContactSafetyResult,
+} from '../sim/tasks/cupApproachPreContactSafety';
+import {
   evaluateCupApproachSample,
   robotPositionToSceneWorld,
   type CupApproachSample,
@@ -70,6 +74,10 @@ interface ReplayContext {
   tcpPose: Pose | null;
   getObservation: () => InferenceObservation | null;
   getCupWorldAabb?: () => WorldAabb | null;
+  getPreContactSafety?: (
+    currentJointValues: JointValues,
+    targetJointValues: JointValues,
+  ) => PreContactSafetyResult;
 }
 
 interface PlaybackSnapshot {
@@ -137,6 +145,7 @@ export const useInferenceReplay = ({
   tcpPose,
   getObservation,
   getCupWorldAabb,
+  getPreContactSafety,
   singleActionDebugEnabled,
 }: ReplayContext & { singleActionDebugEnabled: boolean }) => {
   const policyInferenceOnly = isPolicyInferenceOnlyEnabled() && !singleActionDebugEnabled;
@@ -165,6 +174,7 @@ export const useInferenceReplay = ({
     tcpPose,
     getObservation,
     getCupWorldAabb,
+    getPreContactSafety,
   });
   const socketRef = useRef<WebSocket | null>(null);
   const episodeIndexRef = useRef(-1);
@@ -191,6 +201,7 @@ export const useInferenceReplay = ({
     tcpPose,
     getObservation,
     getCupWorldAabb,
+    getPreContactSafety,
   };
 
   const updateStatus = (nextStatus: InferenceStatus) => {
@@ -326,6 +337,34 @@ export const useInferenceReplay = ({
       }
       const activeAutoLoop = autoLoopRef.current;
       if (activeAutoLoop && persistencePayload.auto_loop_run_id === activeAutoLoop.runId) {
+        const preContactSafety = persistencePayload.pre_contact_safety;
+        const stoppedBeforeExecution =
+          activeAutoLoop.taskType === 'cup_approach' &&
+          persistencePayload.task_type === 'cup_approach' &&
+          persistencePayload.review_status === 'STOPPED_BEFORE_EXECUTION' &&
+          isRecord(preContactSafety) &&
+          preContactSafety.verdict === 'STOP_BEFORE_UNVALIDATED_CONTACT';
+        if (stoppedBeforeExecution) {
+          pendingPlaybackRef.current = null;
+          activeChunkRef.current = null;
+          activeJointAnglesRef.current = [];
+          sendStop();
+          autoLoopRef.current = null;
+          updateAutoLoop(activeAutoLoop, 'STOPPED');
+          updateStatus('stopped');
+          if (mountedRef.current) {
+            setProgress('接触前保护已停止本步，未执行动作，也不会启动下一次 inference');
+          }
+          publishDebugEvent('inference:cup_approach_pre_contact_stop', {
+            auto_loop_run_id: activeAutoLoop.runId,
+            auto_loop_step: activeAutoLoop.step,
+            request_id: persistencePayload.request_id,
+            reason: persistencePayload.task_stop_reason,
+            pre_contact_safety: preContactSafety,
+          });
+          closeSocket(1000, 'cup approach stopped before unvalidated contact');
+          return true;
+        }
         const isReadyForExecution =
           persistencePayload.review_status === 'WAITING_FOR_HUMAN_APPROVAL' &&
           persistencePayload.safety_verdict === 'READY_FOR_HUMAN_APPROVAL';
@@ -1145,7 +1184,7 @@ export const useInferenceReplay = ({
           : jointDeltaNorm === 0
             ? 'ZERO_WITHIN_TOLERANCE'
             : 'NONZERO_IK_TARGET';
-        const safetyVerdict =
+        const existingSafetyVerdict =
           ikSucceeded &&
           jointDeltaNorm !== null &&
           jointDeltaNorm > 0 &&
@@ -1154,8 +1193,34 @@ export const useInferenceReplay = ({
           allArmJointsWithinLimits
             ? 'READY_FOR_HUMAN_APPROVAL'
             : 'BLOCKED';
-        const reviewStatus =
-          safetyVerdict === 'READY_FOR_HUMAN_APPROVAL'
+        let preContactSafety: PreContactSafetyResult | null = null;
+        const cupApproachAction = autoLoopRef.current?.taskType === 'cup_approach';
+        if (cupApproachAction && existingSafetyVerdict === 'READY_FOR_HUMAN_APPROVAL') {
+          try {
+            preContactSafety = context.getPreContactSafety
+              ? context.getPreContactSafety(seedJoints, {
+                  ...(targetJoints ?? {}),
+                  ...(gripperMapping?.joint_targets ?? {}),
+                })
+              : createPreContactSafetyFailure(
+                  context.getCupWorldAabb?.() ?? null,
+                  'Cup Approach 的 pre-contact safety provider 不可用。',
+                );
+          } catch (caught) {
+            preContactSafety = createPreContactSafetyFailure(
+              context.getCupWorldAabb?.() ?? null,
+              caught instanceof Error ? caught.message : String(caught),
+            );
+          }
+        }
+        const preContactStopped =
+          cupApproachAction &&
+          existingSafetyVerdict === 'READY_FOR_HUMAN_APPROVAL' &&
+          preContactSafety?.verdict !== 'SAFE_TO_EXECUTE';
+        const safetyVerdict = preContactStopped ? 'BLOCKED' : existingSafetyVerdict;
+        const reviewStatus = preContactStopped
+          ? 'STOPPED_BEFORE_EXECUTION'
+          : safetyVerdict === 'READY_FOR_HUMAN_APPROVAL'
             ? 'WAITING_FOR_HUMAN_APPROVAL'
             : 'NOT_READY_FOR_EXECUTION';
         const nextReviewData: Record<string, unknown> = {
@@ -1177,6 +1242,8 @@ export const useInferenceReplay = ({
           tcp_link: context.description?.tipLink ?? null,
           frame_index: chunk.frame_index,
           ...taskEvaluationBeforeField(autoLoopRef.current),
+          ...(preContactSafety ? { pre_contact_safety: preContactSafety } : {}),
+          ...(preContactStopped ? { task_stop_reason: 'STOP_BEFORE_UNVALIDATED_CONTACT' } : {}),
           observation_tcp_snapshot: observationTcpPose,
           action_start_pose: ikRecord?.start_pose ?? observationTcpPose,
           camera_frame_index: lastObservationRef.current?.camera_frame_index ?? null,
@@ -1666,6 +1733,7 @@ export const useInferenceReplay = ({
       reviewCompletionPendingRef.current ||
       !isUr5CadContext(context) ||
       (taskType === 'cup_approach' && !context.getCupWorldAabb?.()) ||
+      (taskType === 'cup_approach' && !context.getPreContactSafety) ||
       (taskType === 'bounded_auto_loop' && maxSteps !== 3 && maxSteps !== 10) ||
       (taskType === 'cup_approach' && maxSteps !== CUP_APPROACH_STEP_LIMIT)
     ) {

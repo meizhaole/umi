@@ -20,6 +20,11 @@ import { parseUrdf } from '../src/utils/urdfParser';
 import { quaternionToRotationVector } from '../src/utils/math';
 import { runIkSolve } from '../src/workers/umiIk.worker';
 import type { WorldAabb } from '../src/sim/tasks/cupApproachEvaluation';
+import {
+  evaluateSweptAabbSafety,
+  GUARDED_END_EFFECTOR_GEOMETRIES,
+  type PreContactSafetyResult,
+} from '../src/sim/tasks/cupApproachPreContactSafety';
 
 const planarUrdf = `
   <robot name="planar">
@@ -238,7 +243,11 @@ const makeAutoLoopObservation = (
   };
 };
 
-const createAutoLoopHarness = async (maxSteps: AutoLoopStepLimit = 3, cupApproach = false) => {
+const createAutoLoopHarness = async (
+  maxSteps: AutoLoopStepLimit = 3,
+  cupApproach = false,
+  preContactUnsafe = false,
+) => {
   let observation = makeAutoLoopObservation(7, 10, 50, cadStartPose, 0.06);
   const cupWorldAabb: WorldAabb = {
     min: [-0.7, -0.1, -0.3],
@@ -256,6 +265,44 @@ const createAutoLoopHarness = async (maxSteps: AutoLoopStepLimit = 3, cupApproac
     tcpPose: cadStartPose,
     getObservation: () => observation,
     getCupWorldAabb: cupApproach ? () => cupWorldAabb : undefined,
+    getPreContactSafety: cupApproach
+      ? (): PreContactSafetyResult => {
+          const safeAabb: WorldAabb = {
+            min: [2, 2, 2],
+            max: [2.1, 2.1, 2.1],
+            center: [2.05, 2.05, 2.05],
+            size: [0.1, 0.1, 0.1],
+          };
+          const geometryAabbs = Object.fromEntries(
+            GUARDED_END_EFFECTOR_GEOMETRIES.map(({ name }) => [name, safeAabb]),
+          );
+          const samples = [0, 1].map((sampleIndex) => ({
+            sampleIndex,
+            geometryAabbs: {
+              ...geometryAabbs,
+              ...(preContactUnsafe && sampleIndex === 1
+                ? {
+                    left_soft_finger: {
+                      min: cupWorldAabb.min,
+                      max: cupWorldAabb.max,
+                      center: cupWorldAabb.center,
+                      size: cupWorldAabb.size,
+                    },
+                  }
+                : {}),
+            },
+          }));
+          return evaluateSweptAabbSafety({
+            cupWorldAabb,
+            guardedGeometries: GUARDED_END_EFFECTOR_GEOMETRIES.map(({ name }) => name),
+            currentGeometryAabbs: geometryAabbs,
+            targetGeometryAabbs: geometryAabbs,
+            samples,
+            safetyMarginM: 0,
+            safetyMarginBasis: 'integration test',
+          });
+        }
+      : undefined,
     singleActionDebugEnabled: true,
   };
   let replay!: ReturnType<typeof useInferenceReplay>;
@@ -1127,6 +1174,10 @@ describe('execution horizon', () => {
           cup_world_aabb_before: expect.any(Object),
           tcp_to_cup_surface_proxy_distance_before_m: expect.any(Number),
         },
+        pre_contact_safety: {
+          verdict: 'SAFE_TO_EXECUTE',
+          swept_sample_count: 2,
+        },
       });
       expect(harness.replay.playback?.actions.map((action) => action.actionIndex)).toEqual([0]);
       await completeAutoLoopPlayback(harness);
@@ -1203,6 +1254,51 @@ describe('execution horizon', () => {
       harness.postedReviews.filter((review) => review.review_status === 'COMPLETED'),
     ).toHaveLength(1);
     expect(harness.replay.autoLoop.phase).toBe('ERROR');
+
+    act(() => harness.root.unmount());
+    harness.container.remove();
+  });
+
+  it('接触前 guard 停止时保存未执行 review，不发 ack 或启动下一次 inference', async () => {
+    vi.stubGlobal('crypto', { randomUUID: () => 'run-cup-pre-contact-stop' });
+    const harness = await createAutoLoopHarness(3, true, true);
+
+    await sendAutoLoopActionChunk(harness, 'request-cup-pre-contact-stop');
+
+    const stopReview = harness.postedReviews[0];
+    const observations = harness.socket.sent
+      .map((message) => JSON.parse(message) as Record<string, unknown>)
+      .filter((message) => message.type === 'observation');
+    const acknowledgements = harness.socket.sent
+      .map((message) => JSON.parse(message) as Record<string, unknown>)
+      .filter((message) => message.type === 'ack');
+
+    expect(stopReview).toMatchObject({
+      review_status: 'STOPPED_BEFORE_EXECUTION',
+      safety_verdict: 'BLOCKED',
+      task_stop_reason: 'STOP_BEFORE_UNVALIDATED_CONTACT',
+      pre_contact_safety: {
+        verdict: 'STOP_BEFORE_UNVALIDATED_CONTACT',
+        swept_closest_geometry: 'left_soft_finger',
+      },
+    });
+    expect(stopReview).not.toHaveProperty('actual_after_action');
+    expect(harness.replay.reviewData).toMatchObject({
+      review_status: 'STOPPED_BEFORE_EXECUTION',
+      persistence_status: 'saved',
+    });
+    expect(harness.replay.playback).toBeNull();
+    expect(acknowledgements).toHaveLength(0);
+    expect(observations).toHaveLength(1);
+    expect(JSON.stringify(observations[0])).not.toMatch(/cup|target|goal|bbox|distance|contact/iu);
+    expect(harness.replay.autoLoop).toMatchObject({
+      step: 1,
+      completedSteps: 0,
+      phase: 'STOPPED',
+      taskType: 'cup_approach',
+    });
+    expect(harness.replay.status).toBe('stopped');
+    expect(harness.socket.readyState).toBe(FakeWebSocket.CLOSING);
 
     act(() => harness.root.unmount());
     harness.container.remove();

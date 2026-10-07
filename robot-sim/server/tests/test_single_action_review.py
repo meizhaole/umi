@@ -107,6 +107,39 @@ class SingleActionReviewPersistenceTest(unittest.TestCase):
         self.assertEqual(status, 422)
         self.assertFalse(self.review_path.exists())
 
+    def test_stopped_precontact_review_is_persisted_without_actual_after_action(self):
+        auto_loop_dir = Path(self.temp_dir.name) / "ur5-cad-auto-loop"
+        review = self.make_review("STOPPED_BEFORE_EXECUTION")
+        review.update(
+            {
+                "auto_loop_run_id": "run-0123456789abcdef",
+                "auto_loop_step": 1,
+                "auto_loop_max_steps": 20,
+                "task_type": "cup_approach",
+                "safety_verdict": "BLOCKED",
+                "task_stop_reason": "STOP_BEFORE_UNVALIDATED_CONTACT",
+                "pre_contact_safety": {
+                    "verdict": "STOP_BEFORE_UNVALIDATED_CONTACT",
+                    "would_enter_unvalidated_contact": True,
+                },
+            }
+        )
+
+        with patch.object(main, "AUTO_LOOP_REVIEW_DIR", auto_loop_dir, create=True):
+            status, result = self.post_review(
+                review,
+                "/api/ur5-cad-auto-loop-review",
+            )
+
+        self.assertEqual(status, 200)
+        saved_review = json.loads(Path(result["path"]).read_text(encoding="utf-8"))
+        self.assertEqual(saved_review["review_status"], "STOPPED_BEFORE_EXECUTION")
+        self.assertEqual(
+            saved_review["task_stop_reason"],
+            "STOP_BEFORE_UNVALIDATED_CONTACT",
+        )
+        self.assertNotIn("actual_after_action", saved_review)
+
     def test_completed_review_is_read_back_with_actual_state_and_targets(self):
         review = self.make_review("COMPLETED")
         review["actual_after_action"] = {

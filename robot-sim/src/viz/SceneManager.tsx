@@ -18,6 +18,7 @@ import {
 } from '../sim/RobotBody';
 import { publishDebugEvent } from '../app/debugBus';
 import { URDFViewer } from './URDFViewer';
+import type { URDFRobot } from 'urdf-loader';
 import { DEBUG_LAYER, setDebugLayer } from './sceneLayers';
 import type { SimCameraFrame } from '../sim/sensors/WristCameraCapture';
 import type { Pose } from '../core/types';
@@ -48,6 +49,7 @@ interface SceneManagerProps {
   onCameraFrame: (frame: SimCameraFrame) => void;
   onWrist3DebugState: (state: Wrist3PhysicsDebugState | null) => void;
   onWrist3ExperimentComplete: (trace: Wrist3ExperimentTrace) => void;
+  onUrdfVisualRobotChange: (robot: URDFRobot | null) => void;
 }
 
 const PLAYBACK_ACTION_SECONDS = 0.5;
@@ -231,6 +233,7 @@ export const SceneManager = ({
   tcpPose,
   onCameraFrame,
   onWrist3ExperimentComplete,
+  onUrdfVisualRobotChange,
 }: SceneManagerProps) => {
   const model = findRobotConfig(modelId);
   const diagnosticQuery = new URLSearchParams(
@@ -382,6 +385,7 @@ export const SceneManager = ({
           cameraEnabled={cameraEnabled}
           tcpPose={tcpPose}
           onCameraFrame={onCameraFrame}
+          onRobotChange={onUrdfVisualRobotChange}
           packageMappings={model.packageMappings}
           urdfXml={urdfXml}
         />

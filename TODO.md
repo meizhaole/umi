@@ -60,6 +60,7 @@
 - [x] 为 UR5_CAD 增加最多三步独立推理的受限自动闭环验证
 - [x] 在 robot-sim 中新增 10 步受限自动闭环稳定性验证模式
 - [x] 在 robot-sim 中新增 20 步杯子接近行为评估模式
+- [x] 为杯子接近测试增加真实 mesh 扫掠 AABB 接触前保护
 - [ ] 将本机训练 checkpoint 接入 Gazebo 回放启动参数
 - [ ] 接通 Gazebo 相机与 UMI 推理观测
 - [ ] 将实时 UMI 策略接入 ReBot RS 实机控制链路
