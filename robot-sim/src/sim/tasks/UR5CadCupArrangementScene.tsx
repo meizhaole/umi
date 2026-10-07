@@ -1,15 +1,17 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import type { ThreeEvent } from '@react-three/fiber';
+import { useCallback, useRef, useState } from 'react';
 import {
   CapsuleCollider,
   CylinderCollider,
   RigidBody,
   useAfterPhysicsStep,
 } from '@react-three/rapier';
-import { CubicBezierCurve3, DoubleSide, Plane, Vector2, Vector3 } from 'three';
+import type { RapierRigidBody } from '@react-three/rapier';
+import { CubicBezierCurve3, DoubleSide, Vector2, Vector3 } from 'three';
 
+import { TABLE_RADIUS } from '../tableConstants';
 import type { CupBodyRef } from './CupArrangementScene';
 import type { CupEvaluationGeometryRef } from './cupApproachEvaluation';
+import { usePlanarDrag } from './usePlanarDrag';
 
 const SAUCER_POSITION: [number, number, number] = [-0.578, 0, 0];
 const CUP_POSITION: [number, number, number] = [-0.578, 0.001, -0.24];
@@ -18,10 +20,11 @@ const SAUCER_RADIUS = 0.095;
 const SAUCER_COLLIDER_HALF_HEIGHT = 0.004;
 const CUP_HANDLE_COLLIDER_RADIUS = 0.006;
 const CUP_HANDLE_COLLIDER_SEGMENT_COUNT = 6;
-const MAX_CUP_CENTER_RADIUS = 0.64;
+const CUP_EDGE_CLEARANCE = 0.11;
+const MAX_CUP_CENTER_RADIUS = TABLE_RADIUS - CUP_EDGE_CLEARANCE;
+const MAX_SAUCER_CENTER_RADIUS = TABLE_RADIUS - SAUCER_RADIUS;
 const MAX_CUP_HEIGHT = 0.45;
 const MAX_CUP_SPEED = 0.8;
-const DRAG_PLANE = new Plane(new Vector3(0, 1, 0), 0);
 const CUP_PROFILE = [
   new Vector2(0, 0),
   new Vector2(0.028, 0),
@@ -75,19 +78,39 @@ interface UR5CadCupArrangementSceneProps {
   onDragStateChange: (dragging: boolean) => void;
 }
 
-const Saucer = () => (
-  <RigidBody type="fixed" colliders={false} position={SAUCER_POSITION}>
-    <CylinderCollider
-      args={[SAUCER_COLLIDER_HALF_HEIGHT, SAUCER_RADIUS]}
-      friction={0.9}
-      position={[0, SAUCER_COLLIDER_HALF_HEIGHT, 0]}
-    />
-    <mesh receiveShadow>
-      <latheGeometry args={[SAUCER_PROFILE, 48]} />
-      <meshStandardMaterial color="#e8e2d8" roughness={0.32} side={DoubleSide} />
-    </mesh>
-  </RigidBody>
-);
+interface SaucerProps {
+  onDragStateChange: (dragging: boolean) => void;
+}
+
+const Saucer = ({ onDragStateChange }: SaucerProps) => {
+  const bodyRef = useRef<RapierRigidBody | null>(null);
+  const dragHandlers = usePlanarDrag({
+    bodyRef,
+    centerY: SAUCER_POSITION[1],
+    maxRadius: MAX_SAUCER_CENTER_RADIUS,
+    onDragStateChange,
+  });
+
+  return (
+    <RigidBody ref={bodyRef} type="kinematicPosition" colliders={false} position={SAUCER_POSITION}>
+      <CylinderCollider
+        args={[SAUCER_COLLIDER_HALF_HEIGHT, SAUCER_RADIUS]}
+        friction={0.9}
+        position={[0, SAUCER_COLLIDER_HALF_HEIGHT, 0]}
+      />
+      <mesh
+        onPointerDown={dragHandlers.handlePointerDown}
+        onPointerMove={dragHandlers.handlePointerMove}
+        onPointerUp={dragHandlers.handlePointerUp}
+        onPointerCancel={dragHandlers.handlePointerUp}
+        receiveShadow
+      >
+        <latheGeometry args={[SAUCER_PROFILE, 48]} />
+        <meshStandardMaterial color="#e8e2d8" roughness={0.32} side={DoubleSide} />
+      </mesh>
+    </RigidBody>
+  );
+};
 
 interface UR5CadCupProps {
   bodyRef: CupBodyRef;
@@ -96,10 +119,13 @@ interface UR5CadCupProps {
 }
 
 const UR5CadCup = ({ bodyRef, evaluationGeometryRef, onDragStateChange }: UR5CadCupProps) => {
-  const dragOffset = useRef(new Vector2());
-  const dragPoint = useRef(new Vector3());
-  const isDragging = useRef(false);
   const [isSelected, setIsSelected] = useState(false);
+  const dragHandlers = usePlanarDrag({
+    bodyRef,
+    centerY: CUP_POSITION[1],
+    maxRadius: MAX_CUP_CENTER_RADIUS,
+    onDragStateChange,
+  });
 
   const enforceCupBounds = useCallback(() => {
     const body = bodyRef.current;
@@ -146,69 +172,6 @@ const UR5CadCup = ({ bodyRef, evaluationGeometryRef, onDragStateChange }: UR5Cad
 
   useAfterPhysicsStep(enforceCupBounds);
 
-  useEffect(
-    () => () => {
-      onDragStateChange(false);
-    },
-    [onDragStateChange],
-  );
-
-  const handlePointerDown = useCallback(
-    (event: ThreeEvent<PointerEvent>) => {
-      if (event.button !== 0) return;
-      event.stopPropagation();
-      event.nativeEvent.preventDefault();
-      event.nativeEvent.stopImmediatePropagation();
-      setIsSelected(true);
-      const body = bodyRef.current;
-      if (!body || !event.ray.intersectPlane(DRAG_PLANE, dragPoint.current)) return;
-
-      const position = body.translation();
-      dragOffset.current.set(position.x - dragPoint.current.x, position.z - dragPoint.current.z);
-      const canvas = event.nativeEvent.currentTarget as HTMLCanvasElement | null;
-      canvas?.setPointerCapture(event.pointerId);
-      isDragging.current = true;
-      onDragStateChange(true);
-    },
-    [bodyRef, onDragStateChange],
-  );
-
-  const handlePointerMove = useCallback(
-    (event: ThreeEvent<PointerEvent>) => {
-      if (!isDragging.current) return;
-      if ((event.nativeEvent.buttons & 1) === 0) {
-        isDragging.current = false;
-        onDragStateChange(false);
-        return;
-      }
-
-      const body = bodyRef.current;
-      if (!body || !event.ray.intersectPlane(DRAG_PLANE, dragPoint.current)) return;
-
-      let x = dragPoint.current.x + dragOffset.current.x;
-      let z = dragPoint.current.z + dragOffset.current.y;
-      const radius = Math.hypot(x, z);
-      if (radius > MAX_CUP_CENTER_RADIUS) {
-        x = (x / radius) * MAX_CUP_CENTER_RADIUS;
-        z = (z / radius) * MAX_CUP_CENTER_RADIUS;
-      }
-      body.setTranslation({ x, y: CUP_POSITION[1], z }, true);
-    },
-    [bodyRef, onDragStateChange],
-  );
-
-  const handlePointerUp = useCallback(
-    (event: ThreeEvent<PointerEvent>) => {
-      if (!isDragging.current) return;
-      event.stopPropagation();
-      const canvas = event.nativeEvent.currentTarget as HTMLCanvasElement | null;
-      if (canvas?.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
-      isDragging.current = false;
-      onDragStateChange(false);
-    },
-    [onDragStateChange],
-  );
-
   return (
     <RigidBody
       ref={bodyRef}
@@ -237,10 +200,13 @@ const UR5CadCup = ({ bodyRef, evaluationGeometryRef, onDragStateChange }: UR5Cad
       <group ref={evaluationGeometryRef}>
         <mesh
           castShadow
-          onPointerDown={handlePointerDown}
-          onPointerMove={handlePointerMove}
-          onPointerUp={handlePointerUp}
-          onPointerCancel={handlePointerUp}
+          onPointerDown={(event) => {
+            if (event.button === 0) setIsSelected(true);
+            dragHandlers.handlePointerDown(event);
+          }}
+          onPointerMove={dragHandlers.handlePointerMove}
+          onPointerUp={dragHandlers.handlePointerUp}
+          onPointerCancel={dragHandlers.handlePointerUp}
           receiveShadow
         >
           <latheGeometry args={[CUP_PROFILE, 48]} />
@@ -252,10 +218,13 @@ const UR5CadCup = ({ bodyRef, evaluationGeometryRef, onDragStateChange }: UR5Cad
         </mesh>
         <mesh
           castShadow
-          onPointerDown={handlePointerDown}
-          onPointerMove={handlePointerMove}
-          onPointerUp={handlePointerUp}
-          onPointerCancel={handlePointerUp}
+          onPointerDown={(event) => {
+            if (event.button === 0) setIsSelected(true);
+            dragHandlers.handlePointerDown(event);
+          }}
+          onPointerMove={dragHandlers.handlePointerMove}
+          onPointerUp={dragHandlers.handlePointerUp}
+          onPointerCancel={dragHandlers.handlePointerUp}
           receiveShadow
         >
           <tubeGeometry args={[CUP_HANDLE_CURVE, 32, 0.006, 12, false]} />
@@ -272,7 +241,7 @@ export const UR5CadCupArrangementScene = ({
   onDragStateChange,
 }: UR5CadCupArrangementSceneProps) => (
   <>
-    <Saucer />
+    <Saucer onDragStateChange={onDragStateChange} />
     <UR5CadCup
       bodyRef={bodyRef}
       evaluationGeometryRef={evaluationGeometryRef}

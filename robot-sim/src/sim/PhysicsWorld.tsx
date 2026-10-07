@@ -1,6 +1,7 @@
 import { CylinderCollider, RigidBody } from '@react-three/rapier';
 
-const TABLE_RADIUS = 0.75;
+import { TABLE_RADIUS } from './tableConstants';
+
 const TABLE_THICKNESS = 0.06;
 
 export const PhysicsWorld = () => (
