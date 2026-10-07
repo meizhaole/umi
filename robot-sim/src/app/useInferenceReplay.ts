@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { Kinematics } from '../core/Kinematics';
 import type { JointValues, Pose, RobotDescription } from '../core/types';
 import { findRobotConfig, type RobotConfig, type RobotModelId } from './config';
 import { publishDebugEvent } from './debugBus';
@@ -24,7 +25,8 @@ import type {
   InferenceObservation,
 } from './inferenceProtocol';
 import { poseErrorRotation, vectorLength } from '../utils/math';
-import { getGripperJoints, mapGripperOpeningToJoints } from './gripperMapping';
+import { getGripperJoints, getGripperOpening, mapGripperOpeningToJoints } from './gripperMapping';
+import { DATASET_REPLAY_MAX_TRACKING_ERROR_RAD } from './datasetReplay';
 import {
   createUmiScheduledWaypointPlan,
   type UmiScheduledWaypointPlan,
@@ -46,6 +48,11 @@ import {
   type CupApproachSample,
   type WorldAabb,
 } from '../sim/tasks/cupApproachEvaluation';
+import {
+  MAX_INFERENCE_CYCLES,
+  UmiScheduledWaypointController,
+  type UmiScheduledWaypointEvent,
+} from '../sim/control/UmiScheduledWaypointController';
 
 const INFERENCE_SOCKET_URL = 'ws://localhost:8000/ws/inference';
 const IK_TIMEOUT_MS = 1000;
@@ -93,6 +100,11 @@ interface ReplayContext {
   tcpPose: Pose | null;
   getObservation: () => InferenceObservation | null;
   getObservationJointValues?: () => JointValues | null;
+  getExecutionJointValues?: () => JointValues | null;
+  getLatestCameraFrameIdentity?: () => {
+    cameraFrameIndex: number;
+    cameraTimestampMs: number;
+  } | null;
   waitForFreshCameraFrame?: (
     options: FreshCameraFrameWaitOptions,
   ) => Promise<FreshCameraFrameWaitResult>;
@@ -120,6 +132,39 @@ interface TimestampDryRunTiming {
   observationCreatedTimestampMs: number;
   inferenceRequestSentTimestampMs: number;
   episodeStartTimestampMs: number;
+  iterationIndex: number;
+  rollingCycleIndex: number | null;
+}
+
+interface TimestampRollingObservationSnapshot {
+  cycle_index: number;
+  observation_frame_index: number;
+  camera_frame_index: number | null;
+  camera_timestamp_ms: number;
+  tcp_pose: Pose | null;
+  joint_values: JointValues | null;
+  gripper_opening_m: number | null;
+  capture_timestamp_ms: number;
+  clock_domain: 'window.performance.now';
+}
+
+interface TimestampRollingRuntime {
+  runId: string;
+  controller: UmiScheduledWaypointController;
+  phase: 'CYCLE_1' | 'WAITING_REPLAN' | 'CYCLE_2' | 'WAITING_CYCLE_2_WAYPOINT' | 'STOPPED';
+  cycleReports: Array<Record<string, unknown>>;
+  cycleObservations: TimestampRollingObservationSnapshot[];
+  replanTimeoutId: number | null;
+  stopTimeoutId: number | null;
+  freshCameraWaitController: AbortController | null;
+  nextReplanTimestampMs: number | null;
+  replanBoundaryTimestampMs: number | null;
+  replanQueueAtBoundary: Record<string, unknown> | null;
+  freshCameraFrame: Record<string, unknown> | null;
+  cycle2PlanId: string | null;
+  cycle2FirstActionIndex: number | null;
+  cupBefore: CupApproachSample | null;
+  finalized: boolean;
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -180,6 +225,8 @@ export const useInferenceReplay = ({
   tcpPose,
   getObservation,
   getObservationJointValues,
+  getExecutionJointValues,
+  getLatestCameraFrameIdentity,
   waitForFreshCameraFrame,
   getCupWorldAabb,
   getPreContactSafety,
@@ -196,6 +243,13 @@ export const useInferenceReplay = ({
     string,
     unknown
   > | null>(null);
+  const [timestampRollingPlaybackActive, setTimestampRollingPlaybackActive] = useState(false);
+  const [timestampRollingPlaybackReport, setTimestampRollingPlaybackReport] = useState<Record<
+    string,
+    unknown
+  > | null>(null);
+  const [timestampWaypointController, setTimestampWaypointController] =
+    useState<UmiScheduledWaypointController | null>(null);
   const [autoLoop, setAutoLoop] = useState<AutoLoopState>({
     runId: null,
     step: 0,
@@ -216,6 +270,8 @@ export const useInferenceReplay = ({
     tcpPose,
     getObservation,
     getObservationJointValues,
+    getExecutionJointValues,
+    getLatestCameraFrameIdentity,
     waitForFreshCameraFrame,
     getCupWorldAabb,
     getPreContactSafety,
@@ -238,6 +294,13 @@ export const useInferenceReplay = ({
   const timestampDryRunRef = useRef(false);
   const timestampWaypointPlanDryRunRef = useRef(false);
   const timestampDryRunTimingRef = useRef<TimestampDryRunTiming | null>(null);
+  const timestampRollingRunRef = useRef<TimestampRollingRuntime | null>(null);
+  const finalizeTimestampRollingRunRef = useRef<
+    ((reason: string, error?: InferenceError, finalStatus?: InferenceStatus) => void) | null
+  >(null);
+  const scheduleTimestampRollingCycleRef = useRef<
+    ((runtime: TimestampRollingRuntime, nextReplanTimestampMs: number) => void) | null
+  >(null);
 
   contextRef.current = {
     robotId,
@@ -249,6 +312,8 @@ export const useInferenceReplay = ({
     tcpPose,
     getObservation,
     getObservationJointValues,
+    getExecutionJointValues,
+    getLatestCameraFrameIdentity,
     waitForFreshCameraFrame,
     getCupWorldAabb,
     getPreContactSafety,
@@ -306,6 +371,9 @@ export const useInferenceReplay = ({
   };
 
   const fail = (nextError: InferenceError, notifyServer: boolean, preserveReviewData = false) => {
+    if (timestampRollingRunRef.current && !timestampRollingRunRef.current.finalized) {
+      finalizeTimestampRollingRunRef.current?.('INFERENCE_FAILURE', nextError, 'error');
+    }
     timestampDryRunRef.current = false;
     timestampWaypointPlanDryRunRef.current = false;
     timestampDryRunTimingRef.current = null;
@@ -855,12 +923,32 @@ export const useInferenceReplay = ({
     const observationCreatedTimestampMs = performance.now();
     const inferenceRequestSentTimestampMs = performance.now();
     if (timestampDryRunRef.current) {
+      const rollingRuntime = timestampRollingRunRef.current;
+      const rollingCycleIndex = rollingRuntime?.controller.snapshot().cycles_started ?? null;
       timestampDryRunTimingRef.current = {
         observationCreatedTimestampMs,
         inferenceRequestSentTimestampMs,
         episodeStartTimestampMs:
           observation.camera_frame_timestamp_ms + OFFICIAL_FRAME_LATENCY_SECONDS * 1000,
+        iterationIndex:
+          rollingCycleIndex === null
+            ? 0
+            : (rollingCycleIndex - 1) * OFFICIAL_UMI_STEPS_PER_INFERENCE,
+        rollingCycleIndex,
       };
+      if (rollingRuntime && rollingCycleIndex !== null) {
+        rollingRuntime.cycleObservations.push({
+          cycle_index: rollingCycleIndex,
+          observation_frame_index: observation.frame_index,
+          camera_frame_index: observation.camera_frame_index ?? null,
+          camera_timestamp_ms: observation.camera_frame_timestamp_ms,
+          tcp_pose: getObservationTcpPose(observation),
+          joint_values: context.getObservationJointValues?.() ?? null,
+          gripper_opening_m: observation.robot0_gripper_width.at(-1)?.[0] ?? null,
+          capture_timestamp_ms: observationCreatedTimestampMs,
+          clock_domain: 'window.performance.now',
+        });
+      }
     }
     socket.send(
       JSON.stringify({
@@ -927,7 +1015,7 @@ export const useInferenceReplay = ({
       inferenceResponseReceivedTimestampMs,
       schedulerCurrentTimestampMs,
       episodeStartTimestampMs: timing.episodeStartTimestampMs,
-      iterationIndex: 0,
+      iterationIndex: timing.iterationIndex,
       frequencyHz: OFFICIAL_UMI_FREQUENCY_HZ,
       stepsPerInference: OFFICIAL_UMI_STEPS_PER_INFERENCE,
       actionExecLatencySeconds: OFFICIAL_ACTION_EXEC_LATENCY_SECONDS,
@@ -948,6 +1036,8 @@ export const useInferenceReplay = ({
       frequency_hz: schedule.frequencyHz,
       dt_ms: schedule.dtMs,
       steps_per_inference: schedule.stepsPerInference,
+      rolling_cycle_index: timing.rollingCycleIndex,
+      iteration_index: timing.iterationIndex,
       action_count: chunk.actions.length,
       action_pose_repr: chunk.action_pose_repr,
       action_pred_shape: chunk.action_pred_shape,
@@ -1006,12 +1096,26 @@ export const useInferenceReplay = ({
   ) => {
     const context = contextRef.current;
     const observationTcpPose = getObservationTcpPose(observationSnapshot);
-    const observationJointValues = context.getObservationJointValues?.();
+    const rollingRuntime = timestampRollingRunRef.current;
+    const cycleIndex = rollingRuntime?.controller.snapshot().cycles_started ?? null;
+    const requestObservation =
+      rollingRuntime && cycleIndex !== null
+        ? rollingRuntime.cycleObservations.find(
+            (observation) => observation.cycle_index === cycleIndex,
+          )
+        : null;
+    const observationJointValues = rollingRuntime
+      ? (requestObservation?.joint_values ?? null)
+      : context.getObservationJointValues?.();
     let waypointPlan: UmiScheduledWaypointPlan | null = null;
     let planError: string | null = null;
 
     if (!context.description || !observationTcpPose) {
       planError = 'UR5_CAD description 或 observation TCP 不可用。';
+    } else if (!observationJointValues) {
+      planError = rollingRuntime
+        ? '缺少 request-bound rolling observation joint snapshot。'
+        : '缺少 request-bound observation joint snapshot。';
     } else {
       try {
         waypointPlan = createUmiScheduledWaypointPlan({
@@ -1020,7 +1124,7 @@ export const useInferenceReplay = ({
           frameIndex: chunk.frame_index,
           observationTimestampMs: observationSnapshot.camera_frame_timestamp_ms,
           observationTcpPose,
-          observationJointValues: observationJointValues ?? {},
+          observationJointValues,
           observationGripperOpeningM:
             observationSnapshot.robot0_gripper_width.at(-1)?.[0] ?? Number.NaN,
           actionPoseRepr: chunk.action_pose_repr,
@@ -1061,6 +1165,174 @@ export const useInferenceReplay = ({
     activeChunkRef.current = null;
     clearWorker(false);
     workerRef.current = null;
+
+    if (rollingRuntime && !rollingRuntime.finalized) {
+      const actualJointValues = getCurrentExecutionJointValues(context);
+      if (!waypointPlan) {
+        rollingRuntime.cycleReports.push({
+          cycle_index: cycleIndex,
+          ...report,
+          queue_receipt: null,
+        });
+        finalizeTimestampRollingRunRef.current?.(
+          'WAYPOINT_PLAN_FAILED',
+          {
+            code: 'ROLLING_WAYPOINT_PLAN_FAILED',
+            stage: 'planning',
+            message: planError ?? 'timestamp waypoint plan 未生成。',
+            request_id: chunk.request_id,
+            episode_index: chunk.episode_index,
+            frame_index: chunk.frame_index,
+          },
+          'error',
+        );
+        closeSocket(1000, 'timestamp rolling plan failed');
+        return;
+      }
+
+      const insertionTimestampMs = performance.now();
+      let replacementBridgeSafety: PreContactSafetyResult | null = null;
+      let queuePlan = waypointPlan;
+      if (cycleIndex === 2) {
+        const firstFutureWaypoint = waypointPlan.waypoints.find(
+          (waypoint) =>
+            waypoint.plan_status === 'SAFE_PREFIX' &&
+            typeof waypoint.scheduled_timestamp_ms === 'number' &&
+            waypoint.scheduled_timestamp_ms > insertionTimestampMs &&
+            waypoint.target_joints !== null,
+        );
+        if (firstFutureWaypoint?.target_joints) {
+          replacementBridgeSafety =
+            context.getScheduledPlanSegmentSafety?.(
+              actualJointValues,
+              firstFutureWaypoint.target_joints,
+              0,
+              context.getCupWorldAabb?.() ?? null,
+            ) ??
+            createPreContactSafetyFailure(
+              context.getCupWorldAabb?.() ?? null,
+              'Prediction B 当前执行状态到首个未来 waypoint 的 pre-contact bridge 未验证。',
+            );
+          if (replacementBridgeSafety.verdict !== 'SAFE_TO_EXECUTE') {
+            queuePlan = {
+              ...waypointPlan,
+              plan_verdict: `BLOCKED_AT_ACTION_${firstFutureWaypoint.action_index}`,
+              blocked_action_index: firstFutureWaypoint.action_index,
+              safe_prefix_indexes: [],
+            };
+          }
+        }
+      }
+      const queueReceipt = rollingRuntime.controller.completeInferenceCycle(
+        queuePlan,
+        insertionTimestampMs,
+        actualJointValues,
+      );
+      const latestCameraFrameAtReturn = context.getLatestCameraFrameIdentity?.() ?? null;
+      const controllerSnapshot = rollingRuntime.controller.snapshot();
+      const cycleReport = {
+        cycle_index: cycleIndex,
+        ...report,
+        observation_joint_snapshot: observationJointValues,
+        replacement_bridge_safety: replacementBridgeSafety,
+        queue_receipt: queueReceipt,
+        latest_camera_frame_at_prediction_return: latestCameraFrameAtReturn,
+        camera_advanced_during_inference:
+          typeof requestObservation?.camera_frame_index === 'number' &&
+          typeof latestCameraFrameAtReturn?.cameraFrameIndex === 'number' &&
+          latestCameraFrameAtReturn.cameraFrameIndex > requestObservation.camera_frame_index,
+        inference_execution_overlap_sample_count:
+          controllerSnapshot.inference_execution_overlap_sample_count,
+        inference_execution_overlap:
+          controllerSnapshot.inference_execution_overlap_sample_count > 0,
+      };
+      rollingRuntime.cycleReports.push(cycleReport);
+      const progressReport = {
+        report_type: 'timestamp_scheduled_rolling_playback',
+        run_id: rollingRuntime.runId,
+        max_inference_cycles: MAX_INFERENCE_CYCLES,
+        inference_cycles_started: cycleIndex,
+        inference_cycles: rollingRuntime.cycleReports,
+        request_observations: rollingRuntime.cycleObservations,
+        queue_waypoints: rollingRuntime.controller.snapshot().waypoints,
+        current_phase: rollingRuntime.phase,
+        execution_clock_domain: 'window.performance.now',
+        image_data_recorded: false,
+      };
+      if (mountedRef.current) {
+        setTimestampSchedulingDryRunReport(progressReport);
+        setTimestampRollingPlaybackReport(progressReport);
+        setError(null);
+        setPlayback(null);
+      }
+
+      if (!queueReceipt.safe) {
+        finalizeTimestampRollingRunRef.current?.(
+          'UNSAFE_PLAN',
+          {
+            code: 'ROLLING_PLAN_SAFETY_BLOCKED',
+            stage: 'safety',
+            message:
+              waypointPlan.plan_verdict === 'ALL_SELECTED_WAYPOINTS_PASSED'
+                ? 'waypoint queue rejected a plan with invalid safety fields.'
+                : waypointPlan.plan_verdict,
+            request_id: chunk.request_id,
+            episode_index: chunk.episode_index,
+            frame_index: chunk.frame_index,
+          },
+          'error',
+        );
+        closeSocket(1000, 'timestamp rolling safety stop');
+        return;
+      }
+
+      publishDebugEvent('inference:timestamp_rolling_plan_queued', {
+        run_id: rollingRuntime.runId,
+        cycle_index: cycleIndex,
+        plan_id: queueReceipt.plan_id,
+        available_time_to_first_waypoint_ms: queueReceipt.available_time_to_first_waypoint_ms,
+        queued_action_indexes: queueReceipt.queued_action_indexes,
+        replaced_waypoints: queueReceipt.replaced_waypoints,
+        prior_queue_at_insertion: queueReceipt.prior_queue_at_insertion,
+        execution_continued_during_plan_insertion: cycleIndex === 2,
+      });
+
+      if (cycleIndex === 1) {
+        setProgress(
+          `Prediction A 已进入时间戳队列；等待 ${waypointPlan.next_replan_timestamp_ms.toFixed(1)} ms 重规划边界`,
+        );
+        updateStatus('complete');
+        scheduleTimestampRollingCycleRef.current?.(
+          rollingRuntime,
+          waypointPlan.next_replan_timestamp_ms,
+        );
+      } else if (cycleIndex === 2) {
+        rollingRuntime.phase = 'WAITING_CYCLE_2_WAYPOINT';
+        rollingRuntime.cycle2PlanId = queueReceipt.plan_id;
+        rollingRuntime.cycle2FirstActionIndex = queueReceipt.queued_action_indexes[0] ?? null;
+        if (rollingRuntime.cycle2FirstActionIndex === null) {
+          finalizeTimestampRollingRunRef.current?.(
+            'CYCLE_2_HAS_NO_FUTURE_WAYPOINT',
+            {
+              code: 'ROLLING_CYCLE_2_NO_FUTURE_WAYPOINT',
+              stage: 'scheduling',
+              message: 'Cycle 2 plan 已错过全部 scheduled timestamp，已停止并保持当前位置。',
+              request_id: chunk.request_id,
+              episode_index: chunk.episode_index,
+              frame_index: chunk.frame_index,
+            },
+            'error',
+          );
+        } else {
+          setProgress('Prediction B 已替换未来队列，等待首个新 waypoint 到时并短暂跟踪');
+          updateStatus('playing');
+        }
+      }
+      publishDebugEvent('inference:timestamp_scheduled_rolling_cycle_complete', cycleReport);
+      closeSocket(1000, `timestamp rolling cycle ${cycleIndex} planned`);
+      return;
+    }
+
     if (mountedRef.current) {
       setTimestampSchedulingDryRunReport(report);
       setProgress(
@@ -2183,6 +2455,378 @@ export const useInferenceReplay = ({
     }
   };
 
+  const createTimestampRollingController = (
+    context: ReplayContext,
+  ): UmiScheduledWaypointController | null => {
+    const description = context.description;
+    const gripperJointNames = context.robotConfig.gripperJointNames ?? [];
+    if (!description || !description.tipLink || gripperJointNames.length === 0) return null;
+    const kinematics = new Kinematics(description);
+    const positionToleranceM = context.robotConfig.ikOptions?.positionTolerance ?? Number.NaN;
+    const orientationToleranceRad =
+      context.robotConfig.ikOptions?.orientationTolerance ?? Number.NaN;
+    return new UmiScheduledWaypointController({
+      armJointNames: description.joints
+        .filter((joint) => joint.type === 'revolute' || joint.type === 'continuous')
+        .map((joint) => joint.name),
+      gripperJointNames,
+      getTcpPose: (values) => kinematics.forwardKinematics(values, description.tipLink),
+      getGripperOpening: (values) => getGripperOpening(description, values, gripperJointNames),
+      trackingTolerances: {
+        jointErrorRad: DATASET_REPLAY_MAX_TRACKING_ERROR_RAD,
+        tcpPositionErrorM: positionToleranceM,
+        tcpOrientationErrorRad: orientationToleranceRad,
+        gripperErrorM: positionToleranceM,
+      },
+    });
+  };
+
+  const clearTimestampRollingTimers = (runtime: TimestampRollingRuntime): void => {
+    if (runtime.replanTimeoutId !== null) window.clearTimeout(runtime.replanTimeoutId);
+    if (runtime.stopTimeoutId !== null) window.clearTimeout(runtime.stopTimeoutId);
+    runtime.replanTimeoutId = null;
+    runtime.stopTimeoutId = null;
+    runtime.freshCameraWaitController?.abort();
+    runtime.freshCameraWaitController = null;
+  };
+
+  const getCurrentExecutionJointValues = (context: ReplayContext): JointValues =>
+    context.getExecutionJointValues?.() ?? { ...context.jointValues };
+
+  const getCupSampleForPose = (
+    context: ReplayContext,
+    tcpPose: Pose | null,
+  ): CupApproachSample | null => {
+    const cupAabb = context.getCupWorldAabb?.() ?? null;
+    if (!cupAabb || !tcpPose) return null;
+    return evaluateCupApproachSample(robotPositionToSceneWorld(tcpPose.position), cupAabb);
+  };
+
+  const finalizeTimestampRollingRun = (
+    reason: string,
+    finalError?: InferenceError,
+    finalStatus: InferenceStatus = 'complete',
+  ): void => {
+    const runtime = timestampRollingRunRef.current;
+    if (!runtime || runtime.finalized) return;
+    runtime.finalized = true;
+    runtime.phase = 'STOPPED';
+    clearTimestampRollingTimers(runtime);
+    timestampDryRunRef.current = false;
+    timestampWaypointPlanDryRunRef.current = false;
+    timestampDryRunTimingRef.current = null;
+    clearWorker();
+    activeChunkRef.current = null;
+    activeActionIndexRef.current = null;
+    activeJointAnglesRef.current = [];
+    pendingPlaybackRef.current = null;
+    if (mountedRef.current) setPlayback(null);
+    closeSocket(1000, 'timestamp rolling playback stopped');
+
+    const context = contextRef.current;
+    const stopTimestampMs = performance.now();
+    const actualJointValues = getCurrentExecutionJointValues(context);
+    const snapshot = runtime.controller.stop(stopTimestampMs, actualJointValues, reason);
+    let actualTcpPose: Pose | null = null;
+    if (context.description?.tipLink) {
+      try {
+        actualTcpPose = new Kinematics(context.description).forwardKinematics(
+          actualJointValues,
+          context.description.tipLink,
+        );
+      } catch {
+        actualTcpPose = null;
+      }
+    }
+    let actualGripperOpening: number | null = null;
+    if (context.description) {
+      try {
+        actualGripperOpening = getGripperOpening(
+          context.description,
+          actualJointValues,
+          context.robotConfig.gripperJointNames,
+        );
+      } catch {
+        actualGripperOpening = null;
+      }
+    }
+    const cupAfter = getCupSampleForPose(context, actualTcpPose);
+    const waypointPlans = runtime.cycleReports.flatMap((cycleReport) => {
+      const plan = cycleReport.waypoint_plan;
+      return isRecord(plan) ? [plan as unknown as UmiScheduledWaypointPlan] : [];
+    });
+    const planWaypoints = waypointPlans.flatMap((plan) => plan.waypoints);
+    const bridgeSafetyFailed = runtime.cycleReports.some((cycleReport) => {
+      const bridgeSafety = cycleReport.replacement_bridge_safety;
+      return isRecord(bridgeSafety) && bridgeSafety.verdict !== 'SAFE_TO_EXECUTE';
+    });
+    const report = {
+      report_type: 'timestamp_scheduled_rolling_playback',
+      run_id: runtime.runId,
+      verdict: reason === 'TEST_COMPLETE' ? 'PASS' : finalStatus === 'error' ? 'FAIL' : 'STOPPED',
+      stop_reason: reason,
+      max_inference_cycles: MAX_INFERENCE_CYCLES,
+      inference_cycles_started: snapshot.cycles_started,
+      inference_cycles: runtime.cycleReports,
+      request_observations: runtime.cycleObservations,
+      replan_boundary_timestamp_ms: runtime.replanBoundaryTimestampMs,
+      replan_queue_at_boundary: runtime.replanQueueAtBoundary,
+      replan_fresh_camera_frame: runtime.freshCameraFrame,
+      queue_waypoints: snapshot.waypoints,
+      queue_events: snapshot.events,
+      queued_waypoint_count: snapshot.waypoints.length,
+      playback_started_waypoint_count: snapshot.waypoints.filter(
+        (waypoint) => waypoint.active_timestamp_ms !== null,
+      ).length,
+      reached_waypoint_count: snapshot.waypoints.filter(
+        (waypoint) => waypoint.queue_status === 'REACHED',
+      ).length,
+      gripper_target_count: snapshot.waypoints.filter(
+        (waypoint) =>
+          waypoint.active_timestamp_ms !== null && Number.isFinite(waypoint.target_gripper),
+      ).length,
+      cancelled_future_waypoints: snapshot.waypoints.filter(
+        (waypoint) => waypoint.queue_status === 'CANCELLED',
+      ),
+      stop_timestamp_ms: stopTimestampMs,
+      final_controller_state: snapshot.state,
+      final_joint_values: actualJointValues,
+      final_tcp_pose: actualTcpPose,
+      final_gripper_opening_m: actualGripperOpening,
+      cup_distance_before: runtime.cupBefore
+        ? {
+            tcp_to_cup_center_distance_m: runtime.cupBefore.tcpToCupCenterDistanceM,
+            tcp_to_cup_surface_proxy_distance_m: runtime.cupBefore.tcpToCupSurfaceProxyDistanceM,
+          }
+        : null,
+      cup_distance_after: cupAfter
+        ? {
+            tcp_to_cup_center_distance_m: cupAfter.tcpToCupCenterDistanceM,
+            tcp_to_cup_surface_proxy_distance_m: cupAfter.tcpToCupSurfaceProxyDistanceM,
+          }
+        : null,
+      tracking_failure: snapshot.failure,
+      ik_failure: planWaypoints.some((waypoint) => !waypoint.ik_success),
+      pre_contact_block:
+        waypointPlans.some((plan) => plan.plan_verdict !== 'ALL_SELECTED_WAYPOINTS_PASSED') ||
+        bridgeSafetyFailed,
+      gripper_mapping_error: planWaypoints.some((waypoint) =>
+        Boolean(waypoint.gripper_mapping_error),
+      ),
+      stale_camera:
+        runtime.freshCameraFrame?.frame_timestamp_after_replan_boundary === false ||
+        finalError?.code === 'ROLLING_STALE_CAMERA_FRAME',
+      queue_timing_error: snapshot.waypoints.some(
+        (waypoint) =>
+          waypoint.queue_decision === 'PAST_TIME_NOOP' ||
+          (typeof waypoint.timing_error_ms === 'number' && waypoint.timing_error_ms > 1000 / 60),
+      ),
+      all_future_waypoints_cancelled: snapshot.waypoints.every(
+        (waypoint) => waypoint.queue_status !== 'PENDING' && waypoint.queue_status !== 'ACTIVE',
+      ),
+      inference_execution_overlap_sample_count: snapshot.inference_execution_overlap_sample_count,
+      inference_execution_overlap: snapshot.inference_execution_overlap_sample_count > 0,
+      error: finalError ?? null,
+      execution_clock_domain: 'window.performance.now',
+      inference_cycle_limit_enforced: snapshot.cycles_started <= MAX_INFERENCE_CYCLES,
+      cycle_3_started: snapshot.cycles_started > MAX_INFERENCE_CYCLES,
+      image_data_recorded: false,
+    };
+    setTimestampRollingPlaybackActive(false);
+    setTimestampRollingPlaybackReport(report);
+    setTimestampSchedulingDryRunReport(report);
+    if (finalError) setError(finalError);
+    else if (finalStatus !== 'error') setError(null);
+    setProgress(
+      reason === 'TEST_COMPLETE'
+        ? '双周期时间戳回放已停止，未来路点已取消并保持当前位置'
+        : `双周期时间戳回放已安全停止：${reason}`,
+    );
+    updateStatus(finalStatus);
+    publishDebugEvent('inference:timestamp_rolling_playback_stopped', report);
+  };
+
+  finalizeTimestampRollingRunRef.current = finalizeTimestampRollingRun;
+
+  const scheduleTimestampRollingCycle = (
+    runtime: TimestampRollingRuntime,
+    nextReplanTimestampMs: number,
+  ): void => {
+    runtime.phase = 'WAITING_REPLAN';
+    runtime.nextReplanTimestampMs = nextReplanTimestampMs;
+    const delayMs = Math.max(0, nextReplanTimestampMs - performance.now());
+    runtime.replanTimeoutId = window.setTimeout(() => {
+      if (runtime.finalized) return;
+      runtime.replanTimeoutId = null;
+      runtime.replanBoundaryTimestampMs = performance.now();
+      const boundarySnapshot = runtime.controller.snapshot();
+      runtime.replanQueueAtBoundary = {
+        reached_action_indexes: boundarySnapshot.waypoints
+          .filter((waypoint) => waypoint.queue_status === 'REACHED')
+          .map((waypoint) => waypoint.action_index),
+        active_waypoints: boundarySnapshot.waypoints
+          .filter((waypoint) => waypoint.queue_status === 'ACTIVE')
+          .map((waypoint) => ({
+            plan_id: waypoint.plan_id,
+            action_index: waypoint.action_index,
+            scheduled_timestamp_ms: waypoint.scheduled_timestamp_ms,
+          })),
+        future_waypoints: boundarySnapshot.waypoints
+          .filter((waypoint) => waypoint.queue_status === 'PENDING')
+          .map((waypoint) => ({
+            plan_id: waypoint.plan_id,
+            action_index: waypoint.action_index,
+            scheduled_timestamp_ms: waypoint.scheduled_timestamp_ms,
+          })),
+      };
+      const latestCameraFrame = contextRef.current.getLatestCameraFrameIdentity?.() ?? null;
+      const waitForFreshFrame = contextRef.current.waitForFreshCameraFrame;
+      if (!latestCameraFrame || !waitForFreshFrame) {
+        finalizeTimestampRollingRun(
+          'FRESH_CAMERA_UNAVAILABLE',
+          {
+            code: 'ROLLING_FRESH_CAMERA_UNAVAILABLE',
+            stage: 'observation',
+            message: '重规划边界缺少相机基线或 fresh-frame 等待器。',
+          },
+          'error',
+        );
+        return;
+      }
+
+      const abortController = new AbortController();
+      runtime.freshCameraWaitController = abortController;
+      void waitForFreshFrame({
+        previousCameraFrameIndex: latestCameraFrame.cameraFrameIndex,
+        previousCameraTimestampMs: latestCameraFrame.cameraTimestampMs,
+        timeoutMs: AUTO_LOOP_FRESH_CAMERA_TIMEOUT_MS,
+        signal: abortController.signal,
+      })
+        .then((cameraFrame) => {
+          if (runtime.finalized) return;
+          runtime.freshCameraWaitController = null;
+          runtime.freshCameraFrame = {
+            ...cameraFrame,
+            frame_timestamp_after_replan_boundary:
+              cameraFrame.cameraTimestampMs >= nextReplanTimestampMs,
+            next_replan_timestamp_ms: nextReplanTimestampMs,
+            boundary_callback_timestamp_ms: runtime.replanBoundaryTimestampMs,
+          };
+          if (cameraFrame.cameraTimestampMs < nextReplanTimestampMs) {
+            finalizeTimestampRollingRun(
+              'STALE_REPLAN_CAMERA_FRAME',
+              {
+                code: 'ROLLING_STALE_CAMERA_FRAME',
+                stage: 'observation',
+                message: '重规划观测相机帧时间早于 scheduled replan boundary。',
+              },
+              'error',
+            );
+            return;
+          }
+          const cycleIndex = runtime.controller.beginInferenceCycle(performance.now());
+          if (cycleIndex !== 2 || cycleIndex > MAX_INFERENCE_CYCLES) {
+            finalizeTimestampRollingRun(
+              'INFERENCE_CYCLE_LIMIT',
+              {
+                code: 'ROLLING_CYCLE_LIMIT',
+                stage: 'scheduling',
+                message: '双周期回放尝试启动超出上限的 inference cycle。',
+              },
+              'error',
+            );
+            return;
+          }
+          runtime.phase = 'CYCLE_2';
+          timestampDryRunRef.current = true;
+          timestampWaypointPlanDryRunRef.current = true;
+          timestampDryRunTimingRef.current = null;
+          updateStatus('complete');
+          setProgress('重规划边界已到达，正在读取新相机帧并推理 Cycle 2');
+          publishDebugEvent('inference:timestamp_rolling_replan_boundary', {
+            run_id: runtime.runId,
+            cycle_index: cycleIndex,
+            next_replan_timestamp_ms: nextReplanTimestampMs,
+            boundary_callback_timestamp_ms: runtime.replanBoundaryTimestampMs,
+            queue_at_boundary: runtime.replanQueueAtBoundary,
+            fresh_camera_frame: runtime.freshCameraFrame,
+            execution_continued_during_camera_wait: true,
+          });
+          start();
+        })
+        .catch((caught: unknown) => {
+          if (runtime.finalized || abortController.signal.aborted) return;
+          const message = caught instanceof Error ? caught.message : String(caught);
+          finalizeTimestampRollingRun(
+            'FRESH_CAMERA_WAIT_FAILED',
+            {
+              code: 'ROLLING_FRESH_CAMERA_WAIT_FAILED',
+              stage: 'observation',
+              message,
+            },
+            'error',
+          );
+        });
+    }, delayMs);
+  };
+
+  scheduleTimestampRollingCycleRef.current = scheduleTimestampRollingCycle;
+
+  const handleTimestampWaypointEvents = (events: UmiScheduledWaypointEvent[]): void => {
+    const runtime = timestampRollingRunRef.current;
+    if (!runtime || runtime.finalized) return;
+    events.forEach((event) => {
+      publishDebugEvent('inference:timestamp_waypoint_status', {
+        run_id: runtime.runId,
+        ...event,
+      });
+      if (event.status === 'FAILED') {
+        finalizeTimestampRollingRun(
+          'TRACKING_ERROR',
+          {
+            code: 'TIMESTAMP_WAYPOINT_TRACKING_FAILED',
+            stage: 'execution',
+            message: `action ${event.action_index} 超出既有跟踪误差阈值。`,
+            action_index: event.action_index,
+            plan_id: event.plan_id,
+          },
+          'error',
+        );
+        return;
+      }
+      if (
+        event.status === 'REACHED' &&
+        runtime.phase === 'WAITING_CYCLE_2_WAYPOINT' &&
+        event.plan_id === runtime.cycle2PlanId &&
+        event.action_index === runtime.cycle2FirstActionIndex &&
+        runtime.stopTimeoutId === null
+      ) {
+        runtime.stopTimeoutId = window.setTimeout(() => {
+          runtime.stopTimeoutId = null;
+          finalizeTimestampRollingRun('TEST_COMPLETE', undefined, 'complete');
+        }, 100);
+      }
+    });
+  };
+
+  const stopTimestampScheduledRollingPlayback = (
+    reason = 'USER_STOP',
+    caught?: unknown,
+  ): boolean => {
+    const runtime = timestampRollingRunRef.current;
+    if (!runtime || runtime.finalized) return false;
+    const message = caught instanceof Error ? caught.message : caught ? String(caught) : null;
+    const stopError = message
+      ? {
+          code: 'TIMESTAMP_ROLLING_STOPPED',
+          stage: 'execution',
+          message,
+        }
+      : undefined;
+    finalizeTimestampRollingRun(reason, stopError, stopError ? 'error' : 'stopped');
+    return true;
+  };
+
   function stepSingleAction(): void {
     const activeSocket = socketRef.current;
     if (
@@ -2413,6 +3057,10 @@ export const useInferenceReplay = ({
   }
 
   const stopCurrentAction = () => {
+    if (timestampRollingRunRef.current && !timestampRollingRunRef.current.finalized) {
+      stopTimestampScheduledRollingPlayback('USER_STOP');
+      return;
+    }
     if (
       statusRef.current === 'idle' ||
       statusRef.current === 'complete' ||
@@ -2470,6 +3118,10 @@ export const useInferenceReplay = ({
   };
 
   const stop = () => {
+    if (timestampRollingRunRef.current && !timestampRollingRunRef.current.finalized) {
+      stopTimestampScheduledRollingPlayback('USER_STOP');
+      return;
+    }
     if (autoLoopRef.current) {
       stopAutoLoop();
       return;
@@ -2872,6 +3524,16 @@ export const useInferenceReplay = ({
         autoLoopRef.current.freshCameraWaitController = null;
         autoLoopRef.current = null;
       }
+      const rollingRuntime = timestampRollingRunRef.current;
+      if (rollingRuntime && !rollingRuntime.finalized) {
+        clearTimestampRollingTimers(rollingRuntime);
+        rollingRuntime.controller.stop(
+          performance.now(),
+          getCurrentExecutionJointValues(contextRef.current),
+          'VIEW_UNMOUNT',
+        );
+        rollingRuntime.finalized = true;
+      }
       if (workerTimeoutRef.current !== null) {
         window.clearTimeout(workerTimeoutRef.current);
         workerTimeoutRef.current = null;
@@ -2897,7 +3559,8 @@ export const useInferenceReplay = ({
     status === 'computing' ||
     status === 'review' ||
     status === 'playing' ||
-    status === 'waiting';
+    status === 'waiting' ||
+    timestampRollingPlaybackActive;
 
   const canStartTimestampSchedulingDryRun =
     isUr5CadContext(contextRef.current) &&
@@ -2905,6 +3568,9 @@ export const useInferenceReplay = ({
     !autoLoopRef.current &&
     !reviewCompletionPendingRef.current &&
     (status === 'idle' || status === 'stopped' || status === 'error' || status === 'complete');
+
+  const canStartTimestampScheduledRollingPlayback =
+    canStartTimestampSchedulingDryRun && !policyInferenceOnly && !singleActionDebugEnabled;
 
   const startTimestampSchedulingDryRun = (): boolean => {
     if (!canStartTimestampSchedulingDryRun) return false;
@@ -2930,6 +3596,46 @@ export const useInferenceReplay = ({
       setTimestampSchedulingDryRunReport(null);
       setProgress('正在运行单次推理并准备时间化 waypoint 计划');
     }
+    start();
+    return true;
+  };
+
+  const startTimestampScheduledRollingPlayback = (): boolean => {
+    if (!canStartTimestampScheduledRollingPlayback) return false;
+    const context = contextRef.current;
+    const controller = createTimestampRollingController(context);
+    if (!controller) return false;
+    const startedAt = performance.now();
+    controller.startRun(startedAt);
+    if (controller.beginInferenceCycle(startedAt) !== 1) return false;
+    const runtime: TimestampRollingRuntime = {
+      runId: `umi-rolling-${Math.round(startedAt)}`,
+      controller,
+      phase: 'CYCLE_1',
+      cycleReports: [],
+      cycleObservations: [],
+      replanTimeoutId: null,
+      stopTimeoutId: null,
+      freshCameraWaitController: null,
+      nextReplanTimestampMs: null,
+      replanBoundaryTimestampMs: null,
+      replanQueueAtBoundary: null,
+      freshCameraFrame: null,
+      cycle2PlanId: null,
+      cycle2FirstActionIndex: null,
+      cupBefore: getCupSampleForPose(context, context.tcpPose),
+      finalized: false,
+    };
+    timestampRollingRunRef.current = runtime;
+    setTimestampWaypointController(controller);
+    setTimestampRollingPlaybackActive(true);
+    setTimestampRollingPlaybackReport(null);
+    setTimestampSchedulingDryRunReport(null);
+    timestampDryRunRef.current = true;
+    timestampWaypointPlanDryRunRef.current = true;
+    timestampDryRunTimingRef.current = null;
+    setError(null);
+    setProgress('正在采集真实仿真状态并运行 Prediction A');
     start();
     return true;
   };
@@ -2974,6 +3680,10 @@ export const useInferenceReplay = ({
     canStartCupApproachTest,
     canStartTimestampSchedulingDryRun,
     canStartTimestampScheduledWaypointPlanDryRun: canStartTimestampSchedulingDryRun,
+    canStartTimestampScheduledRollingPlayback,
+    timestampRollingPlaybackActive,
+    timestampRollingPlaybackReport,
+    timestampWaypointController,
     canStopAutoLoop: autoLoopRef.current !== null,
     canExecuteAction,
     step,
@@ -2983,6 +3693,9 @@ export const useInferenceReplay = ({
     startCupApproachTest,
     startTimestampSchedulingDryRun,
     startTimestampScheduledWaypointPlanDryRun,
+    startTimestampScheduledRollingPlayback,
+    stopTimestampScheduledRollingPlayback,
+    onTimestampWaypointEvents: handleTimestampWaypointEvents,
     stopAutoLoop,
     reviewData,
     timestampSchedulingDryRunReport,

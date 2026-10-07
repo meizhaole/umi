@@ -22,6 +22,10 @@ import type { URDFRobot } from 'urdf-loader';
 import { DEBUG_LAYER, setDebugLayer } from './sceneLayers';
 import type { SimCameraFrame } from '../sim/sensors/WristCameraCapture';
 import type { Pose } from '../core/types';
+import type {
+  UmiScheduledWaypointController,
+  UmiScheduledWaypointEvent,
+} from '../sim/control/UmiScheduledWaypointController';
 
 interface SceneManagerProps {
   modelId: RobotModelId;
@@ -32,6 +36,9 @@ interface SceneManagerProps {
   mode: ControlMode;
   isRunning: boolean;
   playback: PlaybackChunk | null;
+  timestampWaypointController: UmiScheduledWaypointController | null;
+  timestampPlaybackActive: boolean;
+  getActualJointValues: () => JointValues | null;
   cupSceneResetToken: number;
   cupEvaluationGeometryRef: CupEvaluationGeometryRef;
   inferenceActive: boolean;
@@ -44,6 +51,9 @@ interface SceneManagerProps {
   onPhysicsReady: (ready: boolean) => void;
   onPlaybackStep: (values: JointValues, isFinal: boolean) => void;
   onPlaybackComplete: (token: number) => void;
+  onTimestampPlaybackStep: (values: JointValues) => void;
+  onTimestampWaypointEvents: (events: UmiScheduledWaypointEvent[]) => void;
+  onScheduledJointSample: (values: JointValues) => void;
   cameraEnabled: boolean;
   tcpPose: Pose;
   onCameraFrame: (frame: SimCameraFrame) => void;
@@ -100,12 +110,7 @@ const UmiTcpMarker = ({ pose }: { pose: Pose }) => {
   const position = new Vector3(...pose.position).applyQuaternion(ROBOT_TO_SCENE).toArray();
 
   return (
-    <mesh
-      ref={setDebugLayer}
-      name="ur5-cad-umi-tcp-marker"
-      position={position}
-      renderOrder={10}
-    >
+    <mesh ref={setDebugLayer} name="ur5-cad-umi-tcp-marker" position={position} renderOrder={10}>
       <sphereGeometry args={[0.01, 20, 16]} />
       <meshBasicMaterial color="#ff3b8d" depthTest={false} toneMapped={false} />
     </mesh>
@@ -169,6 +174,30 @@ const ActionPlayback = ({ playback, jointValues, onStep, onComplete }: ActionPla
   return null;
 };
 
+interface TimestampWaypointPlaybackProps {
+  controller: UmiScheduledWaypointController | null;
+  getActualJointValues: () => JointValues | null;
+  onStep: (values: JointValues) => void;
+  onEvents: (events: UmiScheduledWaypointEvent[]) => void;
+}
+
+const TimestampWaypointPlayback = ({
+  controller,
+  getActualJointValues,
+  onStep,
+  onEvents,
+}: TimestampWaypointPlaybackProps) => {
+  useFrame(() => {
+    if (!controller) return;
+    const actualJointValues = getActualJointValues();
+    if (!actualJointValues) return;
+    const tick = controller.advance(performance.now(), actualJointValues);
+    if (tick.commanded_joint_values) onStep(tick.commanded_joint_values);
+    if (tick.events.length > 0) onEvents(tick.events);
+  });
+  return null;
+};
+
 interface CameraControlsProps {
   cupBodyRef: CupBodyRef;
   inferenceActive: boolean;
@@ -216,6 +245,9 @@ export const SceneManager = ({
   mode,
   isRunning,
   playback,
+  timestampWaypointController,
+  timestampPlaybackActive,
+  getActualJointValues,
   cupSceneResetToken,
   cupEvaluationGeometryRef,
   inferenceActive,
@@ -229,6 +261,9 @@ export const SceneManager = ({
   onPhysicsReady,
   onPlaybackStep,
   onPlaybackComplete,
+  onTimestampPlaybackStep,
+  onTimestampWaypointEvents,
+  onScheduledJointSample,
   cameraEnabled,
   tcpPose,
   onCameraFrame,
@@ -334,6 +369,12 @@ export const SceneManager = ({
         onStep={onPlaybackStep}
         playback={playback}
       />
+      <TimestampWaypointPlayback
+        controller={timestampWaypointController}
+        getActualJointValues={getActualJointValues}
+        onEvents={onTimestampWaypointEvents}
+        onStep={onTimestampPlaybackStep}
+      />
       <Physics
         colliders={false}
         gravity={diagnosticGravity}
@@ -369,6 +410,7 @@ export const SceneManager = ({
           jointValues={jointValues}
           mode={mode}
           onJointState={onJointState}
+          onScheduledJointSample={timestampPlaybackActive ? onScheduledJointSample : undefined}
           onJointBodyAngles={onJointBodyAngles}
           onWrist3DebugState={onWrist3DebugState}
           onWrist3ExperimentComplete={onWrist3ExperimentComplete}

@@ -33,6 +33,7 @@ interface RobotBodyProps {
   commands: Record<string, JointCommand>;
   mode: ControlMode;
   onJointState: (values: JointValues) => void;
+  onScheduledJointSample?: (values: JointValues) => void;
   onJointBodyAngles: (values: Record<string, number | null>) => void;
   onWrist3DebugState: (state: Wrist3PhysicsDebugState | null) => void;
   onWrist3ExperimentComplete: (trace: Wrist3ExperimentTrace) => void;
@@ -848,6 +849,7 @@ export const RobotBody = ({
   commands,
   mode,
   onJointState,
+  onScheduledJointSample,
   onJointBodyAngles,
   onWrist3DebugState,
   onWrist3ExperimentComplete,
@@ -871,6 +873,7 @@ export const RobotBody = ({
   const latestCommands = useRef(commands);
   const latestMode = useRef(mode);
   const latestStateCallback = useRef(onJointState);
+  const latestScheduledStateCallback = useRef(onScheduledJointSample);
   const heldGripperPositions = useRef(new Map<string, number>());
   const heldPositionMode = useRef(mode);
   const lastStatePublish = useRef(0);
@@ -881,6 +884,7 @@ export const RobotBody = ({
   latestCommands.current = commands;
   latestMode.current = mode;
   latestStateCallback.current = onJointState;
+  latestScheduledStateCallback.current = onScheduledJointSample;
 
   useEffect(() => {
     let cancelled = false;
@@ -1369,6 +1373,9 @@ export const RobotBody = ({
   useBeforePhysicsStep(applyCommands);
   useAfterPhysicsStep(() => {
     const now = performance.now();
+    if (latestScheduledStateCallback.current) {
+      latestScheduledStateCallback.current(readJointState(joints.current));
+    }
     if (typeof window !== 'undefined') {
       const experiment = window.__ROBOT_SIM_WRIST3_AB__;
       const sample = experiment?.currentStep;

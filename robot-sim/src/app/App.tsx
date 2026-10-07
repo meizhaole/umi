@@ -208,6 +208,7 @@ export const App = () => {
   const [loadedRobot, setLoadedRobot] = useState<LoadedRobot | null>(null);
   const [loadError, setLoadError] = useState('');
   const [jointValues, setJointValues] = useState<JointValues>({});
+  const actualPhysicsJointValuesRef = useRef<JointValues>({});
   const [jointBodyAngles, setJointBodyAngles] = useState<Record<string, number | null>>({});
   const [mode, setMode] = useState<ControlMode>('position');
   const [commands, setCommands] = useState<Record<string, JointCommand>>({});
@@ -305,6 +306,7 @@ export const App = () => {
     let active = true;
     setLoadedRobot(null);
     setLoadError('');
+    actualPhysicsJointValuesRef.current = {};
     setIkResult(null);
     setIkTargetPose(null);
     setJointDeltaNorm(null);
@@ -342,6 +344,7 @@ export const App = () => {
         const description = parseUrdf(sourceUrdf, { tipLink: currentModel.tipLink });
         const model = new RobotModel(description);
         model.setJointValues(currentModel.initialJoints);
+        actualPhysicsJointValuesRef.current = model.getJointValues();
         if (!active) return;
 
         setLoadedRobot({
@@ -538,6 +541,15 @@ export const App = () => {
       cameraFrameWaiterRef.current!.waitForFreshFrame(options),
     [],
   );
+  const getLatestCameraFrameIdentity = useCallback(() => {
+    const latest = cameraFramesRef.current.at(-1);
+    return latest
+      ? {
+          cameraFrameIndex: latest.camera_frame_index,
+          cameraTimestampMs: latest.timestamp,
+        }
+      : null;
+  }, []);
   const inference = useInferenceReplay({
     robotId: modelId,
     robotConfig: currentModel,
@@ -549,6 +561,11 @@ export const App = () => {
     getObservation,
     getObservationJointValues: () =>
       observationJointValuesRef.current ? { ...observationJointValuesRef.current } : null,
+    getExecutionJointValues: () =>
+      Object.keys(actualPhysicsJointValuesRef.current).length > 0
+        ? { ...actualPhysicsJointValuesRef.current }
+        : null,
+    getLatestCameraFrameIdentity,
     waitForFreshCameraFrame,
     getCupWorldAabb: () => getObjectWorldAabb(cupEvaluationGeometryRef.current),
     getPreContactSafety: (currentJointValues, targetJointValues) =>
@@ -562,7 +579,7 @@ export const App = () => {
     getScheduledPlanSegmentSafety: (
       segmentStartJoints,
       segmentEndJoints,
-      segmentIndex,
+      _segmentIndex,
       cupWorldAabb,
     ) => {
       const robot = urdfVisualRobotRef.current;
@@ -571,8 +588,7 @@ export const App = () => {
         return createPreContactSafetyFailure(cupWorldAabb, 'URDF visual robot 未就绪。');
       }
       try {
-        const segmentRobot =
-          segmentIndex === 0 ? robot : cloneRobotAtJointValues(robot, segmentStartJoints);
+        const segmentRobot = cloneRobotAtJointValues(robot, segmentStartJoints);
         return evaluateCupApproachPreContactSafety({
           robot: segmentRobot,
           description: robotDescription,
@@ -716,6 +732,7 @@ export const App = () => {
 
   const updatePhysicsState = (values: JointValues) => {
     if (!loadedRobot) return;
+    actualPhysicsJointValuesRef.current = { ...values };
     loadedRobot.model.setJointValues(values);
     setJointValues(loadedRobot.model.getJointValues());
     const experiment = typeof window === 'undefined' ? undefined : window.__ROBOT_SIM_WRIST3_AB__;
@@ -1275,6 +1292,25 @@ export const App = () => {
     }
   };
 
+  const applyTimestampReplayStep = (values: JointValues) => {
+    if (!loadedRobot) return;
+    try {
+      loadedRobot.model.setJointValues(values);
+      const nextValues = loadedRobot.model.getJointValues();
+      loadedRobot.model.getControllableJoints().forEach((joint) => {
+        loadedRobot.controller.setCommand(joint.name, nextValues[joint.name]);
+      });
+      setJointValues(nextValues);
+      setCommands(loadedRobot.controller.getCommands());
+    } catch (caught) {
+      inference.stopTimestampScheduledRollingPlayback('SIMULATION_WRITE_FAILED', caught);
+    }
+  };
+
+  const sampleScheduledPhysicsJoints = (values: JointValues) => {
+    actualPhysicsJointValuesRef.current = { ...values };
+  };
+
   const setTargetCoordinate = (field: 'position' | 'orientation', index: number, value: number) => {
     setTargetPose((current) => {
       const next = [...current[field]] as number[];
@@ -1406,9 +1442,46 @@ export const App = () => {
               >
                 运行 Timestamp-Scheduled Waypoint Plan Dry-Run
               </button>
+              <p className="inference-progress">
+                最多两轮推理；路点按浏览器单调时钟连续插值，Cycle 2
+                接管后自动取消剩余队列并保持当前状态。
+              </p>
+              <button
+                className="secondary-button"
+                disabled={
+                  !inference.canStartTimestampScheduledRollingPlayback ||
+                  !doesLoadedRobotMatchConfig(loadedRobot, currentModel) ||
+                  !physicsReady ||
+                  Boolean(loadError) ||
+                  datasetReplayEnabled ||
+                  experimentRecording
+                }
+                onClick={() => {
+                  if (mode !== 'position' && !inference.isLocked) setControlMode('position');
+                  setIsRunning(true);
+                  inference.startTimestampScheduledRollingPlayback();
+                }}
+                type="button"
+              >
+                运行 2-cycle Timestamp-Scheduled Rolling Playback
+              </button>
+              {inference.timestampRollingPlaybackActive ? (
+                <button
+                  className="secondary-button"
+                  onClick={() => inference.stopTimestampScheduledRollingPlayback('USER_STOP')}
+                  type="button"
+                >
+                  立即停止并保持当前状态
+                </button>
+              ) : null}
               {inference.timestampSchedulingDryRunReport ? (
                 <pre className="inference-review">
-                  {JSON.stringify(inference.timestampSchedulingDryRunReport, null, 2)}
+                  {JSON.stringify(
+                    inference.timestampRollingPlaybackReport ??
+                      inference.timestampSchedulingDryRunReport,
+                    null,
+                    2,
+                  )}
                 </pre>
               ) : null}
             </section>
@@ -1657,6 +1730,9 @@ export const App = () => {
                 onUrdfVisualRobotChange={handleUrdfVisualRobotChange}
                 onPhysicsReady={setPhysicsReady}
                 playback={inference.playback}
+                timestampWaypointController={inference.timestampWaypointController}
+                timestampPlaybackActive={inference.timestampRollingPlaybackActive}
+                getActualJointValues={() => actualPhysicsJointValuesRef.current}
                 cupSceneResetToken={cupSceneResetToken}
                 cupEvaluationGeometryRef={cupEvaluationGeometryRef}
                 inferenceActive={inference.isLocked}
@@ -1672,6 +1748,9 @@ export const App = () => {
                 datasetReplayActualPose={datasetReplayActualPose}
                 onPlaybackStep={applyReplayStep}
                 onPlaybackComplete={completeInferencePlayback}
+                onTimestampPlaybackStep={applyTimestampReplayStep}
+                onTimestampWaypointEvents={inference.onTimestampWaypointEvents}
+                onScheduledJointSample={sampleScheduledPhysicsJoints}
                 cameraEnabled={doesLoadedRobotMatchConfig(loadedRobot, currentModel)}
                 tcpPose={tcpPose ?? DEFAULT_TARGET}
                 onCameraFrame={handleCameraFrame}

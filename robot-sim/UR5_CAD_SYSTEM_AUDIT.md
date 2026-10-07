@@ -306,4 +306,36 @@ next replan:      20343.9 ms（observation + 600 ms）
 
 本轮定向回归覆盖 scheduler 选择、固定 observation pose reference、IK seed 连续传播、arm no-op、gripper-only/full no-op、IK 和安全失败截断、URDF limits、时间戳顺序、重规划时间及 queue replacement。`pnpm typecheck` 与 `pnpm build` 通过；`pnpm lint` 无 error，保留一个既有的 `WristCameraCapture.tsx` Hook dependency warning。全量 `pnpm test` 有 152 项通过、1 项失败：未修改的 `tests/kinematics.test.ts` 仍要求 `Part 1..6` 位于 `mount_link`，而当前已提交 URDF 将它们放在 `fixed_mount_link`；测试和 URDF 在本轮均未改动，该失败与本轮 waypoint 变更无关。
 
-**Timestamp-Scheduled UR5_CAD Playback 阶段判定：READY（可进入浏览器仿真 playback 阶段）。** 本轮验证的是候选计划生成和 swept safety；不代表已经实现或验证 timestamp-driven playback，也不构成实机执行许可。下一阶段应只在仿真里实现并验证 waypoint 时间驱动、运行中重规划替换和实际播放后的状态记录。实机控制器延迟仍未测量。
+**Timestamp-Scheduled UR5_CAD Playback 干跑阶段历史判定：READY。** 该结论只覆盖候选计划生成和 swept safety，不构成实机执行许可。下方双周期实跑结果更新了当前阶段判定。
+
+## 2026-10-07：双周期 Timestamp-Scheduled Rolling Playback 首次实跑
+
+**2-CYCLE TIMESTAMP-SCHEDULED PLAYBACK：FAIL。** 点击双周期回放一次，使用当前 UR5_CAD、腕部相机、官方 checkpoint `cup_wild_vit_l_1img.ckpt`。运行进入 Cycle 1，生成并安全检查计划，按 timestamp 插值开始执行第一个仍有效的 future waypoint；严格 tracking fail-safe 随后停止运行。Cycle 2 没有启动，因此本次没有验证 B 计划替换 A future trajectory，也没有 inference / execution overlap 证据。无 Cycle 3；停止后控制器状态为 `HOLD_CURRENT_STATE`，未来队列已全部取消。
+
+![双周期实跑停止后的 UR5_CAD 页面与运行报告](debug/umi-2cycle-rolling-playback.png)
+
+### Cycle 1 与停止原因
+
+| 项目 | 观测结果 |
+|---|---|
+| 请求 | frame 0，camera frame 418，observation camera timestamp 72777.9 ms |
+| inference RTT | 844.7 ms |
+| expired / selected | `[0..9]` / `[10..15]` |
+| waypoint plan | 6/6 IK 成功，`ALL_SELECTED_WAYPOINTS_PASSED`；所有分段 pre-contact 检查通过 |
+| next replan | 73377.9 ms；inference 返回时已晚 355.8 ms |
+| queue insertion | 74151.3 ms；action 10–13 已过期并按 past-time no-op 丢弃 |
+| 首个实际排队点 | action 14，scheduled 74177.9 ms，插入时只剩 26.6 ms；action 15 也进入 future 队列 |
+| tracking fail | action 14 在 74157.8 ms 开始后触发 fail-safe：最大关节误差 0.00360 rad，TCP 位置误差 3.109 mm，方向误差 6.480 mrad，夹爪开口误差 20.146 mm |
+| 最终状态 | `HOLD_CURRENT_STATE`；TCP `[-0.490500, 0.109150, 0.207073] m`；gripper 0 mm；杯子中心距离 212.845 mm，表面代理距离 130.705 mm，停止前后相同 |
+
+最终关节保持在当前仿真状态：`shoulder_pan=0`、`shoulder_lift=-1.570796`、`elbow=-1.570796`、`wrist_1=-1.570796`、`wrist_2=1.570796`、`wrist_3≈0`、`left_jaw=0`、`right_jaw=0`。final TCP 四元数 xyzw 为 `[-0.707107, -0.707107, 0, 0]`。本次没有 waypoint 到达 `REACHED`；action 14 为 `FAILED`，action 15 与已过期的 action 10–13 均为 `CANCELLED`。action 0–9 已由 scheduler 标记过期，没有进入队列。
+
+本次运行报告中的 `available_time_to_first_waypoint_ms=-373.4` 是一个指标缺陷：旧实现按所选数组第一个 action 10 计算，即使 action 10 已过期。随后修复为按插入时仍在未来的第一个 waypoint 计算，并增加测试；用本次记录的 action 14 时间戳重算后，正确余时为 26.6 ms。失败点的 TCP、方向和夹爪误差超过现有阈值，控制器因此取消 action 15 并保持实际关节状态。没有放宽阈值，也没有重跑。
+
+### 阶段判定
+
+本轮确认 timestamp 驱动的插值路径已接入仿真 motor / Rapier 命令通道，并在 Cycle 1 实际启动；但没有任何 waypoint 到达 `REACHED`，完整的双周期滚动重规划验证未通过。旧 single / 3 / 10 / action0-only 流程保留原有路径；固定 0.5 秒动作播放不用于 timestamp waypoint controller。Cycle 2 替换、inference / execution overlap 和 Cycle 2 后自动停止仍未在运行中证实。
+
+运行标志：`ik_failure=false`、`pre_contact_block=false`、`gripper_mapping_error=false`、`stale_camera=false`、`tracking_failure=true`、`queue_timing_error=true`、`all_future_waypoints_cancelled=true`、`cycle_3_started=false`。浏览器运行仅在本机 UR5_CAD 仿真；没有操作实机。下一阶段需先处理 inference 与 waypoint 计划计算造成的时间余量不足，并在获准的后续单次实跑中重新验证；本次不进入 bounded continuous Cup Approach。
+
+代码验证：定向回归 41/41 通过，`pnpm typecheck` 与 `pnpm build` 通过，`pnpm lint` 无 error、保留既有 Hook dependency warning。全量 `pnpm test` 为 160/161；唯一失败仍是未修改的 `tests/kinematics.test.ts` 对 `mount_link` visual 列表的历史预期与当前 URDF `fixed_mount_link` 实际结构不一致。截图是本机 ignored debug artifact，没有加入提交。
