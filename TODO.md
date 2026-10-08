@@ -12,6 +12,7 @@
 - [x] 在 robot-sim 中新增官方 UR5 型号并验证 FK、TCP 与数值 IK
 - [x] 修复 robot-sim UR5 visual/collision 重叠并检查腕部相机视线
 - [x] 接入官方 UMI 权重与仿真腕部相机在线推理
+- [x] 为 UMI Worker 增加推理 Warm-up 并测量首次正式推理耗时
 - [x] 在 robot-sim 前端实时显示腕部相机画面
 - [x] 记录 UMI 在线推理输入与动作结果
 - [x] 支持前端按钮逐步推理与单动作回放

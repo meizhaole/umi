@@ -100,6 +100,124 @@ def get_episode_start_pose(env_obs):
     ], axis=-1)[-1].copy()]
 
 
+def synchronize_if_cuda(device):
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+
+
+def build_warmup_observation(shape_meta, obs_pose_repr, device):
+    obs_meta = shape_meta["obs"]
+    image_channels, image_height, image_width = obs_meta["camera0_rgb"]["shape"]
+    robot_pos_meta = obs_meta["robot0_eef_pos"]
+    robot_rot_meta = obs_meta["robot0_eef_rot_axis_angle"]
+    gripper_meta = obs_meta["robot0_gripper_width"]
+
+    # Worker 每条正式 observation 只带一张 RGB，低维状态保留 shape_meta 的时间长度。
+    env_obs = {
+        "camera0_rgb": np.zeros(
+            (1, image_height, image_width, image_channels),
+            dtype=np.uint8,
+        ),
+        "robot0_eef_pos": np.zeros(
+            (robot_pos_meta["horizon"], *robot_pos_meta["shape"]),
+            dtype=np.float32,
+        ),
+        "robot0_eef_rot_axis_angle": np.zeros(
+            (
+                robot_rot_meta["horizon"],
+                *robot_rot_meta.get("raw_shape", robot_rot_meta["shape"]),
+            ),
+            dtype=np.float32,
+        ),
+        "robot0_gripper_width": np.zeros(
+            (gripper_meta["horizon"], *gripper_meta["shape"]),
+            dtype=np.float32,
+        ),
+    }
+    episode_start_pose = get_episode_start_pose(env_obs)
+    obs_np = get_real_umi_obs_dict(
+        env_obs,
+        shape_meta,
+        obs_pose_repr=obs_pose_repr,
+        episode_start_pose=episode_start_pose,
+    )
+    return dict_apply(
+        obs_np,
+        lambda value: torch.from_numpy(value).unsqueeze(0).to(device),
+    )
+
+
+def run_policy_warmup(policy, warmup_obs, device):
+    rng_devices = []
+    cuda_rng_state_before = None
+    if device.type == "cuda":
+        cuda_device_index = (
+            device.index if device.index is not None else torch.cuda.current_device()
+        )
+        rng_devices = [cuda_device_index]
+        cuda_rng_state_before = torch.cuda.get_rng_state(device)
+    cpu_rng_state_before = torch.get_rng_state()
+    policy_output = None
+
+    try:
+        with torch.random.fork_rng(devices=rng_devices):
+            try:
+                synchronize_if_cuda(device)
+                warmup_started = time.perf_counter()
+                with torch.inference_mode():
+                    policy_output = policy.predict_action(warmup_obs)
+                synchronize_if_cuda(device)
+                warmup_ms = (time.perf_counter() - warmup_started) * 1000
+            finally:
+                if policy_output is not None:
+                    del policy_output
+                policy.reset()
+    except Exception as error:
+        raise RuntimeError(f"UMI policy warm-up failed: {error}") from error
+
+    rng_state_preserved = torch.equal(torch.get_rng_state(), cpu_rng_state_before)
+    if device.type == "cuda":
+        rng_state_preserved = rng_state_preserved and torch.equal(
+            torch.cuda.get_rng_state(device),
+            cuda_rng_state_before,
+        )
+    if not rng_state_preserved:
+        raise RuntimeError("UMI policy warm-up changed the formal inference RNG state")
+    return warmup_ms, rng_state_preserved
+
+
+def predict_action_with_timing(policy, obs, device):
+    synchronize_if_cuda(device)
+    inference_started = time.perf_counter()
+    try:
+        with torch.inference_mode():
+            policy_output = policy.predict_action(obs)
+    finally:
+        synchronize_if_cuda(device)
+    inference_ms = (time.perf_counter() - inference_started) * 1000
+    return policy_output, inference_ms
+
+
+def log_formal_inference_timing(inference_index, inference_ms):
+    timing_key = (
+        "first_formal_inference_ms"
+        if inference_index == 0
+        else "subsequent_inference_ms"
+    )
+    print(
+        json.dumps(
+            {
+                "event": "umi_worker_inference_timing",
+                "inference_index": inference_index,
+                timing_key: inference_ms,
+            },
+            ensure_ascii=False,
+        ),
+        file=sys.stderr,
+        flush=True,
+    )
+
+
 class EpisodeStartState:
     def __init__(self):
         self.episode_index = None
@@ -129,6 +247,7 @@ def emit_actions(args):
         raise FileNotFoundError(f"权重不存在：{args.checkpoint}")
 
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    model_load_started = time.perf_counter()
     with contextlib.redirect_stdout(sys.stderr):
         cfg, policy = load_policy(
             str(args.checkpoint),
@@ -136,7 +255,15 @@ def emit_actions(args):
             skip_pretrained=True,
         )
         policy.num_inference_steps = cfg.policy.num_inference_steps
+    model_load_ms = (time.perf_counter() - model_load_started) * 1000
+
+    synchronize_if_cuda(device)
+    model_to_device_started = time.perf_counter()
+    with contextlib.redirect_stdout(sys.stderr):
         policy.eval().to(device)
+    synchronize_if_cuda(device)
+    model_to_device_ms = (time.perf_counter() - model_to_device_started) * 1000
+
     print(
         f"[模型已加载] checkpoint={args.checkpoint.resolve()} device={device}",
         file=sys.stderr,
@@ -145,10 +272,75 @@ def emit_actions(args):
     shape_meta = cfg.task.shape_meta
     obs_pose_repr = cfg.task.pose_repr.obs_pose_repr
     action_pose_repr = cfg.task.pose_repr.action_pose_repr
+
+    try:
+        warmup_obs = build_warmup_observation(
+            shape_meta,
+            obs_pose_repr,
+            device,
+        )
+        warmup_ms, warmup_rng_state_preserved = run_policy_warmup(
+            policy,
+            warmup_obs,
+            device,
+        )
+    except Exception as error:
+        print(
+            json.dumps(
+                {
+                    "event": "umi_worker_initialization_error",
+                    "code": "policy_warmup_failed",
+                    "stage": "warmup",
+                    "message": str(error),
+                },
+                ensure_ascii=False,
+            ),
+            file=sys.stderr,
+            flush=True,
+        )
+        raise
+
+    print(
+        json.dumps(
+            {
+                "event": "umi_worker_initialization_timing",
+                "checkpoint": str(args.checkpoint.resolve()),
+                "device": str(device),
+                "gpu_name": (
+                    torch.cuda.get_device_name(device)
+                    if device.type == "cuda"
+                    else None
+                ),
+                "torch_version": torch.__version__,
+                "cuda_version": torch.version.cuda,
+                "use_ema": bool(cfg.training.use_ema),
+                "num_inference_steps": int(cfg.policy.num_inference_steps),
+                "action_horizon": int(shape_meta["action"]["horizon"]),
+                "model_load_ms": model_load_ms,
+                "model_to_device_ms": model_to_device_ms,
+                "warmup_ms": warmup_ms,
+                "warmup_input_type": "SYNTHETIC_INPUT",
+                "warmup_predict_calls": 1,
+                "shape_meta_rgb_horizon": int(
+                    shape_meta["obs"]["camera0_rgb"]["horizon"]
+                ),
+                "warmup_tensor_shapes": {
+                    key: list(value.shape) for key, value in warmup_obs.items()
+                },
+                "warmup_rng_state_preserved": warmup_rng_state_preserved,
+            },
+            ensure_ascii=False,
+        ),
+        file=sys.stderr,
+        flush=True,
+    )
+    del warmup_obs
+
     episode_state = EpisodeStartState()
     # 一个 WebSocket 对应一个 worker 进程；stop、断连会终止进程，重连时从新状态开始。
     print(json.dumps({"type": "ready"}), flush=True)
 
+    formal_inference_count = 0
     for line in sys.stdin:
         try:
             message = json.loads(line)
@@ -231,13 +423,19 @@ def emit_actions(args):
                 save_capture_metadata(metadata_path, metadata)
 
             if capture_enabled:
-                inference_started = time.perf_counter()
                 with contextlib.redirect_stdout(sys.stderr):
-                    with torch.inference_mode():
-                        policy_output = policy.predict_action(obs)
-                        prediction_tensor = policy_output["action_pred"][0]
-                        prediction = prediction_tensor.float().cpu().numpy()
-                inference_ms = (time.perf_counter() - inference_started) * 1000
+                    policy_output, inference_ms = predict_action_with_timing(
+                        policy,
+                        obs,
+                        device,
+                    )
+                log_formal_inference_timing(
+                    formal_inference_count,
+                    inference_ms,
+                )
+                formal_inference_count += 1
+                prediction_tensor = policy_output["action_pred"][0]
+                prediction = prediction_tensor.float().cpu().numpy()
                 prediction_statistics = array_statistics(prediction)
                 result = {
                     "type": "prediction_result",
@@ -269,11 +467,19 @@ def emit_actions(args):
                 continue
 
             with contextlib.redirect_stdout(sys.stderr):
-                with torch.inference_mode():
-                    policy_output = policy.predict_action(obs)
-                    action_prediction = policy_output["action_pred"]
-                    prediction = action_prediction[0]
-                    prediction = prediction.float().cpu().numpy()
+                policy_output, inference_ms = predict_action_with_timing(
+                    policy,
+                    obs,
+                    device,
+                )
+            log_formal_inference_timing(
+                formal_inference_count,
+                inference_ms,
+            )
+            formal_inference_count += 1
+            action_prediction = policy_output["action_pred"]
+            prediction = action_prediction[0]
+            prediction = prediction.float().cpu().numpy()
             prediction_metadata = {
                 "prediction_keys": list(policy_output.keys()),
                 "action_pred_shape": list(action_prediction.shape),
