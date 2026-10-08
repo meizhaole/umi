@@ -131,6 +131,7 @@ interface PlaybackSnapshot {
 interface TimestampDryRunTiming {
   observationCreatedTimestampMs: number;
   inferenceRequestSentTimestampMs: number;
+  observationJointValues: JointValues | null;
   episodeStartTimestampMs: number;
   iterationIndex: number;
   rollingCycleIndex: number | null;
@@ -921,21 +922,13 @@ export const useInferenceReplay = ({
     }
     lastObservationRef.current = requestObservation;
     const observationCreatedTimestampMs = performance.now();
-    const inferenceRequestSentTimestampMs = performance.now();
+    const observationJointValues =
+      timestampDryRunRef.current && timestampRollingRunRef.current === null
+        ? (context.getObservationJointValues?.() ?? null)
+        : null;
+    const rollingRuntime = timestampDryRunRef.current ? timestampRollingRunRef.current : null;
+    const rollingCycleIndex = rollingRuntime?.controller.snapshot().cycles_started ?? null;
     if (timestampDryRunRef.current) {
-      const rollingRuntime = timestampRollingRunRef.current;
-      const rollingCycleIndex = rollingRuntime?.controller.snapshot().cycles_started ?? null;
-      timestampDryRunTimingRef.current = {
-        observationCreatedTimestampMs,
-        inferenceRequestSentTimestampMs,
-        episodeStartTimestampMs:
-          observation.camera_frame_timestamp_ms + OFFICIAL_FRAME_LATENCY_SECONDS * 1000,
-        iterationIndex:
-          rollingCycleIndex === null
-            ? 0
-            : (rollingCycleIndex - 1) * OFFICIAL_UMI_STEPS_PER_INFERENCE,
-        rollingCycleIndex,
-      };
       if (rollingRuntime && rollingCycleIndex !== null) {
         rollingRuntime.cycleObservations.push({
           cycle_index: rollingCycleIndex,
@@ -950,13 +943,27 @@ export const useInferenceReplay = ({
         });
       }
     }
-    socket.send(
-      JSON.stringify({
-        type: 'observation',
-        episode_index: episodeIndexRef.current,
-        ...requestObservation,
-      }),
-    );
+    const requestPayload = JSON.stringify({
+      type: 'observation',
+      episode_index: episodeIndexRef.current,
+      ...requestObservation,
+    });
+    const inferenceRequestSentTimestampMs = performance.now();
+    if (timestampDryRunRef.current) {
+      timestampDryRunTimingRef.current = {
+        observationCreatedTimestampMs,
+        inferenceRequestSentTimestampMs,
+        observationJointValues: observationJointValues ? { ...observationJointValues } : null,
+        episodeStartTimestampMs:
+          observation.camera_frame_timestamp_ms + OFFICIAL_FRAME_LATENCY_SECONDS * 1000,
+        iterationIndex:
+          rollingCycleIndex === null
+            ? 0
+            : (rollingCycleIndex - 1) * OFFICIAL_UMI_STEPS_PER_INFERENCE,
+        rollingCycleIndex,
+      };
+    }
+    socket.send(requestPayload);
     if (mountedRef.current) setProgress('观测已发送，正在推理下一步动作');
     updateStatus('inferring');
     publishDebugEvent('inference:observation_sent', {
@@ -1007,7 +1014,8 @@ export const useInferenceReplay = ({
       return;
     }
 
-    const schedulerCurrentTimestampMs = performance.now();
+    const schedulerStartedTimestampMs = performance.now();
+    const schedulerCurrentTimestampMs = schedulerStartedTimestampMs;
     const schedule = scheduleUmiActions({
       actionCount: chunk.actions.length,
       observationTimestampMs: observationSnapshot.camera_frame_timestamp_ms,
@@ -1021,6 +1029,7 @@ export const useInferenceReplay = ({
       actionExecLatencySeconds: OFFICIAL_ACTION_EXEC_LATENCY_SECONDS,
       simulatedCommandLatencySeconds: 0,
     });
+    const schedulerCompletedTimestampMs = performance.now();
     const report = {
       request_id: chunk.request_id,
       episode_index: chunk.episode_index,
@@ -1032,7 +1041,19 @@ export const useInferenceReplay = ({
       inference_response_received_timestamp_ms: inferenceResponseReceivedTimestampMs,
       inference_round_trip_ms:
         inferenceResponseReceivedTimestampMs - timing.inferenceRequestSentTimestampMs,
+      scheduler_started_timestamp_ms: schedulerStartedTimestampMs,
+      scheduler_completed_timestamp_ms: schedulerCompletedTimestampMs,
+      scheduler_duration_ms: schedulerCompletedTimestampMs - schedulerStartedTimestampMs,
       scheduler_current_timestamp_ms: schedulerCurrentTimestampMs,
+      timestamps_ms: {
+        T0: observationSnapshot.camera_frame_timestamp_ms,
+        T1: timing.inferenceRequestSentTimestampMs,
+        T2: inferenceResponseReceivedTimestampMs,
+        T3: schedulerCompletedTimestampMs,
+        T4: null,
+      },
+      observation_joint_values: timing.observationJointValues,
+      observation_gripper_opening_m: observationSnapshot.robot0_gripper_width.at(-1)?.[0] ?? null,
       frequency_hz: schedule.frequencyHz,
       dt_ms: schedule.dtMs,
       steps_per_inference: schedule.stepsPerInference,
@@ -1106,7 +1127,7 @@ export const useInferenceReplay = ({
         : null;
     const observationJointValues = rollingRuntime
       ? (requestObservation?.joint_values ?? null)
-      : context.getObservationJointValues?.();
+      : (timestampDryRunTimingRef.current?.observationJointValues ?? null);
     let waypointPlan: UmiScheduledWaypointPlan | null = null;
     let planError: string | null = null;
 
@@ -1149,8 +1170,128 @@ export const useInferenceReplay = ({
       }
     }
 
+    const planReadyTimestampMs = performance.now();
+    const responseReceivedTimestampMs =
+      typeof scheduleReport.inference_response_received_timestamp_ms === 'number'
+        ? scheduleReport.inference_response_received_timestamp_ms
+        : null;
+    const schedulerCompletedTimestampMs =
+      typeof scheduleReport.scheduler_completed_timestamp_ms === 'number'
+        ? scheduleReport.scheduler_completed_timestamp_ms
+        : null;
+    const selectedWaypointSlack = schedule.selectedActionIndexes.map((actionIndex) => {
+      const timing = schedule.actionTimings.find((item) => item.actionIndex === actionIndex);
+      const scheduledTimestampMs = timing?.effectiveScheduledTimestampMs ?? null;
+      return {
+        action_index: actionIndex,
+        scheduler_state: timing?.state ?? null,
+        action_timestamp_ms: timing?.actionTimestampMs ?? null,
+        scheduled_timestamp_ms: scheduledTimestampMs,
+        slack_at_inference_response_ms:
+          scheduledTimestampMs !== null && responseReceivedTimestampMs !== null
+            ? scheduledTimestampMs - responseReceivedTimestampMs
+            : null,
+        slack_at_plan_ready_ms:
+          scheduledTimestampMs !== null ? scheduledTimestampMs - planReadyTimestampMs : null,
+      };
+    });
+    const firstFutureWaypoint =
+      waypointPlan?.waypoints.find(
+        (waypoint) =>
+          typeof waypoint.scheduled_timestamp_ms === 'number' &&
+          waypoint.scheduled_timestamp_ms > planReadyTimestampMs,
+      ) ?? null;
+    const firstFutureTcpDelta = firstFutureWaypoint
+      ? firstFutureWaypoint.absolute_tcp_target.position.map(
+          (value, index) => value - (observationTcpPose?.position[index] ?? value),
+        )
+      : null;
+    const firstFutureTcpOrientationDelta =
+      firstFutureWaypoint && observationTcpPose
+        ? vectorLength(
+            poseErrorRotation(
+              firstFutureWaypoint.absolute_tcp_target.orientation,
+              observationTcpPose.orientation,
+            ),
+          )
+        : null;
+    const currentGripperOpeningM = observationSnapshot.robot0_gripper_width.at(-1)?.[0] ?? null;
+    const firstFutureJointDelta =
+      firstFutureWaypoint?.target_joints && observationJointValues && context.description
+        ? Object.fromEntries(
+            context.description.joints
+              .filter(
+                (joint) =>
+                  joint.type === 'revolute' ||
+                  joint.type === 'continuous' ||
+                  joint.type === 'prismatic',
+              )
+              .flatMap((joint) => {
+                const target = firstFutureWaypoint.target_joints?.[joint.name];
+                const current = observationJointValues[joint.name];
+                return typeof target === 'number' && typeof current === 'number'
+                  ? [[joint.name, target - current]]
+                  : [];
+              }),
+          )
+        : null;
+    const firstFutureGripperDelta =
+      typeof firstFutureWaypoint?.gripper_target_opening_m === 'number' &&
+      typeof currentGripperOpeningM === 'number'
+        ? firstFutureWaypoint.gripper_target_opening_m - currentGripperOpeningM
+        : null;
     const report = {
       ...scheduleReport,
+      timestamps_ms: {
+        ...(isRecord(scheduleReport.timestamps_ms) ? scheduleReport.timestamps_ms : {}),
+        T4: planReadyTimestampMs,
+      },
+      plan_ready_timestamp_ms: planReadyTimestampMs,
+      planning_duration_ms:
+        schedulerCompletedTimestampMs === null
+          ? null
+          : planReadyTimestampMs - schedulerCompletedTimestampMs,
+      observation_to_plan_ready_ms:
+        planReadyTimestampMs - observationSnapshot.camera_frame_timestamp_ms,
+      selected_waypoint_slack_ms: selectedWaypointSlack,
+      plan_ready_expired_action_indexes: schedule.actionTimings.flatMap((timing) => {
+        const scheduledTimestampMs = timing.effectiveScheduledTimestampMs;
+        return scheduledTimestampMs === null || scheduledTimestampMs <= planReadyTimestampMs
+          ? [timing.actionIndex]
+          : [];
+      }),
+      plan_ready_future_action_indexes: schedule.actionTimings.flatMap((timing) => {
+        const scheduledTimestampMs = timing.effectiveScheduledTimestampMs;
+        return scheduledTimestampMs !== null && scheduledTimestampMs > planReadyTimestampMs
+          ? [timing.actionIndex]
+          : [];
+      }),
+      first_future_waypoint: firstFutureWaypoint
+        ? {
+            action_index: firstFutureWaypoint.action_index,
+            scheduled_timestamp_ms: firstFutureWaypoint.scheduled_timestamp_ms,
+            plan_ready_timestamp_ms: planReadyTimestampMs,
+            remaining_time_ms:
+              (firstFutureWaypoint.scheduled_timestamp_ms as number) - planReadyTimestampMs,
+            current_tcp: observationTcpPose,
+            target_tcp: firstFutureWaypoint.absolute_tcp_target,
+            tcp_translation_delta_m:
+              firstFutureTcpDelta === null ? null : Math.hypot(...firstFutureTcpDelta),
+            tcp_orientation_delta_rad: firstFutureTcpOrientationDelta,
+            current_joints: observationJointValues,
+            target_joints: firstFutureWaypoint.target_joints,
+            joint_delta: firstFutureWaypoint.joint_delta,
+            current_gripper_opening_m: currentGripperOpeningM,
+            target_gripper_opening_m: firstFutureWaypoint.gripper_target_opening_m,
+            gripper_opening_delta_m: firstFutureGripperDelta,
+            target_gripper_joints: firstFutureWaypoint.gripper_target_joints,
+            ik_success: firstFutureWaypoint.ik_success,
+            joint_delta_from_observation: firstFutureJointDelta,
+            pre_contact_verdict: firstFutureWaypoint.pre_contact_verdict,
+            waypoint_classification: firstFutureWaypoint.waypoint_classification,
+            trackability: 'INCONCLUSIVE',
+          }
+        : null,
       waypoint_plan: waypointPlan,
       waypoint_plan_error: planError,
       ik_count: ikRecords.size,
@@ -1356,11 +1497,13 @@ export const useInferenceReplay = ({
   ) => {
     const context = contextRef.current;
     const observationTcpPose = getObservationTcpPose(observationSnapshot);
-    const observationJointValues = context.getObservationJointValues?.();
+    const rollingRuntime = timestampRollingRunRef.current;
+    const observationJointValues = rollingRuntime
+      ? (context.getObservationJointValues?.() ?? null)
+      : (timestampDryRunTimingRef.current?.observationJointValues ?? null);
     const ikRecords = new Map<number, IKActionDebugRecord>();
     timestampDryRunRef.current = false;
     timestampWaypointPlanDryRunRef.current = false;
-    timestampDryRunTimingRef.current = null;
     closeSocket(1000, 'timestamp waypoint plan inference complete');
 
     if (!isUr5CadContext(context) || !observationTcpPose) {

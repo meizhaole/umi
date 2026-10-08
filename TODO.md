@@ -68,6 +68,7 @@
 - [x] 重新审计 UR5_CAD 当前系统并建立官方 UMI 执行语义基线
 - [x] 为 UR5_CAD 增加 UMI 官方时间戳调度干跑与验证
 - [x] 为 UR5_CAD 增加时间化 waypoint 计划、分段安全检查与重规划队列验证
+- [ ] 完成 Warm-up 后真实 observation 的 UR5_CAD timestamp waypoint plan dry-run
 - [x] 实现双周期时间戳滚动回放及 fail-safe（首次实跑在 Cycle 1 跟踪保护停止）
 - [ ] 完成双周期滚动回放端到端验证（先解决首个 future waypoint 时间余量不足）
 - [ ] 将本机训练 checkpoint 接入 Gazebo 回放启动参数
