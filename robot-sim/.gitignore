@@ -7,3 +7,4 @@ debug/
 public/robot/description/
 public/robot/ur_description/
 **/AGENTS.md
+__pycache__/
