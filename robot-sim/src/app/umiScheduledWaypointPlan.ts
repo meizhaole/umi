@@ -421,6 +421,7 @@ export const createUmiScheduledWaypointPlan = (
 export interface ScheduledWaypoint<T> {
   actionIndex: number;
   scheduledTimestampMs: number;
+  effectiveTimestampMs?: number;
   value: T;
 }
 
@@ -435,8 +436,10 @@ export const applyOfficialWaypointQueueInsertion = <T>(
 
   const lastWaypoint = queuedWaypoints.at(-1);
   const retainedWaypoints =
-    lastWaypoint && incomingWaypoint.scheduledTimestampMs <= lastWaypoint.scheduledTimestampMs
-      ? queuedWaypoints.filter((waypoint) => waypoint.scheduledTimestampMs <= currentTimestampMs)
+    lastWaypoint &&
+    incomingWaypoint.scheduledTimestampMs <=
+      (lastWaypoint.effectiveTimestampMs ?? lastWaypoint.scheduledTimestampMs)
+      ? []
       : [...queuedWaypoints];
   return [...retainedWaypoints, incomingWaypoint];
 };

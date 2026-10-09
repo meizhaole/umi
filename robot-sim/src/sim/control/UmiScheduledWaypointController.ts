@@ -16,6 +16,13 @@ export type UmiScheduledControllerState = 'IDLE' | 'RUNNING' | 'HOLD_CURRENT_STA
 export interface UmiScheduledWaypointControllerOptions {
   armJointNames: readonly string[];
   gripperJointNames: readonly string[];
+  armJointVelocityRadPerSec: Readonly<Record<string, number>>;
+  gripperOpeningVelocityMPerSec: number;
+  validateSegmentSafety: (
+    segmentStartJoints: JointValues,
+    segmentEndJoints: JointValues,
+    actionIndex: number,
+  ) => { verdict: string; evaluation_error?: string } | null;
   getTcpPose: (jointValues: JointValues) => Pose;
   getGripperOpening: (jointValues: JointValues) => number;
   trackingTolerances: {
@@ -33,10 +40,12 @@ export interface UmiScheduledWaypointQueueRecord {
   frame_index: number;
   action_index: number;
   scheduled_timestamp_ms: number;
+  effective_arrival_timestamp_ms: number | null;
   queue_insert_timestamp_ms: number;
   active_timestamp_ms: number | null;
   source_observation_timestamp_ms: number;
   target_arm_joints: JointValues;
+  planned_segment_start_joints: JointValues | null;
   target_joint_values: JointValues;
   target_gripper: number;
   target_tcp: Pose;
@@ -51,6 +60,7 @@ export interface UmiScheduledWaypointQueueRecord {
   gripper_tracking_error_m: number | null;
   actual_timestamp_ms: number | null;
   timing_error_ms: number | null;
+  effective_timing_error_ms: number | null;
   failure_reason?: string;
 }
 
@@ -76,6 +86,7 @@ export interface UmiScheduledWaypointSnapshot {
   inference_execution_overlap_sample_count: number;
   first_inference_execution_overlap_timestamp_ms: number | null;
   last_inference_execution_overlap_timestamp_ms: number | null;
+  handoff_joint_values: JointValues | null;
   waypoints: UmiScheduledWaypointQueueRecord[];
   events: UmiScheduledWaypointEvent[];
   failure: { reason: string; timestamp_ms: number } | null;
@@ -150,6 +161,8 @@ export class UmiScheduledWaypointController {
 
   private anchor: JointAnchor | null = null;
 
+  private handoffJointValues: JointValues | null = null;
+
   private heldJointValues: JointValues | null = null;
 
   private holdCommandPending = false;
@@ -168,9 +181,36 @@ export class UmiScheduledWaypointController {
     this.options = options;
   }
 
-  startRun(timestampMs: number): void {
+  isExecutionStateValid(jointValues: JointValues): boolean {
+    return (
+      this.hasFiniteExecutionState(jointValues) &&
+      Number.isFinite(this.options.getGripperOpening(jointValues))
+    );
+  }
+
+  areExecutionStatesStable(previous: JointValues, current: JointValues): boolean {
+    if (!this.isExecutionStateValid(previous) || !this.isExecutionStateValid(current)) {
+      return false;
+    }
+    const previousGripperOpening = this.options.getGripperOpening(previous);
+    const currentGripperOpening = this.options.getGripperOpening(current);
+    return (
+      Number.isFinite(previousGripperOpening) &&
+      Number.isFinite(currentGripperOpening) &&
+      maximumAbsoluteJointError(this.options.armJointNames, previous, current) <=
+        this.options.trackingTolerances.jointErrorRad &&
+      maximumAbsoluteJointError(this.options.gripperJointNames, previous, current) <=
+        this.options.trackingTolerances.gripperErrorM &&
+      Math.abs(previousGripperOpening - currentGripperOpening) <=
+        this.options.trackingTolerances.gripperErrorM
+    );
+  }
+
+  startRun(timestampMs: number, actualJointValues: JointValues): void {
     if (!Number.isFinite(timestampMs))
       throw new Error('运行起始时间必须属于 performance.now 时钟域。');
+    if (!this.isExecutionStateValid(actualJointValues))
+      throw new Error('首轮接管缺少有效的实测关节或夹爪状态。');
     this.state = 'RUNNING';
     this.cyclesStarted = 0;
     this.inferenceInProgress = false;
@@ -178,7 +218,11 @@ export class UmiScheduledWaypointController {
     this.rows = [];
     this.events = [];
     this.pendingEvents = [];
-    this.anchor = null;
+    this.anchor = {
+      timestamp_ms: timestampMs,
+      joint_values: cloneJointValues(actualJointValues),
+    };
+    this.handoffJointValues = cloneJointValues(actualJointValues);
     this.heldJointValues = null;
     this.holdCommandPending = false;
     this.failure = null;
@@ -211,7 +255,7 @@ export class UmiScheduledWaypointController {
     const eventStartIndex = this.events.length;
     const inferenceWasInProgress = this.inferenceInProgress;
     this.inferenceInProgress = false;
-    const priorQueueAtInsertion = this.getQueueClassification();
+    let priorQueueAtInsertion = this.getQueueClassification();
     const firstTimestamp = plan.waypoints.find(
       (waypoint) =>
         Number.isFinite(waypoint.scheduled_timestamp_ms) &&
@@ -264,12 +308,16 @@ export class UmiScheduledWaypointController {
         frame_index: waypoint.frame_index,
         action_index: waypoint.action_index,
         scheduled_timestamp_ms: scheduledTimestamp,
+        effective_arrival_timestamp_ms: null,
         queue_insert_timestamp_ms: insertionTimestampMs,
         active_timestamp_ms: null,
         source_observation_timestamp_ms: plan.observation_timestamp_ms,
         target_arm_joints: Object.fromEntries(
           this.options.armJointNames.map((name) => [name, targetJointValues[name]]),
         ),
+        planned_segment_start_joints: waypoint.segment_start_joints
+          ? cloneJointValues(waypoint.segment_start_joints)
+          : null,
         target_joint_values: targetJointValues,
         target_gripper: waypoint.gripper_target_opening_m as number,
         target_tcp: clonePose(waypoint.absolute_tcp_target),
@@ -284,16 +332,32 @@ export class UmiScheduledWaypointController {
         gripper_tracking_error_m: null,
         actual_timestamp_ms: null,
         timing_error_ms: null,
+        effective_timing_error_ms: null,
       };
     });
     this.rows.push(...inputRows);
+
+    const expiredQueueEntries = this.queue.filter(
+      ({ value }) =>
+        value.effective_arrival_timestamp_ms !== null &&
+        value.effective_arrival_timestamp_ms <= insertionTimestampMs,
+    );
+    if (expiredQueueEntries.length > 0) {
+      const expiredRows = new Set(expiredQueueEntries.map(({ value }) => value));
+      this.queue = this.queue.filter(({ value }) => !expiredRows.has(value));
+      expiredQueueEntries.forEach(({ value }) => {
+        value.queue_decision = 'PAST_TIME_NOOP';
+        this.setWaypointStatus(value, 'CANCELLED', insertionTimestampMs, 'PAST_TIME_NOOP');
+      });
+      priorQueueAtInsertion = this.getQueueClassification();
+    }
 
     const replacedWaypoints: Array<{ plan_id: string; action_index: number }> = [];
     const queuedActionIndexes: number[] = [];
     const queueWasEmpty = this.queue.length === 0;
     let trajectoryReplaced = false;
 
-    inputRows.forEach((row) => {
+    for (const row of inputRows) {
       const entry: QueueEntry = {
         actionIndex: row.action_index,
         scheduledTimestampMs: row.scheduled_timestamp_ms,
@@ -302,25 +366,104 @@ export class UmiScheduledWaypointController {
       if (entry.scheduledTimestampMs <= insertionTimestampMs) {
         row.queue_decision = 'PAST_TIME_NOOP';
         this.setWaypointStatus(row, 'CANCELLED', insertionTimestampMs, 'PAST_TIME_NOOP');
-        return;
+        continue;
       }
 
       const existingQueue = this.queue;
-      const nextQueue = applyOfficialWaypointQueueInsertion(
-        existingQueue,
-        entry,
-        insertionTimestampMs,
-      );
+      const continuesCurrentPlan = existingQueue.at(-1)?.value.plan_id === row.plan_id;
+      const nextQueue = continuesCurrentPlan
+        ? [...existingQueue, entry]
+        : applyOfficialWaypointQueueInsertion(existingQueue, entry, insertionTimestampMs);
       const retained = new Set(nextQueue.map(({ value }) => value));
       existingQueue.forEach(({ value }) => {
         if (retained.has(value)) return;
-        replacedWaypoints.push({ plan_id: value.plan_id, action_index: value.action_index });
-        this.setWaypointStatus(value, 'REPLACED', insertionTimestampMs, 'OFFICIAL_FUTURE_REPLACE');
-        trajectoryReplaced = true;
+        if (
+          value.effective_arrival_timestamp_ms !== null &&
+          value.effective_arrival_timestamp_ms <= insertionTimestampMs
+        ) {
+          value.queue_decision = 'PAST_TIME_NOOP';
+          this.setWaypointStatus(value, 'CANCELLED', insertionTimestampMs, 'PAST_TIME_NOOP');
+        } else {
+          replacedWaypoints.push({ plan_id: value.plan_id, action_index: value.action_index });
+          this.setWaypointStatus(
+            value,
+            'REPLACED',
+            insertionTimestampMs,
+            'OFFICIAL_FUTURE_REPLACE',
+          );
+          trajectoryReplaced = true;
+        }
       });
-      this.queue = nextQueue;
-      if (nextQueue.includes(entry)) queuedActionIndexes.push(row.action_index);
-    });
+      if (nextQueue.includes(entry)) {
+        const previousWaypoint = nextQueue.at(-2);
+        const segmentStartJointValues =
+          previousWaypoint?.value.target_joint_values ?? actualJointValues;
+        const segmentStartTimestampMs =
+          previousWaypoint?.effectiveTimestampMs ?? insertionTimestampMs;
+        const bridgeSafety = this.options.validateSegmentSafety(
+          segmentStartJointValues,
+          row.target_joint_values,
+          row.action_index,
+        );
+        if (!bridgeSafety || bridgeSafety.verdict !== 'SAFE_TO_EXECUTE') {
+          row.failure_reason =
+            bridgeSafety?.evaluation_error ??
+            'accepted trajectory segment failed pre-contact safety';
+          this.stop(insertionTimestampMs, actualJointValues, 'UNSAFE_PLAN');
+          this.setWaypointStatus(row, 'FAILED', insertionTimestampMs, 'UNSAFE_EXECUTION_BRIDGE');
+          return {
+            safe: false,
+            plan_id: planId,
+            cycle_index: cycleIndex,
+            available_time_to_first_waypoint_ms: availableTime,
+            queued_action_indexes: [],
+            replaced_waypoints: replacedWaypoints,
+            prior_queue_at_insertion: priorQueueAtInsertion,
+            events: this.events.slice(eventStartIndex),
+            reason: row.failure_reason,
+          };
+        }
+        const minimumSegmentDurationMs = this.minimumSegmentDurationMs(
+          segmentStartJointValues,
+          row.target_joint_values,
+          row.target_gripper,
+        );
+        if (minimumSegmentDurationMs === null) {
+          row.failure_reason = 'joint or gripper velocity constraint is missing or invalid';
+          this.stop(insertionTimestampMs, actualJointValues, 'UNSAFE_PLAN');
+          this.setWaypointStatus(row, 'FAILED', insertionTimestampMs, 'VELOCITY_LIMIT_UNAVAILABLE');
+          return {
+            safe: false,
+            plan_id: planId,
+            cycle_index: cycleIndex,
+            available_time_to_first_waypoint_ms: availableTime,
+            queued_action_indexes: [],
+            replaced_waypoints: replacedWaypoints,
+            prior_queue_at_insertion: priorQueueAtInsertion,
+            events: this.events.slice(eventStartIndex),
+            reason: row.failure_reason,
+          };
+        }
+        const nextStrictTimestampMs =
+          segmentStartTimestampMs +
+          Math.max(
+            minimumSegmentDurationMs,
+            Number.EPSILON * Math.max(1, Math.abs(segmentStartTimestampMs)),
+          );
+        row.effective_arrival_timestamp_ms = Math.max(
+          row.scheduled_timestamp_ms,
+          nextStrictTimestampMs,
+        );
+        this.queue = nextQueue.map((queuedEntry) =>
+          queuedEntry === entry
+            ? { ...queuedEntry, effectiveTimestampMs: row.effective_arrival_timestamp_ms as number }
+            : queuedEntry,
+        );
+        queuedActionIndexes.push(row.action_index);
+      } else {
+        this.queue = nextQueue;
+      }
+    }
 
     if (queuedActionIndexes.length > 0 && (queueWasEmpty || trajectoryReplaced)) {
       this.anchor = {
@@ -369,7 +512,17 @@ export class UmiScheduledWaypointController {
         timestamp_ms: row.queue_insert_timestamp_ms,
         joint_values: cloneJointValues(actualJointValues),
       };
-      const intervalMs = row.scheduled_timestamp_ms - anchor.timestamp_ms;
+      const effectiveArrivalTimestampMs = row.effective_arrival_timestamp_ms;
+      if (effectiveArrivalTimestampMs === null) {
+        this.stop(timestampMs, actualJointValues, 'UNSAFE_PLAN');
+        return {
+          state: this.state,
+          clock_domain: 'window.performance.now',
+          commanded_joint_values: cloneJointValues(this.heldJointValues as JointValues),
+          events: this.drainPendingEvents(),
+        };
+      }
+      const intervalMs = effectiveArrivalTimestampMs - anchor.timestamp_ms;
       if (intervalMs <= 0) {
         this.queue.shift();
         row.queue_decision = 'PAST_TIME_NOOP';
@@ -381,7 +534,7 @@ export class UmiScheduledWaypointController {
         continue;
       }
 
-      if (timestampMs < row.scheduled_timestamp_ms) {
+      if (timestampMs < effectiveArrivalTimestampMs) {
         if (row.queue_status === 'PENDING') {
           row.active_timestamp_ms = timestampMs;
           this.setWaypointStatus(row, 'ACTIVE', timestampMs);
@@ -430,7 +583,7 @@ export class UmiScheduledWaypointController {
       this.queue.shift();
       this.setWaypointStatus(row, 'REACHED', timestampMs);
       this.anchor = {
-        timestamp_ms: row.scheduled_timestamp_ms,
+        timestamp_ms: effectiveArrivalTimestampMs,
         joint_values: cloneJointValues(row.target_joint_values),
       };
     }
@@ -469,9 +622,15 @@ export class UmiScheduledWaypointController {
       first_inference_execution_overlap_timestamp_ms:
         this.firstInferenceExecutionOverlapTimestampMs,
       last_inference_execution_overlap_timestamp_ms: this.lastInferenceExecutionOverlapTimestampMs,
+      handoff_joint_values: this.handoffJointValues
+        ? cloneJointValues(this.handoffJointValues)
+        : null,
       waypoints: this.rows.map((row) => ({
         ...row,
         target_arm_joints: cloneJointValues(row.target_arm_joints),
+        planned_segment_start_joints: row.planned_segment_start_joints
+          ? cloneJointValues(row.planned_segment_start_joints)
+          : null,
         target_joint_values: cloneJointValues(row.target_joint_values),
         target_tcp: clonePose(row.target_tcp),
         actual_joints_at_scheduled_time: row.actual_joints_at_scheduled_time
@@ -525,6 +684,54 @@ export class UmiScheduledWaypointController {
     };
   }
 
+  private hasFiniteExecutionState(jointValues: JointValues): boolean {
+    return [...this.options.armJointNames, ...this.options.gripperJointNames].every((name) =>
+      Number.isFinite(jointValues[name]),
+    );
+  }
+
+  private minimumSegmentDurationMs(
+    start: JointValues,
+    target: JointValues,
+    targetGripperOpeningM: number,
+  ): number | null {
+    if (
+      !this.hasFiniteExecutionState(start) ||
+      !this.hasFiniteExecutionState(target) ||
+      !Number.isFinite(targetGripperOpeningM) ||
+      !Number.isFinite(this.options.gripperOpeningVelocityMPerSec) ||
+      this.options.gripperOpeningVelocityMPerSec <= 0
+    ) {
+      return null;
+    }
+
+    let durationSeconds = 0;
+    for (const jointName of this.options.armJointNames) {
+      const maxVelocity = this.options.armJointVelocityRadPerSec[jointName];
+      if (!Number.isFinite(maxVelocity) || maxVelocity <= 0) return null;
+      durationSeconds = Math.max(
+        durationSeconds,
+        Math.abs(target[jointName] - start[jointName]) / maxVelocity,
+      );
+    }
+
+    const startGripperOpeningM = this.options.getGripperOpening(start);
+    const endGripperOpeningM = this.options.getGripperOpening(target);
+    if (
+      !Number.isFinite(startGripperOpeningM) ||
+      !Number.isFinite(endGripperOpeningM) ||
+      Math.abs(endGripperOpeningM - targetGripperOpeningM) > 1e-9
+    ) {
+      return null;
+    }
+    durationSeconds = Math.max(
+      durationSeconds,
+      Math.abs(endGripperOpeningM - startGripperOpeningM) /
+        this.options.gripperOpeningVelocityMPerSec,
+    );
+    return durationSeconds * 1000;
+  }
+
   private isTrackingUnsafe(
     tracking: ReturnType<UmiScheduledWaypointController['measureTracking']>,
   ) {
@@ -548,6 +755,10 @@ export class UmiScheduledWaypointController {
   ): void {
     row.actual_timestamp_ms = timestampMs;
     row.timing_error_ms = timestampMs - row.scheduled_timestamp_ms;
+    row.effective_timing_error_ms =
+      row.effective_arrival_timestamp_ms === null
+        ? null
+        : timestampMs - row.effective_arrival_timestamp_ms;
     row.actual_joints_at_scheduled_time = cloneJointValues(actualJointValues);
     row.actual_gripper_at_scheduled_time = this.options.getGripperOpening(actualJointValues);
     row.joint_tracking_error_rad = tracking.jointErrorRad;
