@@ -8,4 +8,6 @@
 
 `ik-debug.jsonl` 每行记录一个 IK action 事件，使用 `request_id`、`episode_index`、`frame_index` 和 `action_index` 关联策略动作。`record_phase=started` 保存进入 IK 时的原始 action、start pose 和 Seed；`record_phase=result` 保存求解摘要。失败结果始终包含完整迭代 trace，成功结果默认只保存摘要。
 
-完整记录成功 action 的迭代过程时，在仿真页面 URL 加上 `?ikTrace=1`。关闭时移除该参数或使用 `?ikTrace=0`。`action_pose_repr` 当前记为 `null`，并以 `action_pose_repr_status=unavailable` 标明浏览器 IK 请求拿不到该字段；日志不会推断或填造其值。
+`ik-multiseed-results.json` 是离线诊断结果，不是在线推理的输入。`pnpm ik:multiseed` 从 `ik-debug.jsonl` 和 `inference-predictions.jsonl` 选取最近的 `no_joint_motion` 失败记录，并读取 `public/robot/description/RS/urdf/ReBot_Arm_RS.urdf`；它会覆盖本文件和 `robot-sim/ik_multiseed_experiment.md`。重跑前应保留现有两份结果及其对应日志。该实验报告记录的 8 个 Seed 均未成功，最小位置残差为 6.992 mm，仍高于 5 mm tolerance；结果不证明目标全局不可达。
+
+完整记录成功 action 的迭代过程时，在仿真页面 URL 加上 `?ikTrace=1`。关闭时移除该参数或使用 `?ikTrace=0`。`action_pose_repr` 从 UMI worker 的动作块传入前端 IK Worker，并原样写入 IK 记录；正常记录值为可用的字符串，状态为 `action_pose_repr_status=available`。该字段指定动作位姿的解释方式。当前浏览器 IK 只支持 `relative`，即将相对观测 TCP 的动作位姿与起始 TCP 位姿组合；不支持的值会返回 IK 错误，不会被当作 `null`。
