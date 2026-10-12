@@ -9,3 +9,4 @@ public/robot/ur_description/
 **/AGENTS.md
 __pycache__/
 *.pyc
+/server/logs/inference-actions.csv
